@@ -28,9 +28,11 @@
 
 ---
 
-## 三、配置 3 个 Secret（截图级）
+## 三、配置 2 个 Secret + 1 个写死密码（截图级）
 
 进入仓库 → **Settings** → 左侧 **Secrets and variables** → **Actions** → **New repository secret**。
+
+> 说明：RDP 密码**不走 Secret**，直接写死在 `.github/workflows/windows-rdp.yml` 的 `env:` 里（当前值 `Rdp@2026#Nvd`）。只有下面 2 个走 Secret。
 
 ### 1. `TAILSCALE_AUTHKEY`
 
@@ -38,11 +40,14 @@
 2. 勾选 **Reusable**、**Ephemeral**，Expiration 选 **90 days**
 3. 复制生成的 `tskey-auth-...`，填入 Secret
 
-### 2. `RDP_PASSWORD`
+### 2. 密码与用户名（写死在 workflow，无需配 Secret）
 
-自己设一个强密码（远程桌面登录用），填入 Secret。
+打开 `.github/workflows/windows-rdp.yml`，改顶部 `env:` 两行即可：
 
-> 可选：在 **Variables** 里加 `RDP_USERNAME`，不改则默认 `NvdAdmin`。
+- `RDP_USERNAME`：默认 `NvdAdmin`
+- `RDP_PASSWORD`：默认 `Rdp@2026#Nvd`（改时**务必保留两侧引号**，`#` 在 YAML 里敏感）
+
+改完提交推送，不需要任何 Secret。
 
 ### 3. `ALIST_139_AUTHORIZATION`（关键，约 15 天过期）
 
@@ -73,7 +78,7 @@
 
 1. **前提**：本地电脑已安装 Tailscale 并登录**同一账号**
 2. `Win + R` → `mstsc` → 计算机填 **Tailscale IP** → 连接
-3. 用户名 `NvdAdmin`（或你设的 `RDP_USERNAME`），密码为你设的 `RDP_PASSWORD`
+3. 用户名 `NvdAdmin`，密码为 workflow 里写死的 `RDP_PASSWORD`（默认 `Rdp@2026#Nvd`）
 4. 证书警告点「是/继续」
 
 ### 4. 数据在哪里
@@ -140,4 +145,4 @@ git remote add origin https://github.com/<你的用户名>/<仓库名>.git
 git push -u origin main
 ```
 
-推送后别忘了在 **Settings → Secrets and variables → Actions** 配置那 3 个 Secret。
+推送后别忘了在 **Settings → Secrets and variables → Actions** 配置那 **2 个 Secret**（`TAILSCALE_AUTHKEY`、`ALIST_139_AUTHORIZATION`）。RDP 密码写死在 workflow 里，无需配。
