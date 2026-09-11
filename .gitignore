@@ -1,0 +1,12 @@
+# 本地临时文件
+*.log
+*.tmp
+*.zip
+*.msi
+.DS_Store
+Thumbs.db
+
+# 任何可能含密钥的本地文件
+.env
+*.secret
+rclone.conf

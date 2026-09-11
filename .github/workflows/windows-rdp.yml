@@ -1,0 +1,101 @@
+name: Windows Cloud RDP
+
+# 仅手动触发。刻意不加 schedule（定时任务是 GitHub 风控首要特征）。
+on:
+  workflow_dispatch:
+
+# 防止重复触发堆积
+concurrency:
+  group: cloud-rdp
+  cancel-in-progress: false
+
+# 账号密码直接写死（私有仓库内可见；按用户要求不走 Secret）
+env:
+  RDP_USERNAME: NvdAdmin
+  RDP_PASSWORD: "Rdp@2026#Nvd"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360          # GitHub 免费账户单 Job 上限 6 小时
+
+    steps:
+      - name: 0. 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 1. 开启远程桌面 + 放行防火墙
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+
+      - name: 2. 创建管理员账号
+        shell: powershell
+        run: |
+          $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          "RDP_USER=$env:RDP_USERNAME" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+
+      - name: 3. 安装并连接 Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) { throw "缺少 Secret: TAILSCALE_AUTHKEY" }
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "C:\tailscale.msi" -UseBasicParsing
+          Start-Process msiexec -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
+          Start-Sleep -Seconds 5
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server"
+          Start-Sleep -Seconds 8
+          $ts_ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
+          "TS_IP=$ts_ip" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+
+      - name: 4. 生成 AList 管理员密码（本机专用）
+        shell: powershell
+        run: |
+          $chars = (48..57) + (65..90) + (97..122)
+          $pass = -join ($chars | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+          "ALIST_ADMIN_PASS=$pass" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+
+      - name: 5. 安装并配置 rclone
+        shell: powershell
+        run: .\scripts\setup-rclone.ps1
+
+      - name: 6. 部署 AList 并挂载 139 云盘
+        shell: powershell
+        env:
+          ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
+        run: .\scripts\setup-alist.ps1
+
+      - name: 7. 从 139 云盘拉取数据
+        shell: powershell
+        run: .\scripts\sync-down.ps1
+
+      - name: 8. 打印连接信息
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "==========================================" -ForegroundColor Green
+          Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
+          Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
+          Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
+          Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
+          Write-Host "  Data         : C:\data  (已与 139 云盘同步)" -ForegroundColor Yellow
+          Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
+          Write-Host "==========================================" -ForegroundColor Green
+
+      - name: 9. 保活 + 每 10 分钟同步一次（约 5 小时 50 分）
+        shell: powershell
+        run: |
+          for ($i = 1; $i -le 350; $i++) {
+              Start-Sleep -Seconds 60
+              Write-Host "[$i/350] server running..."
+              if ($i % 10 -eq 0) { & .\scripts\sync-up.ps1 }
+          }
+
+      - name: 10. 收尾全量同步到 139 云盘
+        if: always()
+        shell: powershell
+        run: .\scripts\sync-up.ps1
