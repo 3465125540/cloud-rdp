@@ -40,14 +40,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 1. 开启远程桌面 + 放行防火墙
-        shell: powershell
+        shell: pwsh
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
 
       - name: 2. 创建管理员账号 + 桌面快捷方式
-        shell: powershell
+        shell: pwsh
         run: |
           $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction SilentlyContinue
@@ -65,7 +65,7 @@ jobs:
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
 
       - name: 3. 安装并连接 Tailscale
-        shell: powershell
+        shell: pwsh
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
@@ -79,28 +79,28 @@ jobs:
           "TS_IP=$ts_ip" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: 4. 生成 AList 管理员密码（本机专用）
-        shell: powershell
+        shell: pwsh
         run: |
           $chars = (48..57) + (65..90) + (97..122)
           $pass = -join ($chars | Get-Random -Count 24 | ForEach-Object { [char]$_ })
           "ALIST_ADMIN_PASS=$pass" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: 5. 安装并配置 rclone
-        shell: powershell
+        shell: pwsh
         run: .\scripts\setup-rclone.ps1
 
       - name: 6. 部署 AList 并挂载 139 云盘
-        shell: powershell
+        shell: pwsh
         env:
           ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
         run: .\scripts\setup-alist.ps1
 
       - name: 7. 从 139 云盘拉取数据
-        shell: powershell
+        shell: pwsh
         run: .\scripts\sync-down.ps1
 
       - name: 8. 估算额度 + 打印连接信息
-        shell: powershell
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_BILLING_TOKEN: ${{ secrets.GH_BILLING_TOKEN }}
@@ -137,7 +137,7 @@ jobs:
           Write-Host "==========================================" -ForegroundColor Green
 
       - name: 9. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
-        shell: powershell
+        shell: pwsh
         run: |
           $now = (Get-Date).ToUniversalTime()
           if ($env:IS_MANUAL -eq "true") {
@@ -169,5 +169,5 @@ jobs:
 
       - name: 10. 收尾全量同步到 139 云盘
         if: always()
-        shell: powershell
+        shell: pwsh
         run: .\scripts\sync-up.ps1
