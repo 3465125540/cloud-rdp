@@ -133,15 +133,23 @@
 
 **抓取时机**：开机后基线、保活期间**每 60 分钟**、**关机前全量**（`if: always()`，取消也会跑）。
 
+**推送后自校验**：`rclone sync` 成功后会回读远端（`rclone size`），日志打印
+`远端校验：N 个文件 / X MB（本地 M 个 / Y MB）` 并输出 `SNAPSHOT_VERIFY` ——
+这是「快照确实落到 139」的日志证据，不用另外登录云盘确认。
+
 **抓什么**（全部可在 `scripts/snapshot-config.json` 里改，无需改脚本）：
 
 | 类别 | 内容 |
 |------|------|
-| 文件 | `C:\tools`、`C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig` 等 |
+| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig` 等 |
 | 注册表 | RDP 用户的 **HKCU** 子键（`Software`、`Control Panel\Desktop/Colors/International/Mouse/Keyboard`、`Environment`、`Console`、`Explorer\Advanced`）+ 机器级 `TimeZoneInformation`、`Session Manager\Environment`、`Nls\Language/Locale` |
 | 软件清单 | `winget export` + 注册表 Uninstall 扫描（**清单**，不是二进制；重装靠 winget） |
 | 系统设置 | 时区、区域、电源方案、壁纸（壁纸文件一并带走） |
 | 快捷方式 | 公共桌面 / 用户桌面 / 用户开始菜单（`*.lnk` / `*.url`） |
+
+> ⚠️ **不要加入 `C:\tools`** —— 那是 GitHub runner 镜像**自带**的工具目录（Apache24 / nginx-* 等，
+> 实测 **240 MB / 1087 文件**），不是用户数据。备份它纯浪费带宽（一次推送多花 ~10 分钟），
+> 还原时还会用旧版覆盖 runner 自带的版本。`snapshot-config.json` 里已注明。
 
 **还原时机（关键设计）**：分两个作用域，绕开 Windows「用户配置文件跨机还原」的老大难：
 
