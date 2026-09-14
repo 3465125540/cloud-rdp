@@ -1,10 +1,14 @@
 ﻿<#
 .SYNOPSIS
-  开机时从 139 云盘自动恢复数据到本地 C:\data。
+  开机时从 139 云盘自动恢复数据到本地数据目录。
 .NOTES
   依赖 setup-rclone.ps1 已配置好 remote: alist
-  远端路径: alist:/cloudrdp/CloudRDP
-  本地路径: C:\data
+  远端路径: alist:/cloudrdp/AI文件库/CloudRDP
+  本地路径: D:\a\cloud-rdp
+
+  ⚠️ 本地数据目录是 Actions 工作区的父目录，仓库 checkout 在其下（D:\a\cloud-rdp\cloud-rdp），
+     必须排除，避免远端同名目录反向覆盖仓库。排除规则见下方。
+
   行为：
     - 远端目录不存在（首次运行）→ 视为正常，本地留空
     - 鉴权/网络失败 → 重试 MaxAttempts 次，仍失败则写入 _RESTORE_FAILED.txt 标记
@@ -13,14 +17,18 @@
 #>
 
 param(
-    [string]$Remote = "alist:/cloudrdp/CloudRDP",
-    [string]$Local  = "C:\data",
+    [string]$RemoteBase = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE } else { "alist:/cloudrdp/AI文件库" }),
+    [string]$Remote,                                   # 可选：直接覆盖完整远端路径
+    [string]$Local  = $(if ($env:CLOUDRDP_DATA_DIR) { $env:CLOUDRDP_DATA_DIR } else { "D:\a\cloud-rdp" }),
     [int]$MaxAttempts = 3,
-    [int]$RetryDelaySec = 8
+    [int]$RetryDelaySec = 8,
+    [string[]]$Exclude = @()
 )
 
 $ErrorActionPreference = "Continue"
 $RcloneExe = "C:\rclone\rclone.exe"
+
+if ([string]::IsNullOrWhiteSpace($Remote)) { $Remote = $RemoteBase.TrimEnd('/') + "/CloudRDP" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -28,21 +36,50 @@ function Set-GhEnv([string]$kv) {
 
 if (-not (Test-Path $RcloneExe)) { Write-Warning "[sync-down] 未找到 rclone，跳过恢复"; exit 0 }
 
+# ---------- 计算排除规则（与 sync-up 保持一致） ----------
+$excludeList = @("/.git/**", "/_temp/**", "/cloud-rdp/**")
+$ws = $env:GITHUB_WORKSPACE
+if (-not [string]::IsNullOrWhiteSpace($ws)) {
+    $wsFull    = $ws.TrimEnd('\')
+    $localFull = $Local.TrimEnd('\')
+    if ($wsFull.Length -gt $localFull.Length -and $wsFull.ToLower().StartsWith($localFull.ToLower())) {
+        $rel = $wsFull.Substring($localFull.Length).TrimStart('\') -replace '\\', '/'
+        if ($rel) { $excludeList += ("/" + $rel + "/**") }
+    }
+}
+if ($Exclude) { $excludeList += $Exclude }
+$excludeList = @($excludeList | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
 New-Item -ItemType Directory -Force -Path $Local | Out-Null
 $marker = Join-Path $Local "_RESTORE_FAILED.txt"
 if (Test-Path $marker) { Remove-Item $marker -Force -ErrorAction SilentlyContinue }
 
+# ---------- 预检：139 侧「AI文件库」是否存在（不自动创建，避免建出影子目录） ----------
+$probe = & $RcloneExe lsf $RemoteBase --max-depth 1 --timeout 0 --contimeout 0 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "[sync-down] 预检未通过：远端 $RemoteBase 不存在或不可访问"
+    Write-Warning "  → 请在 139 云盘根目录下建好「AI文件库」文件夹后重跑；"
+    Write-Warning "  → 或改用「根 ID 法」：把 AList 存储的 root_folder_id 设为该文件夹 ID（环境变量 ALIST_139_ROOT_FOLDER_ID），远端路径即可回归 ASCII。"
+    Write-Warning "  （继续尝试恢复，失败会走重试逻辑）"
+}
+
 Write-Host "[sync-down] 开始恢复: $Remote  ->  $Local"
+Write-Host ("[sync-down] 排除: " + ($excludeList -join ' '))
 
 $code     = 0
 $restored = $false
 for ($i = 1; $i -le $MaxAttempts; $i++) {
-    & $RcloneExe copy $Remote $Local `
-        --update `
-        --transfers 4 --checkers 8 `
-        --timeout 0 --contimeout 0 `
-        --retries 3 --low-level-retries 5 `
-        --stats-one-line -v
+    $rcArgs = @(
+        "copy", $Remote, $Local,
+        "--update",
+        "--transfers", "4", "--checkers", "8",
+        "--timeout", "0", "--contimeout", "0",
+        "--retries", "3", "--low-level-retries", "5",
+        "--stats-one-line", "-v"
+    )
+    foreach ($ex in $excludeList) { $rcArgs += @("--exclude", $ex) }
+
+    & $RcloneExe @rcArgs
     $code = $LASTEXITCODE
     if ($code -eq 0) { $restored = $true; break }
     if ($code -eq 3 -or $code -eq 4) { break }          # 远端目录不存在 —— 首次运行正常，不重试

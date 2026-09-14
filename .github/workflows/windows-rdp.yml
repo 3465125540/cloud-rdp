@@ -8,6 +8,14 @@ on:
         description: '保活时长（分钟）。默认 350；快速测试可填 5'
         required: false
         default: '350'
+      install_apps:
+        description: '还原后是否后台自动重装软件（true/false）'
+        required: false
+        default: 'true'
+      migrate_139:
+        description: '是否把 139 老路径(/CloudRDP,/_snapshot)迁移到 AI文件库 下（true/false）'
+        required: false
+        default: 'false'
   schedule:
     # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
     - cron: '30 0 * * *'
@@ -23,9 +31,21 @@ concurrency:
 env:
   RDP_USERNAME: NvdAdmin
   RDP_PASSWORD: "Rdp@2026#Nvd"
+  # ---------- 路径常量（唯一事实源，脚本以 $env: 读取并各有内置兜底）----------
+  # 数据目录：⚠️ 它是 Actions 工作区的父目录，仓库 checkout 就在它下面（D:\a\cloud-rdp\cloud-rdp），
+  #           sync-up/sync-down 会自动排除该子目录，避免把仓库传上云盘。
+  CLOUDRDP_DATA_DIR: 'D:\a\cloud-rdp'
+  # 139 侧根：数据 = $base/CloudRDP，快照 = $base/_snapshot
+  CLOUDRDP_REMOTE_BASE: 'alist:/cloudrdp/AI文件库'
+  # 可移动程序暂存目录（位于数据目录内，随数据管线高频同步）
+  CLOUDRDP_PORTABLE_DIR: 'D:\a\cloud-rdp\_portable'
+  # 本地快照暂存（保持 C 盘：① 脚本护栏要求含 _snapshot ② 放数据目录会被 sync-up 二次上传）
+  CLOUDRDP_SNAPSHOT_STAGE: 'C:\_snapshot'
   # 手动触发 = 跑满 5h50m（可用 duration_minutes 覆盖）；定时触发 = 跑到所在窗口结束
   IS_MANUAL: "${{ github.event_name == 'workflow_dispatch' }}"
   INPUT_DURATION: "${{ inputs.duration_minutes }}"
+  INPUT_INSTALL_APPS: "${{ inputs.install_apps }}"
+  INPUT_MIGRATE_139: "${{ inputs.migrate_139 }}"
 
 jobs:
   build:
@@ -46,22 +66,24 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
 
-      - name: 2. 创建管理员账号 + 桌面快捷方式
+      - name: 2. 创建管理员账号 + 数据目录 + 桌面快捷方式
         shell: pwsh
         run: |
           $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
           "RDP_USER=$env:RDP_USERNAME" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
-          # 公共桌面放一个指向同步目录的快捷方式，避免把文件存到不会被同步的地方
+          # 数据目录 + 可移动程序暂存目录（公共桌面放快捷方式，避免把文件存到不会被同步的地方）
           try {
-            New-Item -ItemType Directory -Force -Path "C:\data" | Out-Null
+            $dataDir = $env:CLOUDRDP_DATA_DIR
+            New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+            New-Item -ItemType Directory -Force -Path $env:CLOUDRDP_PORTABLE_DIR | Out-Null
             $ws = New-Object -ComObject WScript.Shell
             $lnk = $ws.CreateShortcut("$env:PUBLIC\Desktop\CloudData.lnk")
-            $lnk.TargetPath = "C:\data"
+            $lnk.TargetPath = $dataDir
             $lnk.Description = "与 139 云盘自动同步的目录"
             $lnk.Save()
-            Write-Host "已创建桌面快捷方式: CloudData -> C:\data"
+            Write-Host "已创建桌面快捷方式: CloudData -> $dataDir"
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
 
       - name: 3. 安装并连接 Tailscale
@@ -95,15 +117,23 @@ jobs:
           ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
         run: .\scripts\setup-alist.ps1
 
-      - name: 7. 从 139 云盘拉取数据
+      - name: 7. （可选）迁移 139 老路径到 AI文件库
+        shell: pwsh
+        run: .\scripts\migrate-139.ps1
+
+      - name: 8. 从 139 云盘拉取数据
         shell: pwsh
         run: .\scripts\sync-down.ps1
 
-      - name: 8. 还原整机快照（文件 / 注册表 / 系统设置）
+      - name: 9. 预还原（校验 → 规划 → 准备 → 驱动全量还原）
         shell: pwsh
-        run: .\scripts\restore-snapshot.ps1 -Pull
+        run: .\scripts\pre-restore.ps1 -Pull
 
-      - name: 9. 估算额度 + 打印连接信息
+      - name: 10. 后台重装软件（异步，不阻塞连接）
+        shell: pwsh
+        run: .\scripts\reinstall-apps.ps1 -Background
+
+      - name: 11. 估算额度 + 打印连接信息
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -120,9 +150,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }
           $rc = "DarkGray"
           if ($rs -eq "OK") { $rc = "Green" } elseif ($rs -eq "FAILED") { $rc = "Red" }
-          Write-Host "  数据恢复     : $rs   (C:\data 已与 139 云盘同步)" -ForegroundColor $rc
+          $dataDir = $env:CLOUDRDP_DATA_DIR
+          Write-Host "  数据恢复     : $rs   ($dataDir 已与 139 云盘同步)" -ForegroundColor $rc
           if ($rs -eq "FAILED") {
-            Write-Host "  !! 恢复失败：139 Authorization 可能已过期，C:\data 当前为空，别在上面存重要东西 !!" -ForegroundColor Red
+            Write-Host "  !! 恢复失败：139 Authorization 可能已过期，$dataDir 当前为空，别在上面存重要东西 !!" -ForegroundColor Red
           }
           $ss = $env:SNAPSHOT_STATUS
           if ([string]::IsNullOrWhiteSpace($ss)) { $ss = "UNKNOWN" }
@@ -137,6 +168,15 @@ jobs:
           }
           if ($ss -eq "FAILED") {
             Write-Host "  !! 整机还原失败：本次是全新环境，之前装的软件/设置不会自动回来 !!" -ForegroundColor Red
+          }
+          $pv = $env:SNAPSHOT_PREVALIDATE
+          if (-not [string]::IsNullOrWhiteSpace($pv)) {
+            Write-Host "  预还原校验   : $pv" -ForegroundColor DarkGray
+          }
+          $ap = $env:APPS_REINSTALL_STATE
+          if (-not [string]::IsNullOrWhiteSpace($ap)) {
+            Write-Host "  软件重装     : $ap" -ForegroundColor DarkGray
+            Write-Host "                 日志: C:\_snapshot\_logs\apps-reinstall.log" -ForegroundColor DarkGray
           }
           $qp = $env:QUOTA_LEFT_PCT
           if (-not [string]::IsNullOrWhiteSpace($qp)) {
@@ -154,7 +194,7 @@ jobs:
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
-      - name: 10. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
+      - name: 12. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
         shell: pwsh
         run: |
           $now = (Get-Date).ToUniversalTime()
@@ -186,7 +226,7 @@ jobs:
           }
           Write-Host "[keepalive] 已到窗口结束时间，开始收尾"
 
-      - name: 11. 收尾：全量同步数据 + 抓取整机快照
+      - name: 13. 收尾：全量同步数据 + 抓取整机快照
         if: always()
         shell: pwsh
         run: |

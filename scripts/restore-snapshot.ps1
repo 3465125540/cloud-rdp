@@ -26,8 +26,8 @@
 param(
     [ValidateSet("machine", "user")]
     [string]$Scope      = "machine",
-    [string]$Stage      = "C:\_snapshot",
-    [string]$Remote     = "alist:/cloudrdp/_snapshot",
+    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } else { "C:\_snapshot" }),
+    [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
     [switch]$Pull,
@@ -38,6 +38,12 @@ $ErrorActionPreference = "Continue"
 $RcloneExe     = "C:\rclone\rclone.exe"
 $UserHiveToken = "__RDPUSER__"
 $TaskName      = "CloudRDP-RestoreUser"
+$PortableDir   = $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR } else { "D:\a\cloud-rdp\_portable" })
+
+# 可移动程序共享库（识别 / 搬运 / 还原）
+$portableLib = Join-Path $PSScriptRoot "portable-lib.ps1"
+if (Test-Path -LiteralPath $portableLib) { . $portableLib }
+else { Write-Warning "[restore] 未找到 portable-lib.ps1，可移动程序还原不可用" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -55,6 +61,20 @@ function Get-Cfg($obj, $name, $fallback) {
     if ($null -eq $p -or $null -eq $p.Value) { return $fallback }
     return $p.Value
 }
+
+# ---------- 首次真正加载 snapshot-config.json，按开关决定还原哪些类别 ----------
+$cfg = $null
+if (Test-Path -LiteralPath $ConfigPath) {
+    try { $cfg = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { Warn "配置解析失败（$ConfigPath）：$_，全部按默认开启处理" }
+} else {
+    Warn "未找到配置 $ConfigPath，全部按默认开启处理"
+}
+$restoreCfg  = Get-Cfg $cfg 'restore' $null
+$doFiles     = [bool](Get-Cfg $restoreCfg 'files'     $true)
+$doRegistry  = [bool](Get-Cfg $restoreCfg 'registry'  $true)
+$doSystem    = [bool](Get-Cfg $restoreCfg 'system'    $true)
+$doShortcuts = [bool](Get-Cfg $restoreCfg 'shortcuts' $true)
 
 function Get-AbsFromMirror {
     param([string]$Rel)
@@ -124,53 +144,96 @@ function Invoke-MachineRestore {
 
     # ---------- 1. 机器级文件（排除 C:\Users\<RdpUser>\... ，那部分交给登录任务） ----------
     $userPrefix = ("C\Users\" + $RdpUser).ToLower()
-    foreach ($e in @($mf.files.entries)) {
-        $rel = [string]$e.mirror
-        if ([string]::IsNullOrWhiteSpace($rel)) { continue }
-        if ($rel.ToLower().StartsWith($userPrefix)) { continue }   # 个人目录 → 留给 user 作用域
+    if ($doFiles) {
+        foreach ($e in @($mf.files.entries)) {
+            $rel = [string]$e.mirror
+            if ([string]::IsNullOrWhiteSpace($rel)) { continue }
+            if ($rel.ToLower().StartsWith($userPrefix)) { continue }   # 个人目录 → 留给 user 作用域
 
-        $src = Join-Path (Join-Path $Stage "files") $rel
-        $dst = Get-AbsFromMirror -Rel $rel
-        $code = Invoke-RobocopyRestore -Src $src -Dst $dst
-        if ($code -ge 8) { $problems.Add("file:$rel"); Warn "还原失败（robocopy $code）：$rel" }
-        else { $restored++; Say "  还原 $rel  ->  $dst" }
-    }
+            $src = Join-Path (Join-Path $Stage "files") $rel
+            $dst = Get-AbsFromMirror -Rel $rel
+            $code = Invoke-RobocopyRestore -Src $src -Dst $dst
+            if ($code -ge 8) { $problems.Add("file:$rel"); Warn "还原失败（robocopy $code）：$rel" }
+            else { $restored++; Say "  还原 $rel  ->  $dst" }
+        }
+    } else { Say "  文件还原已关闭（restore.files=false）" }
 
     # ---------- 2. 机器级注册表 ----------
-    $regDir = Join-Path $Stage "registry\machine"
-    if (Test-Path -LiteralPath $regDir) {
-        foreach ($f in @(Get-ChildItem -LiteralPath $regDir -Filter *.reg -File -ErrorAction SilentlyContinue)) {
-            & reg.exe import "$($f.FullName)" 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) { Say "  导入注册表 $($f.Name)" }
-            else { Warn "注册表导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
-        }
-    }
-
-    # ---------- 3. 系统设置 ----------
-    $sysFile = Join-Path $Stage "system\system.json"
-    if (Test-Path -LiteralPath $sysFile) {
-        $sys = $null
-        try { $sys = Get-Content -LiteralPath $sysFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
-
-        if ($sys -and $sys.timezoneId) {
-            try { Set-TimeZone -Id $sys.timezoneId -ErrorAction Stop; Say "  时区 -> $($sys.timezoneId)" }
-            catch { Warn "时区设置失败：$($sys.timezoneId)（$_）"; $problems.Add("timezone") }
-        }
-        if ($sys -and $sys.powerPlan) {
-            $g = [regex]::Match([string]$sys.powerPlan, '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
-            if ($g.Success) {
-                & powercfg.exe /setactive $g.Groups[1].Value 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) { Say "  电源方案 -> $($g.Groups[1].Value)" }
-                else { Warn "电源方案设置失败（该方案可能在全新镜像中不存在）" }
+    if ($doRegistry) {
+        $regDir = Join-Path $Stage "registry\machine"
+        if (Test-Path -LiteralPath $regDir) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $regDir -Filter *.reg -File -ErrorAction SilentlyContinue)) {
+                & reg.exe import "$($f.FullName)" 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) { Say "  导入注册表 $($f.Name)" }
+                else { Warn "注册表导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
             }
         }
-    }
+    } else { Say "  注册表还原已关闭（restore.registry=false）" }
+
+    # ---------- 3. 系统设置（时区 / 电源 / 防火墙 / Defender 排除） ----------
+    if ($doSystem) {
+        $sysFile = Join-Path $Stage "system\system.json"
+        if (Test-Path -LiteralPath $sysFile) {
+            $sys = $null
+            try { $sys = Get-Content -LiteralPath $sysFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+
+            if ($sys -and $sys.timezoneId) {
+                try { Set-TimeZone -Id $sys.timezoneId -ErrorAction Stop; Say "  时区 -> $($sys.timezoneId)" }
+                catch { Warn "时区设置失败：$($sys.timezoneId)（$_）"; $problems.Add("timezone") }
+            }
+            if ($sys -and $sys.powerPlan) {
+                $g = [regex]::Match([string]$sys.powerPlan, '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
+                if ($g.Success) {
+                    & powercfg.exe /setactive $g.Groups[1].Value 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) { Say "  电源方案 -> $($g.Groups[1].Value)" }
+                    else { Warn "电源方案设置失败（该方案可能在全新镜像中不存在）" }
+                }
+            }
+            # 防火墙规则（快照里导出的是 .wfw）
+            if ($sys -and $sys.firewallExport) {
+                $fwFile = Join-Path $Stage (([string]$sys.firewallExport) -replace '/', '\')
+                if (Test-Path -LiteralPath $fwFile) {
+                    & netsh.exe advfirewall import "$fwFile" 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) { Say "  防火墙规则已导入" }
+                    else { Warn "防火墙规则导入失败（可忽略）"; $problems.Add("firewall") }
+                }
+            }
+            # Defender 排除项
+            if ($sys -and $sys.defenderExclusionPath) {
+                try {
+                    $exPaths = @($sys.defenderExclusionPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                    if ($exPaths.Count -gt 0) {
+                        Add-MpPreference -ExclusionPath $exPaths -ErrorAction SilentlyContinue
+                        Say ("  Defender 排除路径已恢复：{0} 个" -f $exPaths.Count)
+                    }
+                    $exProcs = @($sys.defenderExclusionProcess) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                    if ($exProcs.Count -gt 0) { Add-MpPreference -ExclusionProcess $exProcs -ErrorAction SilentlyContinue }
+                } catch { Warn "Defender 排除项恢复失败（可忽略）：$_" }
+            }
+        }
+    } else { Say "  系统设置还原已关闭（restore.system=false）" }
 
     # ---------- 4. 公共桌面快捷方式 ----------
-    $pubSc = Join-Path $Stage "shortcuts\public-desktop"
-    if (Test-Path -LiteralPath $pubSc) {
-        $code = Invoke-RobocopyRestore -Src $pubSc -Dst "$env:PUBLIC\Desktop"
-        if ($code -lt 8) { Say "  公共桌面快捷方式已还原" }
+    if ($doShortcuts) {
+        $pubSc = Join-Path $Stage "shortcuts\public-desktop"
+        if (Test-Path -LiteralPath $pubSc) {
+            $code = Invoke-RobocopyRestore -Src $pubSc -Dst "$env:PUBLIC\Desktop"
+            if ($code -lt 8) { Say "  公共桌面快捷方式已还原" }
+        }
+    } else { Say "  快捷方式还原已关闭（restore.shortcuts=false）" }
+
+    # ---------- 4b. 可移动程序（机器级：只还原「不在用户目录下」的） ----------
+    $pmPath = Join-Path $Stage "apps\portable.json"
+    if (Test-Path -LiteralPath $pmPath) {
+        if (Get-Command Restore-PortableApps -ErrorAction SilentlyContinue) {
+            $pr = Restore-PortableApps -ManifestPath $pmPath -UserPrefix ("C:\Users\" + $RdpUser) -InvertScope
+            if ($pr.skipped) {
+                Say "  可移动程序清单不可用，跳过"
+            } else {
+                Say ("  可移动程序（机器级）已还原：{0} 个" -f $pr.restored)
+                foreach ($pb in @($pr.problems)) { $problems.Add("portable:$pb") }
+            }
+        } else { Warn "未加载 portable-lib.ps1，跳可移动程序还原" }
     }
 
     # ---------- 5. 注册「首次登录还原个人配置」计划任务 ----------
@@ -243,36 +306,54 @@ function Invoke-UserRestore {
 
     # ---------- 1. 个人目录文件 ----------
     $userPrefix = ("C\Users\" + $RdpUser).ToLower()
-    foreach ($e in @($mf.files.entries)) {
-        $rel = [string]$e.mirror
-        if ([string]::IsNullOrWhiteSpace($rel)) { continue }
-        if (-not $rel.ToLower().StartsWith($userPrefix)) { continue }
+    if ($doFiles) {
+        foreach ($e in @($mf.files.entries)) {
+            $rel = [string]$e.mirror
+            if ([string]::IsNullOrWhiteSpace($rel)) { continue }
+            if (-not $rel.ToLower().StartsWith($userPrefix)) { continue }
 
-        $src = Join-Path (Join-Path $Stage "files") $rel
-        $dst = Get-AbsFromMirror -Rel $rel
-        $code = Invoke-RobocopyRestore -Src $src -Dst $dst
-        if ($code -ge 8) { $problems.Add("file:$rel"); Warn "还原失败：$rel" }
-        else { $restored++; Say "  还原 $rel" }
-    }
+            $src = Join-Path (Join-Path $Stage "files") $rel
+            $dst = Get-AbsFromMirror -Rel $rel
+            $code = Invoke-RobocopyRestore -Src $src -Dst $dst
+            if ($code -ge 8) { $problems.Add("file:$rel"); Warn "还原失败：$rel" }
+            else { $restored++; Say "  还原 $rel" }
+        }
+    } else { Say "  文件还原已关闭（restore.files=false）" }
 
     # ---------- 2. HKCU 注册表 ----------
-    $regDir = Join-Path $Stage "registry\user"
-    if (Test-Path -LiteralPath $regDir) {
-        foreach ($f in @(Get-ChildItem -LiteralPath $regDir -Filter *.reg -File -ErrorAction SilentlyContinue)) {
-            if (Import-UserRegFile -RegFile $f.FullName) { Say "  导入 HKCU 注册表 $($f.Name)" }
-            else { Warn "HKCU 导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
+    if ($doRegistry) {
+        $regDir = Join-Path $Stage "registry\user"
+        if (Test-Path -LiteralPath $regDir) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $regDir -Filter *.reg -File -ErrorAction SilentlyContinue)) {
+                if (Import-UserRegFile -RegFile $f.FullName) { Say "  导入 HKCU 注册表 $($f.Name)" }
+                else { Warn "HKCU 导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
+            }
         }
-    }
+    } else { Say "  HKCU 还原已关闭（restore.registry=false）" }
 
     # ---------- 3. 个人快捷方式 ----------
-    foreach ($pair in @(
-        @{ src = "shortcuts\user-desktop";    dst = (Join-Path $env:USERPROFILE "Desktop") },
-        @{ src = "shortcuts\user-startmenu";  dst = (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu") }
-    )) {
-        $s = Join-Path $Stage $pair.src
-        if (Test-Path -LiteralPath $s) {
-            $code = Invoke-RobocopyRestore -Src $s -Dst $pair.dst
-            if ($code -lt 8) { Say "  快捷方式已还原 -> $($pair.dst)" }
+    if ($doShortcuts) {
+        foreach ($pair in @(
+            @{ src = "shortcuts\user-desktop";    dst = (Join-Path $env:USERPROFILE "Desktop") },
+            @{ src = "shortcuts\user-startmenu";  dst = (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu") }
+        )) {
+            $s = Join-Path $Stage $pair.src
+            if (Test-Path -LiteralPath $s) {
+                $code = Invoke-RobocopyRestore -Src $s -Dst $pair.dst
+                if ($code -lt 8) { Say "  快捷方式已还原 -> $($pair.dst)" }
+            }
+        }
+    } else { Say "  快捷方式还原已关闭（restore.shortcuts=false）" }
+
+    # ---------- 3b. 可移动程序（用户级：只还原「在用户目录下」的） ----------
+    $pmPath = Join-Path $Stage "apps\portable.json"
+    if (Test-Path -LiteralPath $pmPath) {
+        if (Get-Command Restore-PortableApps -ErrorAction SilentlyContinue) {
+            $pr = Restore-PortableApps -ManifestPath $pmPath -UserPrefix $env:USERPROFILE
+            if (-not $pr.skipped) {
+                Say ("  可移动程序（用户级）已还原：{0} 个" -f $pr.restored)
+                foreach ($pb in @($pr.problems)) { $problems.Add("portable:$pb") }
+            }
         }
     }
 

@@ -36,8 +36,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Stage      = "C:\_snapshot",
-    [string]$Remote     = "alist:/cloudrdp/_snapshot",
+    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } else { "C:\_snapshot" }),
+    [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
     [switch]$Push,
@@ -46,8 +46,14 @@ param(
 
 $ErrorActionPreference = "Continue"
 $RcloneExe       = "C:\rclone\rclone.exe"
-$SnapshotVersion = 1
+$SnapshotVersion = 2
 $UserHiveToken   = "__RDPUSER__"     # 归一化后的 HKCU 占位符，还原时按当前 SID 替换
+$PortableDir     = $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR } else { "D:\a\cloud-rdp\_portable" })
+
+# 可移动程序共享库（识别 / 搬运 / 还原）
+$portableLib = Join-Path $PSScriptRoot "portable-lib.ps1"
+if (Test-Path -LiteralPath $portableLib) { . $portableLib }
+else { Write-Warning "[snapshot] 未找到 portable-lib.ps1，可移动程序功能不可用" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -258,7 +264,7 @@ foreach ($raw in $dirs) {
     $totalBytes += $got.Bytes
     $totalFiles += $got.Files
     $fileEntries.Add([pscustomobject]@{
-        source = $src; mirror = $rel; files = $got.Files; bytes = $got.Bytes; robocopy = $code
+        source = $src; originalPath = $src; mirror = $rel; files = $got.Files; bytes = $got.Bytes; robocopy = $code
     })
     Say ("  文件 {0}  ->  {1} 个文件 / {2:N2} MB" -f $src, $got.Files, ($got.Bytes / 1MB))
 }
@@ -288,13 +294,26 @@ foreach ($k in @(Get-Cfg $cfg.registry 'machineKeys' @())) {
 
 # ---------------------------------------------------------------- 3. 已装软件清单
 
+$installedApps    = @()
+$portableCaptured = @()
+$wingetCount      = 0
+
 if (-not $Quick) {
     if ([bool](Get-Cfg $cfg.apps 'wingetExport' $true)) {
         $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
         if ($wg) {
             $out = Join-Path $Stage "apps\winget-export.json"
             & winget.exe export -o "$out" --include-versions --accept-source-agreements 2>&1 | Out-Null
-            if (Test-Path -LiteralPath $out) { Say "  winget 清单已导出" }
+            if (Test-Path -LiteralPath $out) {
+                Say "  winget 清单已导出"
+                try {
+                    $we = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $ids = @()
+                    foreach ($src in @($we.Sources)) { foreach ($p in @($src.Packages)) { if ($p.PackageIdentifier) { $ids += [string]$p.PackageIdentifier } } }
+                    $wingetCount = @($ids | Select-Object -Unique).Count
+                    Say ("  winget 包数：{0}" -f $wingetCount)
+                } catch { Warn "winget 清单解析失败（可忽略）" }
+            }
             else { Warn "winget export 失败（可忽略）" }
         } else { Warn "未找到 winget，跳过软件清单导出" }
     }
@@ -305,14 +324,55 @@ if (-not $Quick) {
             'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
             'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
         )
-        $apps = foreach ($p in $paths) {
-            Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
-                Where-Object { $_.DisplayName } |
-                Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString
-        }
-        $apps = @($apps | Sort-Object DisplayName -Unique)
-        $apps | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $Stage "apps\installed-apps.json") -Encoding UTF8
-        Say ("  已装软件扫描：{0} 项" -f $apps.Count)
+        $installedApps = @(
+            foreach ($p in $paths) {
+                Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DisplayName } |
+                    Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString,
+                                  WindowsInstaller, SystemComponent, ParentKeyName, ReleaseType
+            }
+        )
+        $installedApps = @($installedApps | Sort-Object DisplayName -Unique)
+        $installedApps | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $Stage "apps\installed-apps.json") -Encoding UTF8
+        Say ("  已装软件扫描：{0} 项" -f $installedApps.Count)
+    }
+}
+
+# ---------------------------------------------------------------- 3b. 可移动程序（识别 + 搬运）
+
+$portableCfg     = Get-Cfg $cfg 'portable' $null
+$portableEnabled = [bool](Get-Cfg $portableCfg 'enabled' $true)
+$portableInQuick = [bool](Get-Cfg $portableCfg 'captureInQuick' $false)
+$doPortable      = $portableEnabled -and ((-not $Quick) -or $portableInQuick)
+
+if (-not $portableEnabled) {
+    Say "  可移动程序：已关闭（portable.enabled=false）"
+}
+elseif (-not $doPortable) {
+    Say "  可移动程序：quick 模式跳过（portable.captureInQuick=false）"
+}
+elseif (-not (Get-Command Get-PortableApps -ErrorAction SilentlyContinue)) {
+    Warn "未加载 portable-lib.ps1，跳过可移动程序采集"
+}
+else {
+    $scanRoots = @(Get-Cfg $portableCfg 'scanRoots' @())
+    $blocklist = @(Get-Cfg $portableCfg 'blocklist' @())
+    $maxApp    = [int](Get-Cfg $portableCfg 'maxMBPerApp' 2048)
+    $maxTotalP = [int](Get-Cfg $portableCfg 'maxTotalMB' 8192)
+    $pMode     = [string](Get-Cfg $portableCfg 'mode' 'copy')
+
+    $cand = @(Get-PortableApps -ScanRoots $scanRoots -Blocklist $blocklist -MaxMBPerApp $maxApp -MaxTotalMB $maxTotalP)
+    Say ("  可移动程序候选：{0} 个" -f $cand.Count)
+
+    if ($cand.Count -gt 0) {
+        $res = Copy-PortableApps -Apps $cand -DestRoot $PortableDir -Mode $pMode
+        $portableCaptured = @($res.captured)
+        foreach ($pb in @($res.problems)) { $problems.Add($pb) }
+        Say ("  可移动程序已搬运：{0} 个（模式 {1}）-> {2}" -f $portableCaptured.Count, $pMode, $PortableDir)
+
+        # 三处元数据保持一致：数据目录内 / 快照内 / manifest
+        try { Write-PortableManifest -Apps $portableCaptured -Path (Join-Path $PortableDir "_manifest.json") } catch { Warn "写便携清单(数据目录)失败：$_" }
+        try { Write-PortableManifest -Apps $portableCaptured -Path (Join-Path $Stage "apps\portable.json") } catch { Warn "写便携清单(快照)失败：$_" }
     }
 }
 
@@ -353,6 +413,24 @@ if ([bool](Get-Cfg $cfg.system 'wallpaper' $true)) {
             }
         }
     }
+}
+if ([bool](Get-Cfg $cfg.system 'firewall' $true)) {
+    try {
+        $fwOut = Join-Path $Stage "system\firewall.wfw"
+        & netsh.exe advfirewall export "$fwOut" 2>&1 | Out-Null
+        if (Test-Path -LiteralPath $fwOut) {
+            $sys.firewallExport = "system/firewall.wfw"
+            Say "  防火墙规则已导出"
+        } else { Warn "防火墙导出未生成文件（可忽略）" }
+    } catch { Warn "防火墙导出失败：$_" }
+}
+if ([bool](Get-Cfg $cfg.system 'defenderExclusions' $true)) {
+    try {
+        $pref = Get-MpPreference -ErrorAction Stop
+        $sys.defenderExclusionPath    = @($pref.ExclusionPath)
+        $sys.defenderExclusionProcess = @($pref.ExclusionProcess)
+        Say ("  Defender 排除项：路径 {0} 个 / 进程 {1} 个" -f @($pref.ExclusionPath).Count, @($pref.ExclusionProcess).Count)
+    } catch { Warn "Defender 排除项读取失败（可忽略）：$_" }
 }
 $sys.rdpUser     = $RdpUser
 $sys.hostname    = $env:COMPUTERNAME
@@ -398,6 +476,44 @@ foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json")) {
 
 $status = if ($problems.Count -eq 0) { "OK" } else { "PARTIAL" }
 
+# ---- 还原计划（v2）：每条 = 类型 / 原路径 / 存储路径 / 作用域 ----
+# 这是「还原机器设置包含原文件路径 + 程序列表」的权威载体，还原侧优先消费它。
+$userPrefix = ("C:\Users\" + $RdpUser)
+$plan = New-Object System.Collections.Generic.List[object]
+
+foreach ($e in $fileEntries) {
+    $scope = if ([string]$e.source -and ([string]$e.source).ToLower().StartsWith($userPrefix.ToLower())) { "user" } else { "machine" }
+    $plan.Add([pscustomobject]@{
+        type = "dir"; originalPath = $e.source; store = ("files/" + $e.mirror); scope = $scope
+        meta = @{ files = $e.files; bytes = $e.bytes }
+    })
+}
+foreach ($r in $regFiles) {
+    $scope = if ($r -like "registry/user/*") { "user" } else { "machine" }
+    $plan.Add([pscustomobject]@{ type = "registry"; originalPath = $r; store = $r; scope = $scope; meta = @{} })
+}
+foreach ($p in $portableCaptured) {
+    $scope = if (([string]$p.originalPath).ToLower().StartsWith($userPrefix.ToLower())) { "user" } else { "machine" }
+    $plan.Add([pscustomobject]@{
+        type = "portable"; originalPath = $p.originalPath; store = $p.storedPath; scope = $scope
+        meta = @{ displayName = $p.displayName; version = $p.version; mode = $p.mode }
+    })
+}
+if ($scCount -gt 0) {
+    $plan.Add([pscustomobject]@{ type = "shortcut"; originalPath = "$env:PUBLIC\Desktop"; store = "shortcuts/public-desktop"; scope = "machine"; meta = @{} })
+    $plan.Add([pscustomobject]@{ type = "shortcut"; originalPath = ("$userPrefix\Desktop"); store = "shortcuts/user-desktop"; scope = "user"; meta = @{} })
+}
+$plan.Add([pscustomobject]@{ type = "setting"; originalPath = ""; store = "system/system.json"; scope = "machine"; meta = @{} })
+if (Test-Path -LiteralPath (Join-Path $Stage "apps\winget-export.json")) {
+    $plan.Add([pscustomobject]@{ type = "app"; originalPath = ""; store = "apps/winget-export.json"; scope = "background"; meta = @{ count = $wingetCount } })
+}
+
+$dataDirForManifest = $(if ($env:CLOUDRDP_DATA_DIR) { $env:CLOUDRDP_DATA_DIR } else { "D:\a\cloud-rdp" })
+
+# 注意：本机 PS 5.1 下 @(<泛型List>) 会抛「参数类型不匹配」，必须用 [object[]] 转换
+$planArr      = [object[]]$plan
+$installedArr = [object[]]$installedApps
+$portableArr  = [object[]]$portableCaptured
 $manifest = [ordered]@{
     version     = $SnapshotVersion
     mode        = $mode
@@ -406,13 +522,22 @@ $manifest = [ordered]@{
     createdLocal= (Get-Date).ToString("o")
     hostname    = $env:COMPUTERNAME
     rdpUser     = $RdpUser
+    dataDir     = $dataDirForManifest
     files       = @{ entries = $fileEntries; totalFiles = $totalFiles; totalBytes = $totalBytes; skipped = $skippedDirs }
     registry    = $regFiles
     shortcuts   = $scCount
     system      = $sys
+    apps        = @{
+        wingetExport = $(if (Test-Path -LiteralPath (Join-Path $Stage "apps\winget-export.json")) { "apps/winget-export.json" } else { $null })
+        wingetCount  = $wingetCount
+        installed    = $installedArr
+        portable     = $portableArr
+    }
+    plan        = $planArr
     problems    = $problems
 }
-$manifest | ConvertTo-Json -Depth 6 | Out-File -LiteralPath (Join-Path $Stage "manifest.json") -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 8 | Out-File -LiteralPath (Join-Path $Stage "manifest.json") -Encoding UTF8
+Say ("  还原计划：{0} 项（dir/registry/portable/shortcut/setting/app）" -f $planArr.Count)
 
 $mb = [math]::Round($totalBytes / 1MB, 2)
 Say ("抓取完成：{0} 个文件 / {1} MB / 状态 {2}" -f $totalFiles, $mb, $status)

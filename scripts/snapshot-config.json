@@ -81,9 +81,32 @@
   },
 
   "apps": {
-    "_comment": "wingetExport=导出已装软件清单；uninstallScan=扫描注册表 Uninstall 键补充清单",
+    "_comment": "wingetExport=导出已装软件清单；uninstallScan=扫描注册表 Uninstall 键补充清单（含 InstallLocation）",
     "wingetExport": true,
     "uninstallScan": true
+  },
+
+  "portable": {
+    "_comment": "可移动（便携/绿色）程序：识别 → 搬运到数据目录 → 还原时按 originalPath 放回原位",
+    "_comment_mode": "copy=只拷贝，绝不改动机器（默认、最安全）；relocate=拷贝成功后把原目录换成指向副本的 junction（只留一份实体，高级用法，需要管理员）",
+    "_comment_scanRoots": "辅层扫描根：抓没有注册表记录的绿色软件",
+    "enabled": true,
+    "mode": "copy",
+    "captureInQuick": false,
+    "scanRoots": [ "C:\\apps", "D:\\apps" ],
+    "includePaths": [],
+    "excludePaths": [],
+    "maxMBPerApp": 2048,
+    "maxTotalMB": 8192,
+    "blocklist": [
+      "VC\\+\\+ .*Redistributable",
+      "\\.NET .*Runtime",
+      "Windows (SDK|App Runtime|Driver)",
+      "Microsoft Edge",
+      "WebView2",
+      "Windows Software Development Kit",
+      "Microsoft Visual"
+    ]
   },
 
   "system": {
@@ -105,12 +128,22 @@
   },
 
   "restore": {
-    "_comment": "installApps 默认关闭：winget 批量重装耗时长且易失败，需要时手动开启",
+    "_comment": "installApps=true：还原后**后台异步**用 winget 逐包重装（不阻塞连接）；可用 dispatch 输入 install_apps 临时关闭",
     "files": true,
     "registry": true,
     "system": true,
     "shortcuts": true,
-    "installApps": false,
-    "wingetIgnoreUnavailable": true
+    "installApps": true,
+    "wingetIgnoreUnavailable": true,
+    "maxPackages": 0,
+    "_comment_maxPackages": "0 = 不限；填 N 只装清单里前 N 个包，便于快速验证",
+    "_comment_preRestore": "预还原阶段的开关",
+    "preRestore": {
+      "validate": true,
+      "prepareDirs": true,
+      "recordRollback": true
+    },
+    "_comment_preCommands": "预还原钩子：正式还原前逐条执行的命令（fail-soft，失败仅告警）。例如停服务、关进程、备份当前状态。",
+    "preCommands": []
   }
 }
