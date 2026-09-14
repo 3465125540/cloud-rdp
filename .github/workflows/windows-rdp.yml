@@ -3,6 +3,11 @@ name: Windows Cloud RDP
 # 手动触发 + 定时（北京时间；GitHub cron 一律用 UTC）
 on:
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: '保活时长（分钟）。默认 350；快速测试可填 5'
+        required: false
+        default: '350'
   schedule:
     # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
     - cron: '30 0 * * *'
@@ -18,8 +23,9 @@ concurrency:
 env:
   RDP_USERNAME: NvdAdmin
   RDP_PASSWORD: "Rdp@2026#Nvd"
-  # 手动触发 = 跑满 5h50m；定时触发 = 跑到所在窗口结束（11:30 / 17:30 北京）
+  # 手动触发 = 跑满 5h50m（可用 duration_minutes 覆盖）；定时触发 = 跑到所在窗口结束
   IS_MANUAL: "${{ github.event_name == 'workflow_dispatch' }}"
+  INPUT_DURATION: "${{ inputs.duration_minutes }}"
 
 jobs:
   build:
@@ -130,13 +136,18 @@ jobs:
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
-      - name: 9. 保活（定时场跑到窗口结束；手动场约 5 小时 50 分）
+      - name: 9. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
         shell: powershell
         run: |
           $now = (Get-Date).ToUniversalTime()
           if ($env:IS_MANUAL -eq "true") {
-              $stop = $now.AddMinutes(350)
-              Write-Host "[keepalive] 手动触发：保活 350 分钟，预计 $($stop.ToString('HH:mm')) UTC 结束"
+              $mins = 350
+              if (-not [string]::IsNullOrWhiteSpace($env:INPUT_DURATION)) {
+                  $parsed = 0
+                  if ([int]::TryParse($env:INPUT_DURATION, [ref]$parsed) -and $parsed -gt 0) { $mins = $parsed }
+              }
+              $stop = $now.AddMinutes($mins)
+              Write-Host "[keepalive] 手动触发：保活 $mins 分钟，预计 $($stop.ToString('HH:mm')) UTC 结束"
           } else {
               $d  = $now.Date
               $b1 = $d.AddHours(3).AddMinutes(30)      # 11:30 北京
