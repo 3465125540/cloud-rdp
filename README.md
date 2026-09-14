@@ -81,12 +81,18 @@
 
 **② 手动** —— 仓库顶部 → **Actions** → 左侧 **Windows Cloud RDP** → **Run workflow**（手动触发跑满 5 小时 50 分）。
 
-启动后等约 5–8 分钟，展开 **8. 打印连接信息** 步骤记下 **Tailscale IP**；也可在 https://login.tailscale.com/admin/machines 看到 `github-rdp-server*` 设备。
+启动后等约 5–8 分钟，展开 **8. 估算额度 + 打印连接信息** 步骤记下 **Tailscale IP**；也可在 https://login.tailscale.com/admin/machines 看到 `github-rdp-server*` 设备。
 
 > ⚠️ **额度警告**：单次约 **700 额度**（5h50m × Windows 2× 倍率），私有仓库免费额度 2000/月
 > → 只够约 **3 次满时长**。若两场定时都开满，**大约 3 天就把整月额度烧完**，
 > 之后 Actions 直接停摆，直到次月 1 号重置。
 > 想长期每天跑，必须换**公开仓库**（无限额度，但有风控/封号风险）或**真·云服务器**。
+
+> 💡 **内置额度告警**：每次开机时 step 8 会算出本月已用额度并显示剩余百分比 ——
+> **≤50% 变黄、≤20% 变红**并提示还能开几次。
+> 算法：`本仓库本月所有 run 的墙钟分钟 × 2（Windows 倍率）`，脚本见 `scripts/quota-report.ps1`。
+> 局限：只统计**本仓库**的消耗，且数字是「截至本次开机」。想更准可换成带 `user` scope 的
+> 令牌直接查 Billing API（`/users/{user}/settings/billing/actions`）。
 
 ### 3. 本地连接
 

@@ -25,6 +25,9 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 360          # GitHub 免费账户单 Job 上限 6 小时
+    permissions:                  # 最小权限：拉代码 + 读 run 历史（估额度）
+      contents: read
+      actions: read
 
     steps:
       - name: 0. 拉取仓库
@@ -90,9 +93,12 @@ jobs:
         shell: powershell
         run: .\scripts\sync-down.ps1
 
-      - name: 8. 打印连接信息
+      - name: 8. 估算额度 + 打印连接信息
         shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          & .\scripts\quota-report.ps1
           Write-Host ""
           Write-Host "==========================================" -ForegroundColor Green
           Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
@@ -101,10 +107,22 @@ jobs:
           Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
           $rs = $env:RESTORE_STATUS
           if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }
-          $rc = switch ($rs) { "OK" { "Green" } "FAILED" { "Red" } default { "DarkGray" } }
+          $rc = "DarkGray"
+          if ($rs -eq "OK") { $rc = "Green" } elseif ($rs -eq "FAILED") { $rc = "Red" }
           Write-Host "  数据恢复     : $rs   (C:\data 已与 139 云盘同步)" -ForegroundColor $rc
           if ($rs -eq "FAILED") {
             Write-Host "  !! 恢复失败：139 Authorization 可能已过期，C:\data 当前为空，别在上面存重要东西 !!" -ForegroundColor Red
+          }
+          $qp = $env:QUOTA_LEFT_PCT
+          if (-not [string]::IsNullOrWhiteSpace($qp)) {
+            $qi = [int]$qp
+            $qc = "DarkGray"
+            if ($qi -le 20) { $qc = "Red" } elseif ($qi -le 50) { $qc = "Yellow" }
+            Write-Host "  Actions 额度 : 剩余 $qi%  (≈$($env:QUOTA_LEFT_MIN) 额度)" -ForegroundColor $qc
+            if ($qi -le 20) {
+              $runsLeft = [int][math]::Floor([int]$env:QUOTA_LEFT_MIN / 700)
+              Write-Host "  !! 额度告急：跑满约 $runsLeft 次后定时会静默停摆，次月 1 号才重置 !!" -ForegroundColor Red
+            }
           }
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
