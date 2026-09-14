@@ -90,30 +90,53 @@ try {
 if ($login.code -ne 200) { throw "AList 登录失败：$($login.message)" }
 $token = $login.data.token
 
-# 自动探测 139 驱动名（不同版本可能叫 139Yun / MCSCloud）
+# 自动探测 139 驱动名。
+# 注意：/api/admin/driver/list 返回的是「驱动名 -> schema」的对象（不是数组），
+# 必须取属性名，不能直接 Where-Object 过滤整个对象。
 $driverKey = "139Yun"
 try {
     $drivers = Invoke-RestMethod -Uri "$BaseUrl/api/admin/driver/list" -Headers @{ Authorization = $token }
     if ($drivers.code -eq 200) {
-        $hit = $drivers.data | Where-Object { $_ -match "139|MCS|移动" } | Select-Object -First 1
-        if ($hit) { $driverKey = $hit }
+        $names = @($drivers.data.PSObject.Properties.Name)
+        $hit = $names | Where-Object { $_ -eq "139Yun" } | Select-Object -First 1
+        if (-not $hit) { $hit = $names | Where-Object { $_ -match "139|MCS|移动" } | Select-Object -First 1 }
+        if ($hit) { $driverKey = [string]$hit }
     }
 } catch { Write-Host "[AList] 驱动列表探测失败，使用默认 $driverKey" }
 Write-Host "[AList] 使用驱动: $driverKey"
 
+# 取驱动字段 schema，用真实字段名构造 addition（AList 的 json tag 是小写+下划线）
+$schemaNames = @()
+try {
+    $info = Invoke-RestMethod -Uri "$BaseUrl/api/admin/driver/info?driver=$driverKey" -Headers @{ Authorization = $token }
+    $schemaNames = @($info.data.additional | ForEach-Object { [string]$_.name })
+    Write-Host "[AList] 驱动字段: $($schemaNames -join ', ')"
+} catch { Write-Host "[AList] 驱动 schema 获取失败，使用默认字段名" }
+
+function Resolve-Field([string[]]$candidates, [string]$fallback) {
+    foreach ($c in $candidates) { if ($schemaNames -contains $c) { return $c } }
+    return $fallback
+}
+
+$kAuth  = Resolve-Field @("authorization", "Authorization") "authorization"
+$kType  = Resolve-Field @("type", "Type") "type"
+$kRoot  = Resolve-Field @("root_folder_id", "RootFolderID") "root_folder_id"
+$kCloud = Resolve-Field @("cloud_id", "CloudID") "cloud_id"
+$kPart  = Resolve-Field @("custom_upload_part_size", "CustomUploadPartSize") "custom_upload_part_size"
+
 # ---------- 5. 创建存储 ----------
-$addition = @{
-    Authorization        = $Authorization
-    Type                 = $StorageType
-    RootFolderID         = $RootFolderID
-    CloudID              = $CloudID
-    CustomUploadPartSize = 0
-} | ConvertTo-Json -Compress
+$addObj = @{}
+$addObj[$kAuth] = $Authorization
+$addObj[$kType] = $StorageType
+$addObj[$kRoot] = $RootFolderID
+if (-not [string]::IsNullOrWhiteSpace($CloudID)) { $addObj[$kCloud] = $CloudID }
+$addObj[$kPart] = 0
+$addition = $addObj | ConvertTo-Json -Compress
 
 $createBody = @{
     mount_path       = $MountPath
     order            = 0
-    driver           = $driverKey
+    driver           = [string]$driverKey
     cache_expiration = 30
     status           = "work"
     addition         = $addition
