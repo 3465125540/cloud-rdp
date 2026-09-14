@@ -441,6 +441,33 @@ if ($Push) {
     if ($LASTEXITCODE -eq 0) {
         Say "推送完成"
         Set-GhEnv "SNAPSHOT_PUSH=OK"
+
+        # 回读远端做校验：本地文件数/字节 vs 远端，给出「确实落盘」的日志证据
+        try {
+            $szJson = (& $RcloneExe size $Remote --json --timeout 0 --contimeout 0 2>$null | Out-String)
+            if ($szJson -match '\{') {
+                $sz = ($szJson.Substring($szJson.IndexOf('{')) | ConvertFrom-Json)
+                $rCount = [int]$sz.count
+                $rBytes = [double]$sz.bytes
+                $rMB = [math]::Round($rBytes / 1MB, 2)
+                Say ("远端校验：{0} 个文件 / {1} MB（本地 {2} 个 / {3} MB）" -f $rCount, $rMB, $totalFiles, $mb)
+                if ($rCount -lt $totalFiles) {
+                    Warn ("远端文件数少于本地（{0} < {1}）—— 可能有文件未上传成功" -f $rCount, $totalFiles)
+                    Set-GhEnv "SNAPSHOT_VERIFY=PARTIAL"
+                } else {
+                    Say "远端校验通过：快照已完整落盘 139"
+                    Set-GhEnv "SNAPSHOT_VERIFY=OK"
+                }
+                Set-GhEnv ("SNAPSHOT_REMOTE_FILES=" + $rCount)
+                Set-GhEnv ("SNAPSHOT_REMOTE_MB=" + $rMB)
+            } else {
+                Warn "远端校验跳过（rclone size 无输出）"
+                Set-GhEnv "SNAPSHOT_VERIFY=SKIPPED"
+            }
+        } catch {
+            Warn "远端校验异常：$_"
+            Set-GhEnv "SNAPSHOT_VERIFY=SKIPPED"
+        }
     } else {
         Warn "推送失败（rclone 码 $LASTEXITCODE）"
         Set-GhEnv "SNAPSHOT_PUSH=FAILED"
