@@ -99,7 +99,11 @@ jobs:
         shell: pwsh
         run: .\scripts\sync-down.ps1
 
-      - name: 8. 估算额度 + 打印连接信息
+      - name: 8. 还原整机快照（文件 / 注册表 / 系统设置）
+        shell: pwsh
+        run: .\scripts\restore-snapshot.ps1 -Pull
+
+      - name: 9. 估算额度 + 打印连接信息
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -120,6 +124,14 @@ jobs:
           if ($rs -eq "FAILED") {
             Write-Host "  !! 恢复失败：139 Authorization 可能已过期，C:\data 当前为空，别在上面存重要东西 !!" -ForegroundColor Red
           }
+          $ss = $env:SNAPSHOT_STATUS
+          if ([string]::IsNullOrWhiteSpace($ss)) { $ss = "UNKNOWN" }
+          $sc = "DarkGray"
+          if ($ss -eq "OK") { $sc = "Green" } elseif ($ss -eq "PARTIAL") { $sc = "Yellow" } elseif ($ss -eq "FAILED") { $sc = "Red" }
+          Write-Host "  整机还原     : $ss   ($($env:SNAPSHOT_RESTORED_DIRS) 个目录；个人配置在首次登录时自动还原)" -ForegroundColor $sc
+          if ($ss -eq "FAILED") {
+            Write-Host "  !! 整机还原失败：本次是全新环境，之前装的软件/设置不会自动回来 !!" -ForegroundColor Red
+          }
           $qp = $env:QUOTA_LEFT_PCT
           if (-not [string]::IsNullOrWhiteSpace($qp)) {
             $qi = [int]$qp
@@ -136,7 +148,7 @@ jobs:
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
-      - name: 9. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
+      - name: 10. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
         shell: pwsh
         run: |
           $now = (Get-Date).ToUniversalTime()
@@ -163,11 +175,14 @@ jobs:
               $n++
               $left = [int](($stop - (Get-Date).ToUniversalTime()).TotalMinutes)
               Write-Host "[$n] server running... 剩余 $left 分钟"
-              if ($n % 10 -eq 0) { & .\scripts\sync-up.ps1 }
+              if ($n % 10 -eq 0) { & .\scripts\sync-up.ps1 }              # 每 10 分钟：用户数据
+              if ($n % 60 -eq 0) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 每 60 分钟：整机快照（快速模式）
           }
           Write-Host "[keepalive] 已到窗口结束时间，开始收尾"
 
-      - name: 10. 收尾全量同步到 139 云盘
+      - name: 11. 收尾：全量同步数据 + 抓取整机快照
         if: always()
         shell: pwsh
-        run: .\scripts\sync-up.ps1
+        run: |
+          & .\scripts\sync-up.ps1
+          & .\scripts\backup-snapshot.ps1 -Push

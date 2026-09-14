@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "_comment": "整机快照清单。改这个文件即可调整『备份什么 / 还原什么』，无需改脚本。",
+  "_placeholders": "%RDPUSERPROFILE% = C:\\Users\\<RDP_USERNAME>；%RDPUSER% = 用户名；其余 %VAR% 按环境变量展开",
+
+  "files": {
+    "_comment": "要镜像备份的目录（绝对路径或含占位符）。按绝对路径镜像到 snapshot/files/<盘符>/<路径>",
+    "_comment_data": "注意：C:\\data 由 sync-up/sync-down 独立高频同步（每 10 分钟），此处刻意不重复抓取，避免双倍带宽。",
+    "dirs": [
+      "C:\\tools",
+      "C:\\scripts",
+      "C:\\apps",
+      "%RDPUSERPROFILE%\\Desktop",
+      "%RDPUSERPROFILE%\\Documents",
+      "%RDPUSERPROFILE%\\Downloads",
+      "%RDPUSERPROFILE%\\Pictures",
+      "%RDPUSERPROFILE%\\Videos",
+      "%RDPUSERPROFILE%\\Music",
+      "%RDPUSERPROFILE%\\Favorites",
+      "%RDPUSERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu",
+      "%RDPUSERPROFILE%\\.ssh",
+      "%RDPUSERPROFILE%\\.aws",
+      "%RDPUSERPROFILE%\\.config",
+      "%RDPUSERPROFILE%\\.vscode\\extensions",
+      "%RDPUSERPROFILE%\\.gitconfig",
+      "%RDPUSERPROFILE%\\.wslconfig",
+      "%RDPUSERPROFILE%\\.npmrc",
+      "%RDPUSERPROFILE%\\.condarc"
+    ],
+    "_comment_excludeDirs": "按目录名排除（任意层级匹配），避免把缓存/依赖/仓库元数据拖进来",
+    "excludeDirNames": [
+      "node_modules",
+      ".git",
+      "__pycache__",
+      ".venv",
+      "venv",
+      ".cache",
+      "Cache",
+      "CachedData",
+      "Code Cache",
+      "GPUCache",
+      "Temp",
+      "tmp",
+      "$RECYCLE.BIN",
+      "System Volume Information",
+      "CrashDumps"
+    ],
+    "excludeFilePatterns": [
+      "*.tmp",
+      "*.temp",
+      "Thumbs.db",
+      "desktop.ini",
+      "*.swp",
+      "*.crdownload",
+      "*.part"
+    ],
+    "_comment_maxTotalMB": "快照总大小上限（MB）。超过则只保留已抓取部分并告警，避免把 139 塞爆",
+    "maxTotalMB": 8192
+  },
+
+  "registry": {
+    "_comment": "RDP 用户 HKCU 下的子键（导出/导入时会自动处理 SID 差异）",
+    "userHiveKeys": [
+      { "path": "Software", "name": "HKCU-Software" },
+      { "path": "Control Panel\\Desktop", "name": "HKCU-Desktop" },
+      { "path": "Control Panel\\Colors", "name": "HKCU-Colors" },
+      { "path": "Control Panel\\International", "name": "HKCU-International" },
+      { "path": "Control Panel\\Mouse", "name": "HKCU-Mouse" },
+      { "path": "Control Panel\\Keyboard", "name": "HKCU-Keyboard" },
+      { "path": "Environment", "name": "HKCU-Environment" },
+      { "path": "Console", "name": "HKCU-Console" },
+      { "path": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", "name": "HKCU-Explorer-Advanced" }
+    ],
+    "_comment_machineKeys": "机器级注册表键（整机通用，直接导出/导入）",
+    "machineKeys": [
+      { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation", "name": "HKLM-TimeZone" },
+      { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "name": "HKLM-Env" },
+      { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\Language", "name": "HKLM-Language" },
+      { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\Locale", "name": "HKLM-Locale" }
+    ]
+  },
+
+  "apps": {
+    "_comment": "wingetExport=导出已装软件清单；uninstallScan=扫描注册表 Uninstall 键补充清单",
+    "wingetExport": true,
+    "uninstallScan": true
+  },
+
+  "system": {
+    "_comment": "系统级设置的抓取与还原开关",
+    "timezone": true,
+    "culture": true,
+    "powerPlan": true,
+    "wallpaper": true,
+    "firewall": true,
+    "defenderExclusions": true
+  },
+
+  "shortcuts": {
+    "_comment": "快捷方式抓取：公共桌面 / 用户桌面 / 用户开始菜单 / 机器开始菜单",
+    "publicDesktop": true,
+    "userDesktop": true,
+    "userStartMenu": true,
+    "machineStartMenu": false
+  },
+
+  "restore": {
+    "_comment": "installApps 默认关闭：winget 批量重装耗时长且易失败，需要时手动开启",
+    "files": true,
+    "registry": true,
+    "system": true,
+    "shortcuts": true,
+    "installApps": false,
+    "wingetIgnoreUnavailable": true
+  }
+}
