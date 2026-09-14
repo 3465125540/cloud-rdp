@@ -17,6 +17,9 @@ $RcloneExe = "C:\rclone\rclone.exe"
 if (-not (Test-Path $RcloneExe)) { Write-Warning "[sync-up] 未找到 rclone，跳过"; exit 0 }
 if (-not (Test-Path $Local))    { Write-Host "[sync-up] 本地 $Local 不存在，跳过"; exit 0 }
 
+# 确保远端目录存在（本地为空时 rclone copy 不会创建目录）
+& $RcloneExe mkdir $Remote --timeout 0 --contimeout 0 2>&1 | Out-Null
+
 Write-Host "[sync-up] $Local  ->  $Remote"
 & $RcloneExe copy $Local $Remote `
     --update --create-empty-src-dirs `
@@ -25,8 +28,9 @@ Write-Host "[sync-up] $Local  ->  $Remote"
     --retries 3 --low-level-retries 5 `
     --stats-one-line -v
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "[sync-up] rclone 退出码 $LASTEXITCODE（139 Authorization 过期或大文件超时会出现）"
-} else {
+if ($LASTEXITCODE -eq 0) {
     Write-Host "[sync-up] 完成"
+} else {
+    Write-Warning "[sync-up] rclone 退出码 $LASTEXITCODE（139 Authorization 过期或大文件超时）"
 }
+exit 0

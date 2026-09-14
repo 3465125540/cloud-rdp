@@ -26,8 +26,12 @@ Write-Host "[sync-down] $Remote  ->  $Local"
     --retries 3 --low-level-retries 5 `
     --stats-one-line -v
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "[sync-down] rclone 退出码 $LASTEXITCODE（首次运行远端为空、或 139 Authorization 过期时会出现）"
-} else {
+# 首次运行远端目录还不存在时，rclone 退出码 3/4 属正常，不应让整个 Job 失败
+if ($LASTEXITCODE -eq 0) {
     Write-Host "[sync-down] 完成"
+} elseif ($LASTEXITCODE -eq 3 -or $LASTEXITCODE -eq 4) {
+    Write-Host "[sync-down] 远端目录尚不存在（首次运行正常），跳过拉取"
+} else {
+    Write-Warning "[sync-down] rclone 退出码 $LASTEXITCODE（139 Authorization 过期或网络异常）"
 }
+exit 0
