@@ -26,7 +26,9 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$RcloneExe = "C:\rclone\rclone.exe"
+# 统一系统目录：rclone 装在 D 盘（C 盘只保留 runner 镜像基线，不额外占用）
+$SysDir    = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
+$RcloneExe = Join-Path $SysDir "rclone\rclone.exe"
 
 if ([string]::IsNullOrWhiteSpace($Remote)) { $Remote = $RemoteBase.TrimEnd('/') + "/CloudRDP" }
 

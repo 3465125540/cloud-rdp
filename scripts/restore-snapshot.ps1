@@ -26,7 +26,7 @@
 param(
     [ValidateSet("machine", "user")]
     [string]$Scope      = "machine",
-    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } else { "C:\_snapshot" }),
+    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
@@ -35,7 +35,8 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$RcloneExe     = "C:\rclone\rclone.exe"
+$SysDir        = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
+$RcloneExe     = Join-Path $SysDir "rclone\rclone.exe"
 $UserHiveToken = "__RDPUSER__"
 $TaskName      = "CloudRDP-RestoreUser"
 $PortableDir   = $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR } else { "D:\a\cloud-rdp\_portable" })
@@ -44,6 +45,11 @@ $PortableDir   = $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR 
 $portableLib = Join-Path $PSScriptRoot "portable-lib.ps1"
 if (Test-Path -LiteralPath $portableLib) { . $portableLib }
 else { Write-Warning "[restore] 未找到 portable-lib.ps1，可移动程序还原不可用" }
+
+# 安装型程序共享库（识别 / 备份 / 还原）
+$programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
+if (Test-Path -LiteralPath $programsLib) { . $programsLib }
+else { Write-Warning "[restore] 未找到 programs-lib.ps1，安装型程序还原不可用" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -75,6 +81,19 @@ $doFiles     = [bool](Get-Cfg $restoreCfg 'files'     $true)
 $doRegistry  = [bool](Get-Cfg $restoreCfg 'registry'  $true)
 $doSystem    = [bool](Get-Cfg $restoreCfg 'system'    $true)
 $doShortcuts = [bool](Get-Cfg $restoreCfg 'shortcuts' $true)
+
+# 安装型程序：还原开关 + 还原根（C 盘紧张时程序实体落 D 盘，原路径建 junction）
+$programsCfg    = Get-Cfg $cfg 'programs' $null
+$doPrograms     = [bool](Get-Cfg $programsCfg 'enabled' $true)
+$preferJunction = [bool](Get-Cfg $programsCfg 'preferJunction' $true)
+$ProgramsRoot   = $(if ($env:CLOUDRDP_PROGRAMS_DIR) { $env:CLOUDRDP_PROGRAMS_DIR } else { (Join-Path $SysDir "programs") })
+
+function Get-SnapshotPrograms {
+    param([string]$Stage)
+    $f = Join-Path $Stage "programs\programs.json"
+    if (-not (Test-Path -LiteralPath $f)) { return @() }
+    try { return @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).programs) } catch { return @() }
+}
 
 function Get-AbsFromMirror {
     param([string]$Rel)
@@ -236,6 +255,19 @@ function Invoke-MachineRestore {
         } else { Warn "未加载 portable-lib.ps1，跳可移动程序还原" }
     }
 
+    # ---------- 4c. 安装型程序（机器级：只还原「不在用户目录下」的） ----------
+    if ($doPrograms) {
+        if (Get-Command Restore-Programs -ErrorAction SilentlyContinue) {
+            $pgEntries = @(Get-SnapshotPrograms -Stage $Stage)
+            if ($pgEntries.Count -gt 0) {
+                $pgRes = Restore-Programs -Entries $pgEntries -Stage $Stage -ProgramsRoot $ProgramsRoot `
+                            -PreferJunction:$preferJunction -UserPrefix ("C:\Users\" + $RdpUser) -InvertScope
+                Say ("  安装型程序（机器级）已还原：{0} 个（{1} 个 junction 指向 D 盘）" -f $pgRes.restored, $pgRes.junctioned)
+                foreach ($pb in @($pgRes.problems)) { $problems.Add("program:$pb") }
+            }
+        } else { Warn "未加载 programs-lib.ps1，跳过安装型程序还原" }
+    } else { Say "  安装型程序还原已关闭（programs.enabled=false）" }
+
     # ---------- 5. 注册「首次登录还原个人配置」计划任务 ----------
     if (-not $NoTask) {
         try {
@@ -353,6 +385,19 @@ function Invoke-UserRestore {
             if (-not $pr.skipped) {
                 Say ("  可移动程序（用户级）已还原：{0} 个" -f $pr.restored)
                 foreach ($pb in @($pr.problems)) { $problems.Add("portable:$pb") }
+            }
+        }
+    }
+
+    # ---------- 3c. 安装型程序（用户级：只还原「在用户目录下」的） ----------
+    if ($doPrograms) {
+        if (Get-Command Restore-Programs -ErrorAction SilentlyContinue) {
+            $pgEntries = @(Get-SnapshotPrograms -Stage $Stage)
+            if ($pgEntries.Count -gt 0) {
+                $pgRes = Restore-Programs -Entries $pgEntries -Stage $Stage -ProgramsRoot $ProgramsRoot `
+                            -PreferJunction:$preferJunction -UserPrefix $env:USERPROFILE
+                Say ("  安装型程序（用户级）已还原：{0} 个（{1} 个 junction）" -f $pgRes.restored, $pgRes.junctioned)
+                foreach ($pb in @($pgRes.problems)) { $problems.Add("program:$pb") }
             }
         }
     }

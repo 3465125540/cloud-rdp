@@ -19,7 +19,9 @@ param(
     [string[]]$Exclude = @()
 )
 
-$RcloneExe = "C:\rclone\rclone.exe"
+# 统一系统目录：rclone 装在 D 盘（C 盘只保留 runner 镜像基线，不额外占用）
+$SysDir    = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
+$RcloneExe = Join-Path $SysDir "rclone\rclone.exe"
 if (-not (Test-Path $RcloneExe)) { Write-Warning "[sync-up] 未找到 rclone，跳过"; exit 0 }
 if (-not (Test-Path $Local))    { Write-Host "[sync-up] 本地 $Local 不存在，跳过"; exit 0 }
 

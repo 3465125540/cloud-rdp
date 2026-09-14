@@ -36,7 +36,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } else { "C:\_snapshot" }),
+    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
@@ -45,8 +45,9 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$RcloneExe       = "C:\rclone\rclone.exe"
-$SnapshotVersion = 2
+$SysDir          = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
+$RcloneExe       = Join-Path $SysDir "rclone\rclone.exe"
+$SnapshotVersion = 3
 $UserHiveToken   = "__RDPUSER__"     # 归一化后的 HKCU 占位符，还原时按当前 SID 替换
 $PortableDir     = $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR } else { "D:\a\cloud-rdp\_portable" })
 
@@ -54,6 +55,11 @@ $PortableDir     = $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DI
 $portableLib = Join-Path $PSScriptRoot "portable-lib.ps1"
 if (Test-Path -LiteralPath $portableLib) { . $portableLib }
 else { Write-Warning "[snapshot] 未找到 portable-lib.ps1，可移动程序功能不可用" }
+
+# 安装型程序共享库（识别 / 备份 / 还原）
+$programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
+if (Test-Path -LiteralPath $programsLib) { . $programsLib }
+else { Write-Warning "[snapshot] 未找到 programs-lib.ps1，安装型程序复刻不可用" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -376,6 +382,73 @@ else {
     }
 }
 
+# ---------------------------------------------------------------- 3c. 安装型程序（识别 + 备份）
+
+$programsCfg      = Get-Cfg $cfg 'programs' $null
+$programsEnabled  = [bool](Get-Cfg $programsCfg 'enabled' $true)
+$programsInQuick  = [bool](Get-Cfg $programsCfg 'captureInQuick' $false)
+$doPrograms       = $programsEnabled -and ((-not $Quick) -or $programsInQuick)
+$programsCaptured = @()
+$programsRoot     = $(if ($env:CLOUDRDP_PROGRAMS_DIR) { $env:CLOUDRDP_PROGRAMS_DIR } else { (Join-Path $SysDir "programs") })
+
+if (-not $programsEnabled) {
+    Say "  安装型程序：已关闭（programs.enabled=false）"
+}
+elseif (-not $doPrograms) {
+    Say "  安装型程序：quick 模式跳过（programs.captureInQuick=false）"
+}
+elseif (-not (Get-Command Get-InstalledPrograms -ErrorAction SilentlyContinue)) {
+    Warn "未加载 programs-lib.ps1，跳过安装型程序备份"
+}
+else {
+    $stateDir = Join-Path $SysDir "_state"
+    $baseFile = Join-Path $stateDir "program-baseline.json"
+    $prevFile = Join-Path $stateDir "prev-programs.json"
+
+    $baseRegs = @()
+    if (Test-Path -LiteralPath $baseFile) {
+        try { $baseRegs = @((Get-Content -LiteralPath $baseFile -Raw -Encoding UTF8 | ConvertFrom-Json).regPaths) } catch { $baseRegs = @() }
+    }
+    $prevRegs = @()
+    if (Test-Path -LiteralPath $prevFile) {
+        try { $prevRegs = @((Get-Content -LiteralPath $prevFile -Raw -Encoding UTF8 | ConvertFrom-Json).regPaths) } catch { $prevRegs = @() }
+    }
+
+    if (@($baseRegs).Count -eq 0) {
+        Warn "  缺少开机基线（program-baseline.json）—— 为安全起见本次跳过安装型程序备份"
+    }
+    else {
+        $allApps = @(Get-InstalledPrograms)
+        Say ("  已装程序总数：{0}（镜像基线 {1} / 历史备份 {2}）" -f $allApps.Count, @($baseRegs).Count, @($prevRegs).Count)
+
+        # 已被 portable 处理过的目录不重复备份
+        $portablePaths = @()
+        foreach ($pp in $portableCaptured) { $portablePaths += [string]$pp.originalPath }
+
+        $imgBlock = @(Get-Cfg $programsCfg 'imageBlockPaths' @())
+        if (@($imgBlock).Count -eq 0) { $imgBlock = @(Get-ProgramImageBlockPaths) }
+
+        $sel = Get-ProgramsToBackup -All $allApps `
+            -BaselineRegPaths $baseRegs -AlwaysIncludeRegPaths $prevRegs -ExcludePaths $portablePaths `
+            -SystemRoots (Get-ProgramSystemRoots) -ImageBlockPaths $imgBlock `
+            -Blocklist @(Get-Cfg $programsCfg 'blocklist' @()) `
+            -MaxMBPerApp ([int](Get-Cfg $programsCfg 'maxMBPerApp' 1024)) `
+            -MaxTotalMB  ([int](Get-Cfg $programsCfg 'maxTotalMB' 2048))
+
+        foreach ($sk in @($sel.skipped)) { Warn ("  跳过：{0}" -f $sk) }
+        $selArr = [object[]]$sel.selected
+        Say ("  安装型程序待备份：{0} 个 / {1:N1} MB" -f $selArr.Count, ($sel.totalBytes / 1MB))
+
+        if ($selArr.Count -gt 0) {
+            $b = Backup-Programs -Apps $selArr -Stage $Stage -ProgramsRoot $programsRoot
+            $programsCaptured = @($b.captured)
+            foreach ($pb in @($b.problems)) { $problems.Add($pb) }
+            try { Write-ProgramsManifest -Apps $programsCaptured -Path (Join-Path $Stage "programs\programs.json") } catch { Warn "写程序清单失败：$_" }
+            Say ("  安装型程序已备份：{0} 个" -f $programsCaptured.Count)
+        }
+    }
+}
+
 # ---------------------------------------------------------------- 4. 系统设置
 
 $sys = [ordered]@{ capturedUtc = (Get-Date).ToUniversalTime().ToString("o"); capturedLocal = (Get-Date).ToString("o") }
@@ -499,6 +572,13 @@ foreach ($p in $portableCaptured) {
         meta = @{ displayName = $p.displayName; version = $p.version; mode = $p.mode }
     })
 }
+foreach ($g in $programsCaptured) {
+    $scope = if (([string]$g.originalPath).ToLower().StartsWith($userPrefix.ToLower())) { "user" } else { "machine" }
+    $plan.Add([pscustomobject]@{
+        type = "program"; originalPath = $g.originalPath; store = $g.storedPath; scope = $scope
+        meta = @{ displayName = $g.displayName; version = $g.version; regFile = $g.regFile; bytes = $g.bytes }
+    })
+}
 if ($scCount -gt 0) {
     $plan.Add([pscustomobject]@{ type = "shortcut"; originalPath = "$env:PUBLIC\Desktop"; store = "shortcuts/public-desktop"; scope = "machine"; meta = @{} })
     $plan.Add([pscustomobject]@{ type = "shortcut"; originalPath = ("$userPrefix\Desktop"); store = "shortcuts/user-desktop"; scope = "user"; meta = @{} })
@@ -514,6 +594,7 @@ $dataDirForManifest = $(if ($env:CLOUDRDP_DATA_DIR) { $env:CLOUDRDP_DATA_DIR } e
 $planArr      = [object[]]$plan
 $installedArr = [object[]]$installedApps
 $portableArr  = [object[]]$portableCaptured
+$programsArr  = [object[]]$programsCaptured
 $manifest = [ordered]@{
     version     = $SnapshotVersion
     mode        = $mode
@@ -532,12 +613,13 @@ $manifest = [ordered]@{
         wingetCount  = $wingetCount
         installed    = $installedArr
         portable     = $portableArr
+        programs     = $programsArr
     }
     plan        = $planArr
     problems    = $problems
 }
 $manifest | ConvertTo-Json -Depth 8 | Out-File -LiteralPath (Join-Path $Stage "manifest.json") -Encoding UTF8
-Say ("  还原计划：{0} 项（dir/registry/portable/shortcut/setting/app）" -f $planArr.Count)
+Say ("  还原计划：{0} 项（dir/registry/portable/program/shortcut/setting/app）" -f $planArr.Count)
 
 $mb = [math]::Round($totalBytes / 1MB, 2)
 Say ("抓取完成：{0} 个文件 / {1} MB / 状态 {2}" -f $totalFiles, $mb, $status)
@@ -546,6 +628,7 @@ Set-GhEnv ("SNAPSHOT_STATUS=" + $status)
 Set-GhEnv ("SNAPSHOT_FILES=" + $totalFiles)
 Set-GhEnv ("SNAPSHOT_MB=" + $mb)
 Set-GhEnv ("SNAPSHOT_ENTRIES=" + $fileEntries.Count)
+Set-GhEnv ("SNAPSHOT_PROGRAMS=" + @($programsCaptured).Count)
 
 # ---------------------------------------------------------------- 8. 推送
 

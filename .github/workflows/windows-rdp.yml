@@ -39,8 +39,14 @@ env:
   CLOUDRDP_REMOTE_BASE: 'alist:/cloudrdp/AI文件库'
   # 可移动程序暂存目录（位于数据目录内，随数据管线高频同步）
   CLOUDRDP_PORTABLE_DIR: 'D:\a\cloud-rdp\_portable'
-  # 本地快照暂存（保持 C 盘：① 脚本护栏要求含 _snapshot ② 放数据目录会被 sync-up 二次上传）
-  CLOUDRDP_SNAPSHOT_STAGE: 'C:\_snapshot'
+  # ---------- 系统目录：rclone / AList / 快照暂存 / 程序还原 全部放 D 盘 ----------
+  # C 盘只保留 runner 镜像自带内容（VS / Android SDK / 工具缓存，约 120GB / 150GB）；
+  # 我们产生的一切都落 D 盘（150GB，几乎全空），并由 disk-guard.ps1 守住增量 ≤30%。
+  CLOUDRDP_SYS_DIR: 'D:\cloudrdp-sys'
+  # 本地快照暂存（放 D 盘：① 不占 C 盘 ② 脚本护栏要求路径含 _snapshot ③ 不在数据目录内，避免被 sync-up 二次上传）
+  CLOUDRDP_SNAPSHOT_STAGE: 'D:\cloudrdp-sys\_snapshot'
+  # 安装型程序还原根：C 盘紧张时程序实体落这里，原安装路径用 junction 指过来（C 盘零增长但原路径可用）
+  CLOUDRDP_PROGRAMS_DIR: 'D:\cloudrdp-sys\programs'
   # 手动触发 = 跑满 5h50m（可用 duration_minutes 覆盖）；定时触发 = 跑到所在窗口结束
   IS_MANUAL: "${{ github.event_name == 'workflow_dispatch' }}"
   INPUT_DURATION: "${{ inputs.duration_minutes }}"
@@ -58,6 +64,10 @@ jobs:
     steps:
       - name: 0. 拉取仓库
         uses: actions/checkout@v4
+
+      - name: 0b. C 盘守卫：记录基线
+        shell: pwsh
+        run: .\scripts\disk-guard.ps1 -Baseline
 
       - name: 1. 开启远程桌面 + 放行防火墙
         shell: pwsh
@@ -133,6 +143,10 @@ jobs:
         shell: pwsh
         run: .\scripts\reinstall-apps.ps1 -Background
 
+      - name: 10b. C 盘守卫：清理超限增量 + 报告
+        shell: pwsh
+        run: .\scripts\disk-guard.ps1 -Enforce
+
       - name: 11. 估算额度 + 打印连接信息
         shell: pwsh
         env:
@@ -168,6 +182,20 @@ jobs:
           }
           if ($ss -eq "FAILED") {
             Write-Host "  !! 整机还原失败：本次是全新环境，之前装的软件/设置不会自动回来 !!" -ForegroundColor Red
+          }
+          $pgN = $env:SNAPSHOT_PROGRAMS
+          if (-not [string]::IsNullOrWhiteSpace($pgN)) {
+            Write-Host "  安装型程序   : 快照含 $pgN 个（实体落 D 盘，原安装路径用 junction 指过来）" -ForegroundColor DarkGray
+          }
+          $dg = $env:DISK_GUARD_STATUS
+          if (-not [string]::IsNullOrWhiteSpace($dg)) {
+            $dc = "DarkGray"
+            if ($dg -eq "OK" -or $dg -eq "FIXED") { $dc = "Green" } elseif ($dg -eq "OVER") { $dc = "Red" }
+            Write-Host "  C 盘占用     : $($env:DISK_C_USED_PCT)%  ($($env:DISK_C_USED_GB) / $($env:DISK_C_TOTAL_GB) GB)   本次增量 $($env:DISK_C_DELTA_MB) MB / 上限 $($env:DISK_C_LIMIT_MB) MB" -ForegroundColor $dc
+            Write-Host "  D 盘可用     : $($env:DISK_D_FREE_GB) GB  (数据 / 快照 / 程序实体都在 D 盘)" -ForegroundColor DarkGray
+            if ($dg -eq "OVER") {
+              Write-Host "  !! C 盘增量超限：大文件请放 D 盘；新装程序尽量装到 D 盘 !!" -ForegroundColor Red
+            }
           }
           $pv = $env:SNAPSHOT_PREVALIDATE
           if (-not [string]::IsNullOrWhiteSpace($pv)) {
@@ -222,13 +250,15 @@ jobs:
               $left = [int](($stop - (Get-Date).ToUniversalTime()).TotalMinutes)
               Write-Host "[$n] server running... 剩余 $left 分钟"
               if ($n % 10 -eq 0) { & .\scripts\sync-up.ps1 }              # 每 10 分钟：用户数据
+              if ($n % 30 -eq 0) { & .\scripts\disk-guard.ps1 -Enforce }  # 每 30 分钟：C 盘守卫（清超限增量）
               if ($n % 60 -eq 0) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 每 60 分钟：整机快照（快速模式）
           }
           Write-Host "[keepalive] 已到窗口结束时间，开始收尾"
 
-      - name: 13. 收尾：全量同步数据 + 抓取整机快照
+      - name: 13. 收尾：C 盘清理 + 全量同步数据 + 抓取整机快照
         if: always()
         shell: pwsh
         run: |
+          & .\scripts\disk-guard.ps1 -Enforce
           & .\scripts\sync-up.ps1
           & .\scripts\backup-snapshot.ps1 -Push

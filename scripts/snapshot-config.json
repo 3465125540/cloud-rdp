@@ -145,5 +145,37 @@
     },
     "_comment_preCommands": "预还原钩子：正式还原前逐条执行的命令（fail-soft，失败仅告警）。例如停服务、关进程、备份当前状态。",
     "preCommands": []
+  },
+
+  "programs": {
+    "_comment": "安装型程序（Program Files 类）复刻：备份程序目录 + 逐程序 Uninstall 注册表；还原时程序实体落 D 盘、原安装路径建 junction（原路径照常可用、C 盘零增长）",
+    "_comment_delta": "只备份「用户装的」程序：开机基线里的镜像自带程序一律跳过；之前备份过的一直带上（跨运行持久）。三重保险=增量判定+静态黑名单+体积上限",
+    "_comment_size": "139 WebDAV 实测约 0.45 MB/s，所以体积必须克制：1GB ≈ 37 分钟。默认单程序 1GB / 总量 2GB",
+    "enabled": true,
+    "captureInQuick": false,
+    "preferJunction": true,
+    "maxMBPerApp": 1024,
+    "maxTotalMB": 2048,
+    "excludePaths": [],
+    "_comment_imageBlockPaths": "留空=使用脚本内置的 runner 镜像路径黑名单（VS / Android SDK / hostedtoolcache / AzureCLI …）",
+    "imageBlockPaths": [],
+    "blocklist": [
+      "VC\\+\\+ .*Redistributable",
+      "\\.NET .*Runtime",
+      "Windows (SDK|App Runtime|Driver)",
+      "Microsoft Edge",
+      "WebView2",
+      "Windows Software Development Kit",
+      "Microsoft Visual"
+    ]
+  },
+
+  "disk": {
+    "_comment": "C 盘守卫：镜像自带约占 120GB/150GB（80%）动不了，所以守住的是**我们的增量** ≤ 基线可用空间 × maxIncrementalPercent",
+    "_comment_enforce": "enforceEveryMinutes=保活期每 N 分钟执行一次清理；0=只在开机与收尾各执行一次",
+    "guard": true,
+    "maxIncrementalPercent": 30,
+    "maxIncrementalMB": 0,
+    "enforceEveryMinutes": 30
   }
 }

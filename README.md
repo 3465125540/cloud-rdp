@@ -143,7 +143,8 @@
 |------|------|
 | 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig` 等 |
 | 注册表 | RDP 用户的 **HKCU** 子键（`Software`、`Control Panel\Desktop/Colors/International/Mouse/Keyboard`、`Environment`、`Console`、`Explorer\Advanced`）+ 机器级 `TimeZoneInformation`、`Session Manager\Environment`、`Nls\Language/Locale` |
-| 软件清单 | `winget export` + 注册表 Uninstall 扫描（**清单**，不是二进制；重装靠 winget） |
+| 软件清单 | `winget export` + 注册表 Uninstall 扫描（**清单**，不是二进制） |
+| 安装型程序 | **程序目录本体** + 逐程序 Uninstall 注册表键（见 ⑧；只备份「用户装的」，镜像自带的约 120 GB 绝不碰） |
 | 系统设置 | 时区、区域、电源方案、壁纸（壁纸文件一并带走） |
 | 快捷方式 | 公共桌面 / 用户桌面 / 用户开始菜单（`*.lnk` / `*.url`） |
 
@@ -170,7 +171,8 @@
 - Windows 更新状态、驱动、运行中的进程状态不涉及
 - 浏览器 profile（Chrome/Edge 的 `User Data`）**刻意不抓**（体积以 GB 计、缓存为主），需要重新登录
 - 快照体积上限默认 **8 GB**（`files.maxTotalMB`），超出会跳过后续目录并告警
-- 已装软件的**二进制本体**不在快照里 —— 改为**后台 winget 重装**（见 ⑤）＋**可移动程序直接搬运**（见 ③）
+- 已装软件的**二进制本体**：可移动程序**直接搬运**（见 ③）、安装型程序**目录级备份 + junction 还原**（见 ⑧）、
+  其余靠**后台 winget 重装**（见 ⑤）。三条路互补；覆盖不到的主要是「需授权码 / 硬件绑定」的商业软件
 
 #### ③ 可移动程序：识别 → 搬运 → 按原路径还原
 
@@ -185,7 +187,7 @@
   **默认 `copy` 不是 move** —— move 会破坏正在运行的机器（快捷方式/注册表引用失效）。
   高级用法 `portable.mode: "relocate"`：拷贝成功后把原目录换成指向副本的 **junction**，只留一份实体（默认关闭）。
 - **原路径元数据**（三处一致，权威字段 `originalPath`）：
-  `D:\a\cloud-rdp\_portable\_manifest.json`、`C:\_snapshot\apps\portable.json`、`manifest.json` 的 `apps.portable[]`。
+  `D:\a\cloud-rdp\_portable\_manifest.json`、`D:\cloudrdp-sys\_snapshot\apps\portable.json`、`manifest.json` 的 `apps.portable[]`。
 - **还原**：`robocopy <暂存>\<镜像> → originalPath`，按 machine/user 作用域分流。
 - 开关：`snapshot-config.json` 的 `portable.enabled` / `mode` / `scanRoots` / `blocklist` / `maxMBPerApp`。
   默认只在**收尾全量**快照里采集（`portable.captureInQuick=false`，避免每 60 分钟重复搬）。
@@ -196,11 +198,11 @@
 
 | 阶段 | 做什么 |
 |------|--------|
-| 1 拉取 | 从 139 把快照拉到 `C:\_snapshot`（原 restore 的 `-Pull` 前移到这里） |
+| 1 拉取 | 从 139 把快照拉到 `D:\cloudrdp-sys\_snapshot`（原 restore 的 `-Pull` 前移到这里） |
 | 2 校验 | manifest 可解析/版本兼容、各 `files/<镜像>` 齐全、winget/portable 清单可解析 → `SNAPSHOT_PREVALIDATE` |
-| 3 规划 | 生成 `C:\_snapshot\restore-plan.json`：每条 = **类型 / 原路径 / 存储路径 / 作用域**，并打印构成摘要 |
+| 3 规划 | 生成 `D:\cloudrdp-sys\_snapshot\restore-plan.json`：每条 = **类型 / 原路径 / 存储路径 / 作用域**，并打印构成摘要 |
 | 4 准备 | 建好数据目录、`_portable`、各还原目标的父目录 |
-| 5 回滚 | 把将被覆盖的注册表键导出到 `C:\_snapshot\_rollback\<时间戳>\` + `rollback.json`（只记录现状，不整目录拷贝） |
+| 5 回滚 | 把将被覆盖的注册表键导出到 `D:\cloudrdp-sys\_snapshot\_rollback\<时间戳>\` + `rollback.json`（只记录现状，不整目录拷贝） |
 | 6 钩子 | 执行 `restore.preCommands[]`（你在 `snapshot-config.json` 里写的自定义命令，**失败仅告警不阻断**） |
 | 7 驱动 | 调用 `restore-snapshot.ps1 -Scope machine` 完成真正的机器级还原 |
 
@@ -211,9 +213,9 @@
 
 `restore.installApps` **默认开启**。还原后第 10 步调 `scripts/reinstall-apps.ps1 -Background`：
 
-- 读 `C:\_snapshot\apps\winget-export.json`，**逐包** `winget install --id <id> -e --silent`，**每包独立 try/catch 失败不中断**
+- 读 `D:\cloudrdp-sys\_snapshot\apps\winget-export.json`，**逐包** `winget install --id <id> -e --silent`，**每包独立 try/catch 失败不中断**
 - **用 `Start-Process` 拉起后台进程后立即返回** → 第 11 步的连接信息**秒出**，你马上就能连 RDP，装包在后台继续
-- 日志 `C:\_snapshot\_logs\apps-reinstall.log`；进度 `C:\_snapshot\_logs\apps-status.json`
+- 日志 `D:\cloudrdp-sys\_snapshot\_logs\apps-reinstall.log`；进度 `D:\cloudrdp-sys\_snapshot\_logs\apps-status.json`
 - 临时关闭：`Run workflow` 时把 `install_apps` 填 `false`，或改 `restore.installApps`
 - 限量试跑：`restore.maxPackages`（0 = 不限）
 
@@ -236,41 +238,103 @@
   「AI文件库」的**文件夹 ID**（139 网页 F12 从请求里取），AList 的 `/cloudrdp` 会直接映射到该文件夹，
   远端路径即回归纯 ASCII（`alist:/cloudrdp/CloudRDP`），脚本原生支持，无需改代码
 
+#### ⑦ C 盘策略：守住「我们的增量 ≤ 30%」
+
+**先说清一个硬事实**：GitHub 托管的 Windows runner，C 盘 **150 GB 里约 120 GB 是镜像自带**的
+（Visual Studio 2022 / Android SDK / `hostedtoolcache` / Azure CLI …），**开机就是约 80%**。
+这个基线动不了（删它要 10–25 分钟，还会破坏依赖这些工具链的程序，Windows 更新也可能失败）。
+所以「C 盘占用 ≤ 30%」字面做不到 —— 本项目守的是**我们产生的那部分**：
+
+```
+增量 = 当前 C: 已用 − 开机基线已用   ≤   基线可用空间 × 30%   （默认约 9.3 GB）
+```
+
+怎么做到：
+
+| 措施 | 说明 |
+|------|------|
+| **产物全落 D 盘** | 数据 `D:\a\cloud-rdp`；rclone / AList / 快照暂存 / 程序实体全在 `D:\cloudrdp-sys`。C 盘上不留我们的东西 |
+| **磁盘守卫** | `scripts/disk-guard.ps1`：开机记基线（第 0b 步）→ 打印连接信息前（第 10b 步）、保活期每 30 分钟、收尾（第 13 步）各执行一次 |
+| **安全清理** | 超限时清临时目录、Windows 更新缓存、安装包残留、旧版 `C:\_snapshot` 遗留；**绝不触碰**数据目录 / 快照暂存 / 系统目录（有父目录保护） |
+| **junction 还原** | 装到 C 盘的程序，还原时实体落 D 盘、原路径建 junction → 原路径照常可用，**C 盘零增长**（见 ⑧） |
+
+连接信息里会实时显示：
+
+```
+  C 盘占用     : 80.2%  (120.4 / 150.1 GB)   本次增量 12 MB / 上限 9298 MB
+  D 盘可用     : 146.9 GB  (数据 / 快照 / 程序实体都在 D 盘)
+```
+
+- 状态：`DISK_GUARD_STATUS` = `BASELINE` / `OK` / `FIXED` / `OVER`；`OVER` 会**红色高亮**并给出提示
+- 阈值：改 `snapshot-config.json` 的 `disk.maxIncrementalPercent`（或用 `disk.maxIncrementalMB` 设绝对上限）
+- 脚本**永不返回非 0**，不会因为磁盘告警挡住 RDP 启动
+
+#### ⑧ 安装型程序复刻：备份目录 + Uninstall 注册表 → junction 还原
+
+装在 `Program Files` 那类程序（MSI / 带卸载器的），光靠 winget 重装可能装不回原样、原路径、原版本。
+所以补上第三条路：**把程序目录本身也备份，还原时按原安装路径放回**。
+
+| 环节 | 做法 |
+|------|------|
+| 识别 | 扫三处 Uninstall 注册表（HKLM 64/32 + HKCU），要求 `InstallLocation` 存在、非系统目录、`Publisher` 非微软、名字不命中黑名单 |
+| **只备份用户装的** | 三重保险：① **增量判定**（开机基线里的镜像自带程序一律跳过）② **静态黑名单** `imageBlockPaths`（VS / Android SDK / hostedtoolcache / AzureCLI …）③ **体积上限** |
+| 备份 | 程序目录镜像到 `<Stage>\programs\<盘符>\<路径>`，并**逐程序 `reg export` 它的 Uninstall 键** |
+| 还原 | 程序实体落 **`D:\cloudrdp-sys\programs\<镜像>`**，在原路径（如 `C:\Program Files\Foo`）建 **junction** 指过去；随后导入 Uninstall 键 |
+| 兜底 | 因为 Uninstall 键回来了，`winget` 会判定「已安装」而**跳过重装**，不会装两份 |
+
+**体积必须克制**：139 WebDAV 实测约 **0.45 MB/s**（1 GB ≈ 37 分钟），所以默认
+`programs.maxMBPerApp = 1024`、`programs.maxTotalMB = 2048`。超限的会**在日志里列名告警**，不会静默丢。
+想放宽就改这两个值。
+
+> 首次推送新程序集较慢（要传字节）；之后每次 `rclone sync` 只传**变化的部分**
+> （robocopy 保留时间戳，远端比对 size+mtime 后跳过），所以后续开机很快。
+
+- 开关：`programs.enabled` / `preferJunction` / `maxMBPerApp` / `maxTotalMB` / `blocklist` / `excludePaths`
+- 默认只在**收尾全量**快照里采集（`programs.captureInQuick=false`，避免每 60 分钟重复备份）
+- 不想用 junction（直接还原到 C 盘原路径）：`programs.preferJunction = false`
+- 开机基线由 `pre-restore.ps1` 的**第 0 阶段**在任何还原动作之前记录；上次备份过的程序清单也会带过来，
+  保证「跨运行持久」——已还原的程序下次关机时仍会被备份，不会因为「基线里有」而被漏掉
+
 ---
 
 ## 五、目录结构
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（14 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（16 步，见下表）
 └── scripts/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
     ├── migrate-139.ps1                 # 【新】139 老路径 → AI文件库（一次性、幂等、只 copy）
     ├── sync-down.ps1                   # 139 → D:\a\cloud-rdp（数据恢复，含排除仓库）
     ├── sync-up.ps1                     # D:\a\cloud-rdp → 139（数据备份，含排除仓库）
-    ├── pre-restore.ps1                 # 【新】预还原：拉取→校验→规划→准备→回滚记录→preCommands→驱动还原
-    ├── snapshot-config.json            # 整机快照清单（改这里调整备份/还原范围）
-    ├── portable-lib.ps1                # 【新】可移动程序：识别 / 搬运 / 按原路径还原
-    ├── backup-snapshot.ps1             # 抓取整机状态 → C:\_snapshot → 139/AI文件库/_snapshot
+    ├── pre-restore.ps1                 # 预还原：记录程序基线→拉取→校验→规划→准备→回滚记录→preCommands→驱动还原
+    ├── snapshot-config.json            # 整机快照清单（改这里调整备份/还原范围 + C 盘阈值）
+    ├── portable-lib.ps1                # 可移动程序：识别 / 搬运 / 按原路径还原
+    ├── programs-lib.ps1                # 【新】安装型程序：目录级备份 / Uninstall 注册表 / junction 还原
+    ├── disk-guard.ps1                  # 【新】C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
+    ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
-    ├── reinstall-apps.ps1              # 【新】winget 后台逐包重装（日志 + 进度 JSON）
+    ├── reinstall-apps.ps1              # winget 后台逐包重装（日志 + 进度 JSON）
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 14 步：
+工作流 16 步：
 
 | # | 步骤 | 说明 |
 |---|------|------|
-| 0–2 | 拉仓库 / 开 RDP / 建账号+数据目录 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
-| 3–6 | Tailscale / AList 密码 / rclone / 部署 AList | 139 挂载点 `/cloudrdp` |
+| 0 | 拉仓库 | `actions/checkout` |
+| **0b** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline` |
+| 1–2 | 开 RDP / 建账号+数据目录 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
+| 3–6 | Tailscale / AList 密码 / rclone / 部署 AList | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys` |
 | **7** | **（可选）迁移 139 老路径** | 仅当 `migrate_139=true` |
 | **8** | **从 139 拉取数据** | `sync-down.ps1` |
-| **9** | **预还原** | `pre-restore.ps1 -Pull`（含校验/规划/回滚记录，并驱动下一步） |
+| **9** | **预还原** | `pre-restore.ps1 -Pull`（记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
-| **11** | **额度 + 打印连接信息** | 记下 Tailscale IP |
-| 12 | 保活 | 每 10 分钟同步数据；每 60 分钟抓整机快照 |
-| 13 | 收尾 | `if: always()`：全量同步数据 + 抓整机快照 |
+| **10b** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
+| **11** | **额度 + 打印连接信息** | 记下 Tailscale IP；含 C/D 盘占用与本次增量 |
+| 12 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照 |
+| 13 | 收尾 | `if: always()`：C 盘清理 + 全量同步数据 + 抓整机快照 |
 
 139 云盘内的存放位置：
 
@@ -288,11 +352,15 @@ cloud-rdp/
 | 第 6 步报「创建 139 存储失败」 | `Authorization` 过期或复制多了 `Basic` | 重新获取 Authorization，只取 `Basic ` 后那段，更新 Secret |
 | 第 6 步报驱动不存在 | AList 版本驱动名不同 | 日志会打印可用驱动列表，改 `setup-alist.ps1` 里的 `$driverKey` |
 | `sync-down` 退出码非 0 | 首次运行远端为空（正常）/ Authorization 过期 | 首次可忽略；否则更新 Secret |
+| C 盘占用显示 80%+ | 那是 runner **镜像自带**的（VS / Android SDK / 工具缓存），开机就有 | 正常。我们守的是「本次增量」，见 ⑦ |
+| C 盘增量显示 `OVER` | 有大文件写进了 C 盘，或新程序装到了 C 盘 | 大文件放 `D:\a\cloud-rdp`；新装程序选 D 盘；或调大 `disk.maxIncrementalPercent` |
+| 某程序还原后打不开 | 写死了绝对路径 / 需要注册服务 / 体积超上限被跳过 | 看日志里 `跳过：xxx`；调大 `programs.maxMBPerApp`，或设 `programs.preferJunction=false` 直接还原到原路径 |
+| 安装型程序备份很慢 | 139 WebDAV 约 0.45 MB/s，首次要传字节 | 正常，首次慢、之后只传变化；用 `programs.maxTotalMB` 控总量 |
 | 上传大文件卡住 | 139 走 WebDAV 有 5 分钟超时 | 单文件建议 <500MB；超大文件用 139 官方客户端 |
 | 连不上 100.x.x.x | 本地没登录 Tailscale | 本地客户端登录同一账号，`tailscale status` 检查 |
 | 会话突然断开 | 6 小时到点，Job 被回收 | 正常，重新 Run workflow |
 | 整机还原显示 `PARTIAL` | 个别目录/注册表键还原失败（日志有明细） | 看日志 `[restore]` 行定位；多为该目录不存在或权限问题 |
-| 登录后个人配置没回来 | 登录还原任务失败或未触发 | 查「任务计划程序」里的 `CloudRDP-RestoreUser`；日志在首次登录时不可见，可手动跑 `C:\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
+| 登录后个人配置没回来 | 登录还原任务失败或未触发 | 查「任务计划程序」里的 `CloudRDP-RestoreUser`；日志在首次登录时不可见，可手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
 | 关机前的改动丢了 | Job 被**硬杀**（超时/取消太快），收尾步骤没跑完 | 保活期每 60 分钟会自动抓一次快照，最多丢 1 小时内改动 |
 | 快照没上传 | 快照超过 `files.maxTotalMB`（默认 8GB） | 日志会告警并跳过后续目录；调大上限或从清单里删掉大目录 |
 | 预检报「`AI文件库` 不存在」 | 139 里还没建这个文件夹（脚本刻意不自动创建） | 在 139 网页根目录下建好「AI文件库」后重跑；或改用「根 ID 法」（见 §4.⑥） |
@@ -300,7 +368,7 @@ cloud-rdp/
 | 数据目录里混进了仓库文件 | rclone 排除规则没生效（`GITHUB_WORKSPACE` 与数据目录不匹配） | 看日志 `[sync-up] 排除:` 那行；确认里面有 `/cloud-rdp/**` 与 `/.git/**` |
 | 可移动程序没被备份 | 被判定为「非可移动」（MSI 安装 / 落在系统目录 / 体积超限 / 命中黑名单） | 日志会打印候选数；要强制纳入可把路径加进 `portable.scanRoots` 或用 `files.dirs` 直接抓 |
 | 可移动程序搬走机器变卡 | 用了 `portable.mode: "relocate"`（junction）且程序正被占用 | 改回默认 `copy`；relocate 是高级用法，会临时移动原目录 |
-| winget 重装一直没动静 | 后台进程还在跑 / 清单为空（首次运行） | 看 `C:\_snapshot\_logs\apps-reinstall.log` 与 `apps-status.json`；首次运行无清单属正常 |
+| winget 重装一直没动静 | 后台进程还在跑 / 清单为空（首次运行） | 看 `D:\cloudrdp-sys\_snapshot\_logs\apps-reinstall.log` 与 `apps-status.json`；首次运行无清单属正常 |
 | 想跳过自动重装 | —— | Run workflow 时把 `install_apps` 填 `false` |
 | `preCommands` 里的命令没生效 | 命令失败被 fail-soft 忽略（不阻断还原） | 看日志 `[pre-restore]   [n] 失败`；命令里建议用绝对路径 |
 

@@ -20,7 +20,7 @@
 param(
     [string]$OldBase  = "alist:/cloudrdp",
     [string]$NewBase  = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE } else { "alist:/cloudrdp/AI文件库" }),
-    [string]$RcloneExe = "C:\rclone\rclone.exe",
+    [string]$RcloneExe = $(if ($env:CLOUDRDP_SYS_DIR) { Join-Path $env:CLOUDRDP_SYS_DIR "rclone\rclone.exe" } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\rclone\rclone.exe" } else { "C:\rclone\rclone.exe" }),
     [switch]$Force
 )
 

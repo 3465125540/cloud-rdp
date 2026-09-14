@@ -14,7 +14,7 @@
     ALIST_139_CLOUD_ID        家庭云/共享群专用ID，默认空
 
   产物：
-    C:\alist\alist.exe  +  C:\alist\data\  （AList 数据目录）
+    <SysDir>\alist\alist.exe  +  <SysDir>\alist\data\  （AList 数据目录；SysDir 默认 D:\cloudrdp-sys）
     AList 服务监听 http://127.0.0.1:5244 ，WebDAV 在 /dav
     存储挂载路径 /cloudrdp （= 139 云盘整盘，由 $RootFolderID 决定）
     数据实际落在 /cloudrdp/AI文件库/CloudRDP （139 侧「全部文件 > AI文件库 > CloudRDP」）
@@ -27,7 +27,9 @@
 
 $ErrorActionPreference = "Stop"
 
-$AlistDir  = "C:\alist"
+# 统一系统目录：放 D 盘（C 盘只保留 runner 镜像基线，不额外占用）
+$SysDir = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
+$AlistDir  = Join-Path $SysDir "alist"
 $AlistExe  = Join-Path $AlistDir "alist.exe"
 $DataDir   = Join-Path $AlistDir "data"
 $BaseUrl   = "http://127.0.0.1:5244"

@@ -21,7 +21,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } else { "C:\_snapshot" }),
+    [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
@@ -33,7 +33,13 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$RcloneExe = "C:\rclone\rclone.exe"
+$SysDir    = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
+$RcloneExe = Join-Path $SysDir "rclone\rclone.exe"
+
+# 安装型程序共享库（用于记录「镜像自带程序」基线，供关机时做增量判定）
+$programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
+if (Test-Path -LiteralPath $programsLib) { . $programsLib }
+else { Write-Warning "[pre-restore] 未找到 programs-lib.ps1，将无法记录程序基线" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -64,6 +70,26 @@ $doPrepare   = [bool](Get-Cfg $preCfg 'prepareDirs' $true)
 $doRollback  = [bool](Get-Cfg $preCfg 'recordRollback' $true)
 
 Say "===== 预还原开始（Stage=$Stage）====="
+
+# ---------------------------------------------------------------- 0. 记录「镜像自带程序」基线
+# 必须在任何还原动作之前执行：基线里的程序一律不备份，
+# 否则镜像自带的约 120GB 工具链（VS / Android SDK / 缓存）会被传上云盘。
+$stateDir = Join-Path $SysDir "_state"
+try { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null } catch { }
+try {
+    if (Get-Command Get-InstalledPrograms -ErrorAction SilentlyContinue) {
+        $allApps = @(Get-InstalledPrograms)
+        $regs = [object[]]($allApps | ForEach-Object { $_.regPath } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        ([pscustomobject]@{
+            recordedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            count       = $regs.Count
+            regPaths    = $regs
+        } | ConvertTo-Json -Depth 4) | Out-File -LiteralPath (Join-Path $stateDir "program-baseline.json") -Encoding UTF8
+        Say ("镜像程序基线已记录：{0} 项 -> program-baseline.json" -f $regs.Count)
+    } else {
+        Warn "未加载 programs-lib.ps1，跳过程序基线记录（本次将不做安装型程序备份）"
+    }
+} catch { Warn "记录程序基线失败：$_" }
 
 # ---------------------------------------------------------------- 1. 拉取
 if ($Pull) {
@@ -120,6 +146,23 @@ catch {
 
 if ($mf.rdpUser) { $RdpUser = $mf.rdpUser }
 
+# 记录「上次备份过的程序」-> 关机时继续带上（跨运行持久：镜像里没有它们，但必须留住）
+try {
+    $prevRegs = @()
+    if ($mf.apps -and $mf.apps.programs) {
+        foreach ($pg in @($mf.apps.programs)) {
+            if ($pg.regPath) { $prevRegs += [string]$pg.regPath }
+        }
+    }
+    $prevArr = [object[]]$prevRegs
+    ([pscustomobject]@{
+        recordedUtc = (Get-Date).ToUniversalTime().ToString('o')
+        count       = $prevArr.Count
+        regPaths    = $prevArr
+    } | ConvertTo-Json -Depth 4) | Out-File -LiteralPath (Join-Path $stateDir "prev-programs.json") -Encoding UTF8
+    Say ("上次备份过的程序：{0} 项（本次会继续带上）" -f $prevArr.Count)
+} catch { Warn "记录历史程序清单失败：$_" }
+
 $mfVersion = 1
 if ($mf.version) { $mfVersion = [int]$mf.version }
 
@@ -143,6 +186,12 @@ $pm = Join-Path $Stage "apps\portable.json"
 if (Test-Path -LiteralPath $pm) {
     try { Get-Content -LiteralPath $pm -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null }
     catch { $problems.Add("bad-portable-manifest") }
+}
+# 2d. 安装型程序清单可解析
+$pgm = Join-Path $Stage "programs\programs.json"
+if (Test-Path -LiteralPath $pgm) {
+    try { Get-Content -LiteralPath $pgm -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null }
+    catch { $problems.Add("bad-programs-manifest") }
 }
 
 $prevalidate = if ($problems.Count -eq 0) { "OK" } else { "PARTIAL" }
@@ -199,6 +248,21 @@ if ($mf.plan) {
             }
         } catch { }
     }
+}
+
+# 补充：plan 里没有 program 项但清单存在时补上（兼容旧 manifest）
+$hasProgramPlan = $false
+foreach ($pp in $plan) { if ([string]$pp.type -eq 'program') { $hasProgramPlan = $true; break } }
+if (-not $hasProgramPlan -and (Test-Path -LiteralPath $pgm)) {
+    try {
+        $pgObj = Get-Content -LiteralPath $pgm -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($a in @($pgObj.programs)) {
+            $plan.Add([pscustomobject]@{
+                type = 'program'; originalPath = [string]$a.originalPath
+                store = [string]$a.store; scope = (Get-ScopeOf ([string]$a.originalPath))
+            })
+        }
+    } catch { }
 }
 
 $planPath = Join-Path $Stage "restore-plan.json"
