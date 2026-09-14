@@ -16,6 +16,10 @@ on:
         description: '是否把 139 老路径(/CloudRDP,/_snapshot)迁移到 AI文件库 下（true/false）'
         required: false
         default: 'false'
+      slim_image:
+        description: '开机瘦身（删镜像自带大件，约释放 70GB）：auto/always/off'
+        required: false
+        default: 'auto'
   schedule:
     # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
     - cron: '30 0 * * *'
@@ -52,6 +56,7 @@ env:
   INPUT_DURATION: "${{ inputs.duration_minutes }}"
   INPUT_INSTALL_APPS: "${{ inputs.install_apps }}"
   INPUT_MIGRATE_139: "${{ inputs.migrate_139 }}"
+  INPUT_SLIM: "${{ inputs.slim_image }}"
 
 jobs:
   build:
@@ -65,7 +70,11 @@ jobs:
       - name: 0. 拉取仓库
         uses: actions/checkout@v4
 
-      - name: 0b. C 盘守卫：记录基线
+      - name: 0b. 开机瘦身（删镜像自带大件，约 70 GB）
+        shell: pwsh
+        run: .\scripts\slim-image.ps1
+
+      - name: 0c. C 盘守卫：记录基线（在瘦身之后）
         shell: pwsh
         run: .\scripts\disk-guard.ps1 -Baseline
 
@@ -195,6 +204,15 @@ jobs:
             Write-Host "  D 盘可用     : $($env:DISK_D_FREE_GB) GB  (数据 / 快照 / 程序实体都在 D 盘)" -ForegroundColor DarkGray
             if ($dg -eq "OVER") {
               Write-Host "  !! C 盘增量超限：大文件请放 D 盘；新装程序尽量装到 D 盘 !!" -ForegroundColor Red
+            }
+          }
+          $sl = $env:SLIM_STATUS
+          if (-not [string]::IsNullOrWhiteSpace($sl)) {
+            $slc = "DarkGray"
+            if ($sl -eq "OK") { $slc = "Green" } elseif ($sl -eq "PARTIAL") { $slc = "Yellow" }
+            Write-Host "  开机瘦身     : $sl   释放 $($env:SLIM_FREED_GB) GB（删除 $($env:SLIM_TARGETS_DELETED) 项镜像大件，保护 $($env:SLIM_TARGETS_GUARDED) 项）" -ForegroundColor $slc
+            if ($sl -eq "PARTIAL") {
+              Write-Host "  (瘦身后仍高于目标 —— 把大件路径加到 snapshot-config.json 的 slim.targets)" -ForegroundColor DarkGray
             }
           }
           $pv = $env:SNAPSHOT_PREVALIDATE

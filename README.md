@@ -238,36 +238,59 @@
   「AI文件库」的**文件夹 ID**（139 网页 F12 从请求里取），AList 的 `/cloudrdp` 会直接映射到该文件夹，
   远端路径即回归纯 ASCII（`alist:/cloudrdp/CloudRDP`），脚本原生支持，无需改代码
 
-#### ⑦ C 盘策略：守住「我们的增量 ≤ 30%」
+#### ⑦ C 盘策略：开机瘦身（压到 ≤30%）+ 增量守卫
 
-**先说清一个硬事实**：GitHub 托管的 Windows runner，C 盘 **150 GB 里约 120 GB 是镜像自带**的
-（Visual Studio 2022 / Android SDK / `hostedtoolcache` / Azure CLI …），**开机就是约 80%**。
-这个基线动不了（删它要 10–25 分钟，还会破坏依赖这些工具链的程序，Windows 更新也可能失败）。
-所以「C 盘占用 ≤ 30%」字面做不到 —— 本项目守的是**我们产生的那部分**：
+**硬事实**：GitHub 托管 Windows runner 的 C 盘 **150 GB 里约 120 GB 是镜像自带**的
+（Visual Studio 2022 / Android SDK / `hostedtoolcache` / Windows SDK / SQL Server / JDK / 浏览器 …），
+**开机就是约 80%**。要让它 ≤30%，只能把这些**用不到的大件删掉**。于是分两手：
+
+**① 开机瘦身（`scripts/slim-image.ps1`，第 0b 步）** —— 删镜像大件，约释放 **70 GB**：
+
+| 目标 | 约占用 |
+|------|--------|
+| `C:\Program Files\Microsoft Visual Studio` | 30–35 GB |
+| `C:\Android` | 10–15 GB |
+| `C:\hostedtoolcache` | 10–12 GB |
+| Windows SDK / MSBuild / MS SQL Server / LLVM / CMake / R / Strawberry / Mercurial / Docker / AWS / AzureCLI | 15–20 GB |
+| Chrome / Firefox | ~1.5 GB |
+
+- 模式 `slim.mode`：`auto`（默认，**仅当 C 盘占用 > `targetPercent` 时才瘦身**）/ `always` / `off`
+- 手动触发时可用输入 **`slim_image`** 临时覆盖（`auto` / `always` / `off`）
+- 只删 `slim.targets` 里**显式列出**的路径，不做任何通配扫描
+- **硬保护名单**（写死，配置里写了也不会删）：`C:\Windows`、`C:\Users`、
+  `C:\Program Files\WindowsApps`（**winget 在这**）、`C:\Program Files\PowerShell`（**我们自己要跑 pwsh**）、
+  Windows Defender、Common Files、IE、`Microsoft\Edge` / `EdgeWebView`（WebView2 依赖）、`C:\actions-runner`，
+  以及工作区 / 数据目录 / 系统目录 / 快照暂存 / 程序还原根
+- 保护判断同时拦「受保护目录内部」**和**「受保护目录的父目录」—— 所以配置里写 `C:\Program Files\Microsoft`
+  这种宽泛父目录会被**直接拒绝**（因为它内含受保护的 Edge）
+- 默认**不动**可能被你的程序依赖的运行时：`.NET` / `nodejs` / `Java` / `Eclipse Adoptium`
+  （清单里 `enabled: false`，需要时改 `true`）
+- 另附：关休眠（回收 `hiberfil.sys`）；可选 `runDismComponentCleanup`（默认关，较慢）
+- fail-soft：删不掉只告警，**永不返回非 0**
+
+**② 增量守卫（`scripts/disk-guard.ps1`，第 0c / 10b / 保活每 30 分钟 / 收尾）** —— 瘦身后继续守住「我们产生的增量」：
 
 ```
-增量 = 当前 C: 已用 − 开机基线已用   ≤   基线可用空间 × 30%   （默认约 9.3 GB）
+增量 = 当前 C: 已用 − 开机基线已用   ≤   基线可用空间 × 30%
 ```
 
-怎么做到：
+> 顺序很关键：**先瘦身（0b）再记基线（0c）** —— 基线反映瘦身后的真实起点，
+> 可用空间从约 31 GB 变成约 105 GB，增量上限也随之从 9.3 GB 变成约 31 GB。
 
-| 措施 | 说明 |
-|------|------|
-| **产物全落 D 盘** | 数据 `D:\a\cloud-rdp`；rclone / AList / 快照暂存 / 程序实体全在 `D:\cloudrdp-sys`。C 盘上不留我们的东西 |
-| **磁盘守卫** | `scripts/disk-guard.ps1`：开机记基线（第 0b 步）→ 打印连接信息前（第 10b 步）、保活期每 30 分钟、收尾（第 13 步）各执行一次 |
-| **安全清理** | 超限时清临时目录、Windows 更新缓存、安装包残留、旧版 `C:\_snapshot` 遗留；**绝不触碰**数据目录 / 快照暂存 / 系统目录（有父目录保护） |
-| **junction 还原** | 装到 C 盘的程序，还原时实体落 D 盘、原路径建 junction → 原路径照常可用，**C 盘零增长**（见 ⑧） |
+其余措施：产物全落 D 盘（数据 / rclone / AList / 快照暂存 / 程序实体）；超限时安全清理临时文件、
+Windows 更新缓存、安装包残留。
 
-连接信息里会实时显示：
+连接信息里会显示：
 
 ```
-  C 盘占用     : 80.2%  (120.4 / 150.1 GB)   本次增量 12 MB / 上限 9298 MB
+  开机瘦身     : OK   释放 69.8 GB（删除 24 项镜像大件，保护 0 项）
+  C 盘占用     : 29.4%  (44.1 / 150.1 GB)   本次增量 12 MB / 上限 31452 MB
   D 盘可用     : 146.9 GB  (数据 / 快照 / 程序实体都在 D 盘)
 ```
 
-- 状态：`DISK_GUARD_STATUS` = `BASELINE` / `OK` / `FIXED` / `OVER`；`OVER` 会**红色高亮**并给出提示
-- 阈值：改 `snapshot-config.json` 的 `disk.maxIncrementalPercent`（或用 `disk.maxIncrementalMB` 设绝对上限）
-- 脚本**永不返回非 0**，不会因为磁盘告警挡住 RDP 启动
+- 状态：`SLIM_STATUS` = `OK` / `PARTIAL` / `SKIPPED` / `DRYRUN`；`DISK_GUARD_STATUS` = `BASELINE` / `OK` / `FIXED` / `OVER`
+- 阈值：`snapshot-config.json` 的 `slim.targetPercent`、`disk.maxIncrementalPercent`
+- 两个脚本都**永不返回非 0**，不会因为磁盘问题挡住 RDP 启动
 
 #### ⑧ 安装型程序复刻：备份目录 + Uninstall 注册表 → junction 还原
 
@@ -312,7 +335,8 @@ cloud-rdp/
     ├── snapshot-config.json            # 整机快照清单（改这里调整备份/还原范围 + C 盘阈值）
     ├── portable-lib.ps1                # 可移动程序：识别 / 搬运 / 按原路径还原
     ├── programs-lib.ps1                # 【新】安装型程序：目录级备份 / Uninstall 注册表 / junction 还原
-    ├── disk-guard.ps1                  # 【新】C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
+    ├── disk-guard.ps1                  # C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
+    ├── slim-image.ps1                  # 【新】开机瘦身：删镜像自带大件（VS / Android SDK / 工具缓存），约释放 70 GB
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
     ├── reinstall-apps.ps1              # winget 后台逐包重装（日志 + 进度 JSON）
@@ -324,7 +348,8 @@ cloud-rdp/
 | # | 步骤 | 说明 |
 |---|------|------|
 | 0 | 拉仓库 | `actions/checkout` |
-| **0b** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline` |
+| **0b** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
+| **0c** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
 | 1–2 | 开 RDP / 建账号+数据目录 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
 | 3–6 | Tailscale / AList 密码 / rclone / 部署 AList | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys` |
 | **7** | **（可选）迁移 139 老路径** | 仅当 `migrate_139=true` |
@@ -352,7 +377,10 @@ cloud-rdp/
 | 第 6 步报「创建 139 存储失败」 | `Authorization` 过期或复制多了 `Basic` | 重新获取 Authorization，只取 `Basic ` 后那段，更新 Secret |
 | 第 6 步报驱动不存在 | AList 版本驱动名不同 | 日志会打印可用驱动列表，改 `setup-alist.ps1` 里的 `$driverKey` |
 | `sync-down` 退出码非 0 | 首次运行远端为空（正常）/ Authorization 过期 | 首次可忽略；否则更新 Secret |
-| C 盘占用显示 80%+ | 那是 runner **镜像自带**的（VS / Android SDK / 工具缓存），开机就有 | 正常。我们守的是「本次增量」，见 ⑦ |
+| C 盘占用显示 80%+ | 瘦身被关了（`slim.mode=off` 或输入 `slim_image=off`），或瘦身失败 | 见 ⑦；把 `slim.mode` 改回 `auto`，或看日志里 `SLIM_STATUS` |
+| `SLIM_STATUS=PARTIAL` | 清单没覆盖到某个大件 | 看日志里瘦身后的百分比；把大件路径加进 `snapshot-config.json` 的 `slim.targets` |
+| 瘦身后某个程序打不开 | 它依赖被删掉的镜像组件（如 .NET / Java 运行时） | 把对应项在 `slim.targets` 里改 `enabled: false`，或让它装到 D 盘 |
+| 瘦身太慢 | 删除 ~70 GB 需要几分钟；开了 DISM 更久 | 正常。想更快就把 `slim.targets` 里的大件精简 |
 | C 盘增量显示 `OVER` | 有大文件写进了 C 盘，或新程序装到了 C 盘 | 大文件放 `D:\a\cloud-rdp`；新装程序选 D 盘；或调大 `disk.maxIncrementalPercent` |
 | 某程序还原后打不开 | 写死了绝对路径 / 需要注册服务 / 体积超上限被跳过 | 看日志里 `跳过：xxx`；调大 `programs.maxMBPerApp`，或设 `programs.preferJunction=false` 直接还原到原路径 |
 | 安装型程序备份很慢 | 139 WebDAV 约 0.45 MB/s，首次要传字节 | 正常，首次慢、之后只传变化；用 `programs.maxTotalMB` 控总量 |
