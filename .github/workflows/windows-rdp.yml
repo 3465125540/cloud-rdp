@@ -30,13 +30,23 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
 
-      - name: 2. 创建管理员账号
+      - name: 2. 创建管理员账号 + 桌面快捷方式
         shell: powershell
         run: |
           $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
           "RDP_USER=$env:RDP_USERNAME" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+          # 公共桌面放一个指向同步目录的快捷方式，避免把文件存到不会被同步的地方
+          try {
+            New-Item -ItemType Directory -Force -Path "C:\data" | Out-Null
+            $ws = New-Object -ComObject WScript.Shell
+            $lnk = $ws.CreateShortcut("$env:PUBLIC\Desktop\CloudData.lnk")
+            $lnk.TargetPath = "C:\data"
+            $lnk.Description = "与 139 云盘自动同步的目录"
+            $lnk.Save()
+            Write-Host "已创建桌面快捷方式: CloudData -> C:\data"
+          } catch { Write-Host "创建桌面快捷方式失败: $_" }
 
       - name: 3. 安装并连接 Tailscale
         shell: powershell
@@ -82,7 +92,13 @@ jobs:
           Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
           Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
-          Write-Host "  Data         : C:\data  (已与 139 云盘同步)" -ForegroundColor Yellow
+          $rs = $env:RESTORE_STATUS
+          if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }
+          $rc = switch ($rs) { "OK" { "Green" } "FAILED" { "Red" } default { "DarkGray" } }
+          Write-Host "  数据恢复     : $rs   (C:\data 已与 139 云盘同步)" -ForegroundColor $rc
+          if ($rs -eq "FAILED") {
+            Write-Host "  !! 恢复失败：139 Authorization 可能已过期，C:\data 当前为空，别在上面存重要东西 !!" -ForegroundColor Red
+          }
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
