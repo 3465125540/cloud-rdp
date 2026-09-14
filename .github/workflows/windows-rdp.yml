@@ -128,7 +128,13 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($ss)) { $ss = "UNKNOWN" }
           $sc = "DarkGray"
           if ($ss -eq "OK") { $sc = "Green" } elseif ($ss -eq "PARTIAL") { $sc = "Yellow" } elseif ($ss -eq "FAILED") { $sc = "Red" }
-          Write-Host "  整机还原     : $ss   ($($env:SNAPSHOT_RESTORED_DIRS) 个目录；个人配置在首次登录时自动还原)" -ForegroundColor $sc
+          $rd = $env:SNAPSHOT_RESTORED_DIRS
+          if ([string]::IsNullOrWhiteSpace($rd)) { $rdTxt = "个人配置在首次登录时自动还原" }
+          else { $rdTxt = "$rd 个目录已还原；个人配置在首次登录时自动还原" }
+          Write-Host "  整机还原     : $ss   ($rdTxt)" -ForegroundColor $sc
+          if ($ss -eq "EMPTY") {
+            Write-Host "  (139 上还没有整机快照 —— 首次运行正常，本次关机前会自动生成第一份)" -ForegroundColor DarkGray
+          }
           if ($ss -eq "FAILED") {
             Write-Host "  !! 整机还原失败：本次是全新环境，之前装的软件/设置不会自动回来 !!" -ForegroundColor Red
           }
