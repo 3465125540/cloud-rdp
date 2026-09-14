@@ -97,6 +97,7 @@ jobs:
         shell: powershell
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_BILLING_TOKEN: ${{ secrets.GH_BILLING_TOKEN }}
         run: |
           & .\scripts\quota-report.ps1
           Write-Host ""
@@ -118,10 +119,12 @@ jobs:
             $qi = [int]$qp
             $qc = "DarkGray"
             if ($qi -le 20) { $qc = "Red" } elseif ($qi -le 50) { $qc = "Yellow" }
-            Write-Host "  Actions 额度 : 剩余 $qi%  (≈$($env:QUOTA_LEFT_MIN) 额度)" -ForegroundColor $qc
+            $src = $env:QUOTA_SOURCE
+            if ($src -eq "billing-api") { $src = "官方API" }
+            elseif ($src -eq "run-history") { $src = "本仓库估算" }
+            Write-Host "  Actions 额度 : 剩余 $qi%  (≈$($env:QUOTA_LEFT_MIN) 分钟 / $src)" -ForegroundColor $qc
             if ($qi -le 20) {
-              $runsLeft = [int][math]::Floor([int]$env:QUOTA_LEFT_MIN / 700)
-              Write-Host "  !! 额度告急：跑满约 $runsLeft 次后定时会静默停摆，次月 1 号才重置 !!" -ForegroundColor Red
+              Write-Host "  !! 额度告急：只剩 $($env:QUOTA_LEFT_MIN) 分钟，定时任务随时静默停摆，次月 1 号才重置 !!" -ForegroundColor Red
             }
           }
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta

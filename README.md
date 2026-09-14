@@ -83,16 +83,20 @@
 
 启动后等约 5–8 分钟，展开 **8. 估算额度 + 打印连接信息** 步骤记下 **Tailscale IP**；也可在 https://login.tailscale.com/admin/machines 看到 `github-rdp-server*` 设备。
 
-> ⚠️ **额度警告**：单次约 **700 额度**（5h50m × Windows 2× 倍率），私有仓库免费额度 2000/月
-> → 只够约 **3 次满时长**。若两场定时都开满，**大约 3 天就把整月额度烧完**，
-> 之后 Actions 直接停摆，直到次月 1 号重置。
+> ⚠️ **额度警告（实测口径）**：GitHub Free 私有仓库 **2000 分钟/月**，
+> 官方 Billing API 显示额度**按原始分钟抵扣、不乘 Windows 2× 倍率**
+> （实测：本月 1858 分钟 Windows 用量 → `grossAmount` $18.58、`netAmount` **$0.00**，全额抵扣）。
+> 一次满时长 run ≈ **350 分钟** → 整月约 **5~6 次**。
+> 额度耗尽后 Actions 直接停摆、**不会报错**，直到次月 1 号重置。
 > 想长期每天跑，必须换**公开仓库**（无限额度，但有风控/封号风险）或**真·云服务器**。
 
-> 💡 **内置额度告警**：每次开机时 step 8 会算出本月已用额度并显示剩余百分比 ——
-> **≤50% 变黄、≤20% 变红**并提示还能开几次。
-> 算法：`本仓库本月所有 run 的墙钟分钟 × 2（Windows 倍率）`，脚本见 `scripts/quota-report.ps1`。
-> 局限：只统计**本仓库**的消耗，且数字是「截至本次开机」。想更准可换成带 `user` scope 的
-> 令牌直接查 Billing API（`/users/{user}/settings/billing/actions`）。
+> 💡 **内置额度告警**：每次开机时 step 8 会算出本月已用额度并显示剩余 ——
+> **≤50% 变黄、≤20% 变红**。
+> - **首选数据源**：官方 Billing API `GET /users/{owner}/settings/billing/usage?year=&month=`
+>   → 账号级准确数字，**需要 `user` scope 的令牌**（存于 Secret `GH_BILLING_TOKEN`）
+> - **回退数据源**：本仓库 run 历史求和（`GITHUB_TOKEN` + `actions: read`）
+>   → 只算本仓库，会**严重低估**（实测：真实 1858 分钟，回退只算出 181）
+> - 脚本：`scripts/quota-report.ps1`，输出的 `QUOTA_SOURCE` 会显示实际用了哪个源
 
 ### 3. 本地连接
 
