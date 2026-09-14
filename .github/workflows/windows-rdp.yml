@@ -1,8 +1,13 @@
 name: Windows Cloud RDP
 
-# 仅手动触发。刻意不加 schedule（定时任务是 GitHub 风控首要特征）。
+# 手动触发 + 定时（北京时间；GitHub cron 一律用 UTC）
 on:
   workflow_dispatch:
+  schedule:
+    # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
+    - cron: '30 0 * * *'
+    # 午场：北京 13:30 开机（UTC 05:30）→ 跑到 17:30（UTC 09:30）
+    - cron: '30 5 * * *'
 
 # 防止重复触发堆积
 concurrency:
@@ -13,6 +18,8 @@ concurrency:
 env:
   RDP_USERNAME: NvdAdmin
   RDP_PASSWORD: "Rdp@2026#Nvd"
+  # 手动触发 = 跑满 5h50m；定时触发 = 跑到所在窗口结束（11:30 / 17:30 北京）
+  IS_MANUAL: "${{ github.event_name == 'workflow_dispatch' }}"
 
 jobs:
   build:
@@ -102,14 +109,31 @@ jobs:
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
-      - name: 9. 保活 + 每 10 分钟同步一次（约 5 小时 50 分）
+      - name: 9. 保活（定时场跑到窗口结束；手动场约 5 小时 50 分）
         shell: powershell
         run: |
-          for ($i = 1; $i -le 350; $i++) {
-              Start-Sleep -Seconds 60
-              Write-Host "[$i/350] server running..."
-              if ($i % 10 -eq 0) { & .\scripts\sync-up.ps1 }
+          $now = (Get-Date).ToUniversalTime()
+          if ($env:IS_MANUAL -eq "true") {
+              $stop = $now.AddMinutes(350)
+              Write-Host "[keepalive] 手动触发：保活 350 分钟，预计 $($stop.ToString('HH:mm')) UTC 结束"
+          } else {
+              $d  = $now.Date
+              $b1 = $d.AddHours(3).AddMinutes(30)      # 11:30 北京
+              $b2 = $d.AddHours(9).AddMinutes(30)      # 17:30 北京
+              if     ($now -lt $b1) { $stop = $b1 }
+              elseif ($now -lt $b2) { $stop = $b2 }
+              else                  { $stop = $now.AddMinutes(60) }
+              Write-Host "[keepalive] 定时触发：跑到 $($stop.ToString('HH:mm')) UTC 自动停止"
           }
+          $n = 0
+          while ((Get-Date).ToUniversalTime() -lt $stop) {
+              Start-Sleep -Seconds 60
+              $n++
+              $left = [int](($stop - (Get-Date).ToUniversalTime()).TotalMinutes)
+              Write-Host "[$n] server running... 剩余 $left 分钟"
+              if ($n % 10 -eq 0) { & .\scripts\sync-up.ps1 }
+          }
+          Write-Host "[keepalive] 已到窗口结束时间，开始收尾"
 
       - name: 10. 收尾全量同步到 139 云盘
         if: always()
