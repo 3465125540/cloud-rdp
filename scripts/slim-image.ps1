@@ -181,6 +181,27 @@ $freeBefore = Get-FreeBytes 'C'
 Say ("C 盘当前：已用 {0}%（可用 {1:N1} GB）| 模式 {2} | 目标 <= {3}%" -f `
     $usedBefore, ($freeBefore / 1GB), $Mode, $TargetPercent)
 
+# ---------------------------------------------------------------- 无条件删除（不受 enabled/mode/targetPercent 影响）
+# 例：用户明确不想保留的程序（Unity Hub）。放在 enabled/mode 检查之前，保证每次开机都执行。
+# 仍受硬保护名单（Test-NeverDelete）约束。
+$alwaysDelete = @(Get-Cfg $slimCfg 'alwaysDelete' @())
+if ($alwaysDelete.Count -gt 0) {
+    Say ("无条件删除清单：{0} 项" -f $alwaysDelete.Count)
+    if (-not $DryRun) { Stop-Lockers }
+    $adDone = 0; $adSkip = 0; $adGuard = 0; $adFail = 0
+    foreach ($p in $alwaysDelete) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $pp = ([string]$p).TrimEnd('\')
+        if (-not (Test-Path -LiteralPath $pp)) { $adSkip++; continue }
+        if (Test-NeverDelete -Path $pp) { Note "受保护，拒绝删除：$pp"; $adGuard++; continue }
+        if ($DryRun) { Say "[DryRun] 将删除 $pp"; continue }
+        if (Remove-BigTree -Path $pp) { Say "  已删除 $pp"; $adDone++ }
+        else { Warn "删除失败：$pp"; $adFail++ }
+    }
+    Set-GhEnv "SLIM_ALWAYS_DELETED=$adDone"
+    Say ("  无条件删除结果：删除 {0} / 不存在 {1} / 受保护 {2} / 失败 {3}" -f $adDone, $adSkip, $adGuard, $adFail)
+}
+
 if (-not $enabled -or $Mode -eq 'off') {
     Say "瘦身已关闭（enabled=$enabled, mode=$Mode），跳过"
     Set-GhEnv "SLIM_STATUS=SKIPPED"

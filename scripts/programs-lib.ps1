@@ -416,7 +416,8 @@ function Restore-Programs {
         [string]  $ProgramsRoot = '',
         [switch]  $PreferJunction,
         [string]  $UserPrefix = '',
-        [switch]  $InvertScope
+        [switch]  $InvertScope,
+        [string[]]$ExcludePaths = @()      # 永不还原的程序目录（按前缀匹配）
     )
 
     $restored  = 0
@@ -428,6 +429,16 @@ function Restore-Programs {
     foreach ($e in @($Entries)) {
         $orig = [string]$e.originalPath
         if ([string]::IsNullOrWhiteSpace($orig)) { continue }
+
+        # 排除名单（前缀匹配）：即使旧快照里含它，也不还原
+        $excluded = $false
+        foreach ($ep in @($ExcludePaths)) {
+            if (-not [string]::IsNullOrWhiteSpace($ep) -and
+                $orig.TrimEnd('\').ToLower().StartsWith(([string]$ep).TrimEnd('\').ToLower())) {
+                $excluded = $true; break
+            }
+        }
+        if ($excluded) { continue }
 
         if ($prefix) {
             $inUser = $orig.ToLower().StartsWith($prefix)

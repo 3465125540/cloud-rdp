@@ -27,7 +27,8 @@
       "%RDPUSERPROFILE%\\.gitconfig",
       "%RDPUSERPROFILE%\\.wslconfig",
       "%RDPUSERPROFILE%\\.npmrc",
-      "%RDPUSERPROFILE%\\.condarc"
+      "%RDPUSERPROFILE%\\.condarc",
+      "%RDPUSERPROFILE%\\.workbuddy-ai"
     ],
     "_comment_excludeDirs": "按目录名排除（任意层级匹配），避免把缓存/依赖/仓库元数据拖进来",
     "excludeDirNames": [
@@ -118,6 +119,7 @@
     "excludePaths": [],
     "maxMBPerApp": 2048,
     "maxTotalMB": 8192,
+    "excludePaths": [ "C:\\Program Files\\Unity Hub" ],
     "blocklist": [
       "VC\\+\\+ .*Redistributable",
       "\\.NET .*Runtime",
@@ -125,7 +127,8 @@
       "Microsoft Edge",
       "WebView2",
       "Windows Software Development Kit",
-      "Microsoft Visual"
+      "Microsoft Visual",
+      "Unity Hub"
     ]
   },
 
@@ -177,7 +180,8 @@
     "_comment_size0": "0 = 不限（本项目按需求设为不限）。139 实测约 0.45 MB/s，推送前会估算 ETA 并给 rclone 设 --max-duration",
     "maxMBPerApp": 0,
     "maxTotalMB": 0,
-    "excludePaths": [],
+    "_comment_excludePaths": "永不备份、永不还原的程序目录（按前缀匹配）。例：用户明确不想要的程序。",
+    "excludePaths": [ "C:\\Program Files\\Unity Hub" ],
     "_comment_dataGlobs": "程序关联数据的显式补充/覆盖：dirs 里写 %VAR% 形式路径。留空则只按程序名/发布商自动匹配",
     "dataGlobs": [],
     "_comment_imageBlockPaths": "留空=使用脚本内置的 runner 镜像路径黑名单（VS / Android SDK / hostedtoolcache / AzureCLI …）",
@@ -189,8 +193,18 @@
       "Microsoft Edge",
       "WebView2",
       "Windows Software Development Kit",
-      "Microsoft Visual"
+      "Microsoft Visual",
+      "Unity Hub"
     ]
+  },
+
+  "chinese": {
+    "_comment": "开机时（用户登录前）把系统语言设为简体中文并配置微软拼音输入法，让 NvdAdmin 一登录就是中文环境。语言包需联网下载（约 1-3 分钟）。",
+    "_comment_order": "必须在「整机还原」之后执行 —— 否则快照里导入的英文 HKCU 会把中文设置覆盖掉。",
+    "enabled": true,
+    "primaryLocale": "zh-Hans-CN",
+    "secondaryLocale": "en-US",
+    "installLanguagePack": true
   },
 
   "disk": {
@@ -213,6 +227,8 @@
     "runDismComponentCleanup": false,
     "extraPaths": [],
     "keepPaths": [],
+    "_comment_alwaysDelete": "无条件删除清单：不受 enabled/mode/targetPercent 影响，每次开机都执行。用于清理「用户装的但明确不想要」的程序（如 Unity Hub）。仍受硬保护名单约束。",
+    "alwaysDelete": [ "C:\\Program Files\\Unity Hub" ],
     "targets": [
       { "path": "C:\\Program Files\\Microsoft Visual Studio", "enabled": true, "note": "VS2022 Enterprise，约 30-35 GB（最大头）" },
       { "path": "C:\\Program Files (x86)\\Microsoft Visual Studio", "enabled": true, "note": "VS 的 32 位组件 / Installer" },

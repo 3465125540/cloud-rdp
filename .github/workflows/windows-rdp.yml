@@ -20,6 +20,10 @@ on:
         description: '开机瘦身（删镜像自带大件，约释放 70GB）：auto/always/off'
         required: false
         default: 'auto'
+      chinese:
+        description: '开机设置简体中文 + 微软拼音输入法：on/off'
+        required: false
+        default: 'on'
   schedule:
     # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
     - cron: '30 0 * * *'
@@ -57,6 +61,7 @@ env:
   INPUT_INSTALL_APPS: "${{ inputs.install_apps }}"
   INPUT_MIGRATE_139: "${{ inputs.migrate_139 }}"
   INPUT_SLIM: "${{ inputs.slim_image }}"
+  INPUT_CHINESE: "${{ inputs.chinese }}"
 
 jobs:
   build:
@@ -154,6 +159,10 @@ jobs:
         shell: pwsh
         run: .\scripts\pre-restore.ps1 -Pull
 
+      - name: 9b. 设置中文 + 微软拼音输入法（登录前生效）
+        shell: pwsh
+        run: .\scripts\setup-chinese.ps1
+
       - name: 10. 后台重装软件（异步，不阻塞连接）
         shell: pwsh
         run: .\scripts\reinstall-apps.ps1 -Background
@@ -223,6 +232,15 @@ jobs:
             Write-Host "  开机瘦身     : $sl   释放 $($env:SLIM_FREED_GB) GB（删除 $($env:SLIM_TARGETS_DELETED) 项镜像大件，保护 $($env:SLIM_TARGETS_GUARDED) 项）" -ForegroundColor $slc
             if ($sl -eq "PARTIAL") {
               Write-Host "  (瘦身后仍高于目标 —— 把大件路径加到 snapshot-config.json 的 slim.targets)" -ForegroundColor DarkGray
+            }
+          }
+          $ch = $env:CHINESE_STATUS
+          if (-not [string]::IsNullOrWhiteSpace($ch)) {
+            $chc = "DarkGray"
+            if ($ch -eq "OK") { $chc = "Green" } elseif ($ch -eq "PARTIAL") { $chc = "Yellow" } elseif ($ch -eq "FAILED") { $chc = "Red" }
+            Write-Host "  中文环境     : $ch   (语言包 $($env:CHINESE_LANGPACK) / 系统 $($env:CHINESE_SYSTEMLOCALE) / 用户 $($env:CHINESE_USERHIVE))" -ForegroundColor $chc
+            if ($ch -eq "PARTIAL" -or $ch -eq "FAILED") {
+              Write-Host "  (中文未完全生效：登录后若无输入法，检查 139 上的语言包下载是否成功)" -ForegroundColor DarkGray
             }
           }
           $up = $env:SNAPSHOT_USER_PRERESTORE

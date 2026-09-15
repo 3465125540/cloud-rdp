@@ -86,6 +86,8 @@ $doShortcuts = [bool](Get-Cfg $restoreCfg 'shortcuts' $true)
 $programsCfg    = Get-Cfg $cfg 'programs' $null
 $doPrograms     = [bool](Get-Cfg $programsCfg 'enabled' $true)
 $preferJunction = [bool](Get-Cfg $programsCfg 'preferJunction' $true)
+# 永不还原的程序目录（前缀匹配）：即使旧快照里含它，也不放回来
+$programsExclude = [object[]](Get-Cfg $programsCfg 'excludePaths' @())
 $ProgramsRoot   = $(if ($env:CLOUDRDP_PROGRAMS_DIR) { $env:CLOUDRDP_PROGRAMS_DIR } else { (Join-Path $SysDir "programs") })
 
 function Get-SnapshotPrograms {
@@ -269,7 +271,8 @@ function Invoke-MachineRestore {
             $pgEntries = @(Get-SnapshotPrograms -Stage $Stage)
             if ($pgEntries.Count -gt 0) {
                 $pgRes = Restore-Programs -Entries $pgEntries -Stage $Stage -ProgramsRoot $ProgramsRoot `
-                            -PreferJunction:$preferJunction -UserPrefix ("C:\Users\" + $RdpUser) -InvertScope
+                            -PreferJunction:$preferJunction -UserPrefix ("C:\Users\" + $RdpUser) -InvertScope `
+                            -ExcludePaths $programsExclude
                 Say ("  安装型程序（机器级）已还原：{0} 个（{1} 个 junction 指向 D 盘）" -f $pgRes.restored, $pgRes.junctioned)
                 foreach ($pb in @($pgRes.problems)) { $problems.Add("program:$pb") }
             }
@@ -490,7 +493,8 @@ function Invoke-UserRestore {
             $pgEntries = @(Get-SnapshotPrograms -Stage $Stage)
             if ($pgEntries.Count -gt 0) {
                 $pgRes = Restore-Programs -Entries $pgEntries -Stage $Stage -ProgramsRoot $ProgramsRoot `
-                            -PreferJunction:$preferJunction -UserPrefix $env:USERPROFILE
+                            -PreferJunction:$preferJunction -UserPrefix $env:USERPROFILE `
+                            -ExcludePaths $programsExclude
                 Say ("  安装型程序（用户级）已还原：{0} 个（{1} 个 junction）" -f $pgRes.restored, $pgRes.junctioned)
                 foreach ($pb in @($pgRes.problems)) { $problems.Add("program:$pb") }
             }

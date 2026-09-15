@@ -116,7 +116,7 @@
 - 云主机里用 **`D:\a\cloud-rdp`** 存数据（**公共桌面已放 `CloudData` 快捷方式**，双击即达）
 - **开机自动恢复**：每次启动自动把 139 云盘的 `/AI文件库/CloudRDP` 拉回 `D:\a\cloud-rdp`
 - 运行中每 10 分钟推送到 139 云盘；关闭会话后还会做一次全量推送
-- 恢复结果会显示在 **「9. 估算额度 + 打印连接信息」** 步骤里：
+- 恢复结果会显示在 **「11. 估算额度 + 打印连接信息」** 步骤里：
 
   | 状态 | 含义 |
   |------|------|
@@ -141,7 +141,7 @@
 
 | 类别 | 内容 |
 |------|------|
-| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、**公共桌面 `C:\Users\Public\Desktop`**、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig` 等 |
+| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、**公共桌面 `C:\Users\Public\Desktop`**、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig`、**`.workbuddy-ai`** 等 |
 | Edge 浏览器 | `%LOCALAPPDATA%\Microsoft\Edge\User Data`（历史 / 书签 / 偏好 / `Web Data` / 图标，以及 cookie、密码；**缓存类目录已排除**，见 ⑨） |
 | 程序关联数据 | 按程序名/发布商匹配的 `%APPDATA%`、`%LOCALAPPDATA%`、`%LOCALAPPDATA%\Programs`、`%PROGRAMDATA%` 一级子目录（见 ⑨） |
 | 注册表 | RDP 用户的 **HKCU** 子键（`Software`、`Control Panel\Desktop/Colors/International/Mouse/Keyboard`、`Environment`、`Console`、`Explorer\Advanced`）+ 机器级 `TimeZoneInformation`、`Session Manager\Environment`、`Nls\Language/Locale` |
@@ -275,7 +275,8 @@
 - 默认**不动**可能被你的程序依赖的运行时：`.NET` / `nodejs` / `Java` / `Eclipse Adoptium`
   （清单里 `enabled: false`，需要时改 `true`）
 - 另附：关休眠（回收 `hiberfil.sys`）；可选 `runDismComponentCleanup`（默认关，较慢）
-- 新增清理项：`C:\Program Files\Unity Hub`
+- **无条件删除清单 `slim.alwaysDelete`**（不受 `enabled`/`mode`/`targetPercent` 影响，每次开机都执行）——
+  当前含 `C:\Program Files\Unity Hub`。用于清理「用户明确不想要」的程序；仍受硬保护名单约束
 - fail-soft：删不掉只告警，**永不返回非 0**
 
 **② 增量守卫（`scripts/disk-guard.ps1`，第 0c / 10b / 保活每 30 分钟 / 收尾）** —— 瘦身后继续守住「我们产生的增量」：
@@ -350,13 +351,34 @@ Windows 更新缓存、安装包残留。
 - 开机基线由 `pre-restore.ps1` 的**第 0 阶段**在任何还原动作之前记录；上次备份过的程序清单也会带过来，
   保证「跨运行持久」——已还原的程序下次关机时仍会被备份，不会因为「基线里有」而被漏掉
 
+#### ⑩ 中文环境：简体中文 + 微软拼音输入法（登录前生效）
+
+runner 镜像默认 **en-US**，NvdAdmin 首次登录是纯英文界面且**没有中文输入法**。
+`scripts/setup-chinese.ps1` 在**整机还原之后、保活之前**（第 9b 步）把环境配好：
+
+| 层级 | 做什么 |
+|------|--------|
+| **语言包** | `Install-Language zh-Hans-CN`（LanguagePackManagement 模块），失败回退 `Add-WindowsCapability` |
+| **机器级（HKLM）** | `Set-WinSystemLocale zh-CN` + `Set-WinUILanguageOverride` + `Set-WinDefaultInputMethodOverride`（微软拼音）+ `Set-WinHomeLocation`（中国） |
+| **用户级（NvdAdmin HKCU）** | 写「语言列表 `zh-Hans-CN` + `en-US`」+ **微软拼音 TIP** + `Keyboard Layout\Preload`（`1=00000804` 中文、`2=00000409` 美式键盘）。登录后即带中文输入法，`Win+Space` / `Ctrl+Space` 切换 |
+
+> **为什么直接写注册表**：`Set-WinUserLanguageList` 只作用于「当前用户」，而脚本以 `runneradmin` 身份运行。
+> 所以先 `reg load` NvdAdmin 的 `NTUSER.DAT`（复用预还原那套机制），按一台真实中文 Windows 的结构写入，
+> 卸载后再尝试用 `Start-Process -Credential` 在该用户会话里跑一次 `Set-WinUserLanguageList` 做增强（失败不影响）。
+
+- **顺序很关键**：必须在**整机还原之后** —— 否则快照里导入的英文 HKCU（`Control Panel\International`）会把中文设置覆盖掉
+- 状态行：`中文环境 : OK   (语言包 OK / 系统 OK / 用户 OK)`，
+  透出 `CHINESE_STATUS` / `CHINESE_LANGPACK` / `CHINESE_SYSTEMLOCALE` / `CHINESE_USERHIVE`
+- 开关：`snapshot-config.json` 的 `chinese.enabled` / `installLanguagePack`；手动触发可用输入 **`chinese`** 填 `off` 跳过
+- fail-soft：**永不返回非 0**，语言包下载失败只告警（界面可能仍是英文，但区域 / 键盘布局已改）
+
 ---
 
 ## 五、目录结构
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（18 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（19 步，见下表）
 └── scripts/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
@@ -369,13 +391,14 @@ cloud-rdp/
     ├── programs-lib.ps1                # 安装型程序：目录级备份 / Uninstall 注册表 / junction 还原 / 关联数据匹配 / HKCR 命中
     ├── disk-guard.ps1                  # C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
     ├── slim-image.ps1                  # 【新】开机瘦身：删镜像自带大件（VS / Android SDK / 工具缓存），约释放 70 GB
+    ├── setup-chinese.ps1               # 【新】中文环境：装语言包 + 系统 locale + 写 NvdAdmin HKCU（微软拼音）
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
     ├── reinstall-apps.ps1              # winget 后台逐包重装（日志 + 进度 JSON）
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 18 步：
+工作流 19 步：
 
 | # | 步骤 | 说明 |
 |---|------|------|
@@ -387,6 +410,7 @@ cloud-rdp/
 | **7** | **（可选）迁移 139 老路径** | 仅当 `migrate_139=true` |
 | **8** | **从 139 拉取数据** | `sync-down.ps1` |
 | **9** | **预还原** | `pre-restore.ps1 -Pull`（记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
+| **9b** | **设置中文 + 微软拼音** | `setup-chinese.ps1`：装语言包 + 写 NvdAdmin HKCU（**必须在还原之后**，见 ⑩） |
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
 | **10b** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **11a** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
@@ -438,6 +462,10 @@ cloud-rdp/
 | winget 重装一直没动静 | 后台进程还在跑 / 清单为空（首次运行） | 看 `D:\cloudrdp-sys\_snapshot\_logs\apps-reinstall.log` 与 `apps-status.json`；首次运行无清单属正常 |
 | 想跳过自动重装 | —— | Run workflow 时把 `install_apps` 填 `false` |
 | `preCommands` 里的命令没生效 | 命令失败被 fail-soft 忽略（不阻断还原） | 看日志 `[pre-restore]   [n] 失败`；命令里建议用绝对路径 |
+| 登录后还是英文界面 | 语言包没装成功（`CHINESE_LANGPACK=FAILED`），或快照里的英文 HKCU 覆盖了设置 | 看第 9b 步日志；确认 `chinese.enabled=true` 且该步在「9. 预还原」**之后**执行 |
+| 中文输入法打不出字 | 用户 hive 写入失败（`CHINESE_USERHIVE` 非 `OK`） | 看日志 `[chinese]` 行；登录任务会兜底。也可登录后到「设置 → 时间和语言」手动添加中文 |
+| Unity Hub 又出现了 | 旧快照里含它 | 已在 `programs.excludePaths`（不备份/不还原）+ `slim.alwaysDelete`（开机删）双重排除；若仍出现，检查 139 上 `_snapshot/programs` 是否残留 |
+| 不想让 `.workbuddy-ai` 被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy-ai` 那行（改完提交即可） |
 
 ---
 
@@ -445,8 +473,8 @@ cloud-rdp/
 
 - **非官方用途**：用 GitHub Actions 跑个人云桌面不符合其服务条款，长期使用可能被限流/封号。本仓库默认**私有**以降低暴露面，但**无法保证账号安全**。
 - **不要存重要/隐私数据**：数据经 AList 非官方桥接写入 139 云盘，链路不保证稳定与安全。
-- **快照含敏感文件**：`.ssh`、`.aws`、`.config`、`.vscode` 等会被同步到 139 云盘。若不愿外传，
-  请在 `scripts/snapshot-config.json` 的 `files.dirs` 里删掉对应条目（改完提交即可）。
+- **快照含敏感文件**：`.ssh`、`.aws`、`.config`、`.vscode`、**`.workbuddy-ai`（对话记录 / 缓存）** 等会被同步到 139 云盘。
+  若不愿外传，请在 `scripts/snapshot-config.json` 的 `files.dirs` 里删掉对应条目（改完提交即可）。
 - **可移动程序会被复制一份**：默认 `copy` 会在数据目录里留副本（占额外磁盘），
   体积上限见 `portable.maxMBPerApp` / `portable.maxTotalMB`；不想用就设 `portable.enabled=false`。
 - **数据目录在 `D:\a\cloud-rdp`**：D 盘是 runner 的临时盘，机器销毁即消失 —— 持久化完全依赖 139，
