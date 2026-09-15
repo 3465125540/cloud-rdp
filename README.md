@@ -141,7 +141,9 @@
 
 | 类别 | 内容 |
 |------|------|
-| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig` 等 |
+| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、**公共桌面 `C:\Users\Public\Desktop`**、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig` 等 |
+| Edge 浏览器 | `%LOCALAPPDATA%\Microsoft\Edge\User Data`（历史 / 书签 / 偏好 / `Web Data` / 图标，以及 cookie、密码；**缓存类目录已排除**，见 ⑨） |
+| 程序关联数据 | 按程序名/发布商匹配的 `%APPDATA%`、`%LOCALAPPDATA%`、`%LOCALAPPDATA%\Programs`、`%PROGRAMDATA%` 一级子目录（见 ⑨） |
 | 注册表 | RDP 用户的 **HKCU** 子键（`Software`、`Control Panel\Desktop/Colors/International/Mouse/Keyboard`、`Environment`、`Console`、`Explorer\Advanced`）+ 机器级 `TimeZoneInformation`、`Session Manager\Environment`、`Nls\Language/Locale` |
 | 软件清单 | `winget export` + 注册表 Uninstall 扫描（**清单**，不是二进制） |
 | 安装型程序 | **程序目录本体** + 逐程序 Uninstall 注册表键（见 ⑧；只备份「用户装的」，镜像自带的约 120 GB 绝不碰） |
@@ -156,12 +158,15 @@
 
 | 作用域 | 何时 | 以谁的身份 | 干什么 |
 |--------|------|-----------|--------|
-| `machine` | 开机第 9 步 | `runneradmin` | 拉快照、还原机器级文件、导入机器注册表、恢复时区/电源、还原公共桌面，并**注册一个登录任务** |
-| `user` | RDP 用户**首次登录**时 | `NvdAdmin` | 还原个人目录文件、导入 HKCU、还原个人快捷方式与壁纸，然后**自注销任务**（只跑一次） |
+| `machine` | 开机第 9 步 | `runneradmin` | 拉快照、还原机器级文件、导入机器注册表、恢复时区/电源/关防火墙、还原公共桌面、**预创建用户配置文件并把个人桌面/文档/HKCU 直接还原到位**，再注册登录任务作兜底 |
+| `user` | RDP 用户**首次登录**时 | `NvdAdmin` | 兜底重放个人目录文件、HKCU、个人快捷方式与壁纸；**成功才自注销，失败保留任务下次重试**并在公共桌面写标记 |
 
-> 为什么要分两步：`NvdAdmin` 的 HKCU 与用户配置文件在他首次登录前**并不存在**，
-> 以 `runneradmin` 身份硬写会被 Windows 判为异常 profile 并在登录时重建，还原等于白做。
-> 顺带好处：HKCU 导出时会把 SID 归一化成 `__RDPUSER__` 占位符，换机后 SID 变了也能正确导入。
+> **开机即预还原**：先用 `Start-Process -Credential` 让 Windows 真正创建并注册该用户的配置文件
+> （`CreateProcessWithLogonW` 会 `LoadUserProfile`），再 `reg load` 它的 `NTUSER.DAT` 导入 HKCU
+> （把 `__RDPUSER__` 换成 `HKEY_USERS\_Restore`），最后 robocopy 个人文件。
+> 这样**一开机桌面就是满的**，不用等首次登录。失败会自动回退到登录任务，行为与旧版一致。
+>
+> HKCU 导出时会把 SID 归一化成 `__RDPUSER__` 占位符，换机后 SID 变了也能正确导入。
 
 **还原状态**显示在同一处连接信息里：`OK` / `PARTIAL` / `EMPTY` / `FAILED`。
 
@@ -169,8 +174,12 @@
 
 - 需要**授权码/硬件绑定**的商业软件，激活状态无法复刻
 - Windows 更新状态、驱动、运行中的进程状态不涉及
-- 浏览器 profile（Chrome/Edge 的 `User Data`）**刻意不抓**（体积以 GB 计、缓存为主），需要重新登录
-- 快照体积上限默认 **8 GB**（`files.maxTotalMB`），超出会跳过后续目录并告警
+- **Edge cookie / 密码跨机大概率解不开**（DPAPI 绑「用户+本机」）：历史、书签、偏好、`Web Data`、图标能回来，
+  但 cookie 与已保存密码需靠 **Edge 账号同步**恢复登录态。另外 cookie 属敏感凭证，会被上传到 139
+- **体积不设上限**（`files.maxTotalMB` / `programs.maxMBPerApp` / `programs.maxTotalMB` 全为 `0 = 不限`）。
+  139 实测约 0.45 MB/s：10 GB 约 6.3 小时，可能超出 6 小时 job 上限。推送前会估算 `SNAPSHOT_ETA_MIN`，
+  并按剩余时间给 rclone 设 `--max-duration`；大目录用 `rclone copy`（**可断点续传、被中断也不会毁远端**）
+- Chrome 的 profile 仍未抓（只有 Edge）
 - 已装软件的**二进制本体**：可移动程序**直接搬运**（见 ③）、安装型程序**目录级备份 + junction 还原**（见 ⑧）、
   其余靠**后台 winget 重装**（见 ⑤）。三条路互补；覆盖不到的主要是「需授权码 / 硬件绑定」的商业软件
 
@@ -266,6 +275,7 @@
 - 默认**不动**可能被你的程序依赖的运行时：`.NET` / `nodejs` / `Java` / `Eclipse Adoptium`
   （清单里 `enabled: false`，需要时改 `true`）
 - 另附：关休眠（回收 `hiberfil.sys`）；可选 `runDismComponentCleanup`（默认关，较慢）
+- 新增清理项：`C:\Program Files\Unity Hub`
 - fail-soft：删不掉只告警，**永不返回非 0**
 
 **② 增量守卫（`scripts/disk-guard.ps1`，第 0c / 10b / 保活每 30 分钟 / 收尾）** —— 瘦身后继续守住「我们产生的增量」：
@@ -292,6 +302,11 @@ Windows 更新缓存、安装包残留。
 - 阈值：`snapshot-config.json` 的 `slim.targetPercent`、`disk.maxIncrementalPercent`
 - 两个脚本都**永不返回非 0**，不会因为磁盘问题挡住 RDP 启动
 
+**③ 关闭 Windows 防火墙** —— runner 镜像（windows-2025）现在**默认开启**防火墙，会拦掉 SMB(445)、AList(5244) 等。
+现在三层处理：第 1 步 `Set-NetFirewallProfile -All -Enabled False` 关闭；`system.firewall=false`
+不再导出/导入 `.wfw` 整策略（**避免它把防火墙改回开启**）；还原流程在系统设置之后**无条件再关一次**。
+> 只关 Tailscale 内网可达性，机器没有公网 IP，暴露面可控。
+
 #### ⑧ 安装型程序复刻：备份目录 + Uninstall 注册表 → junction 还原
 
 装在 `Program Files` 那类程序（MSI / 带卸载器的），光靠 winget 重装可能装不回原样、原路径、原版本。
@@ -305,16 +320,33 @@ Windows 更新缓存、安装包残留。
 | 还原 | 程序实体落 **`D:\cloudrdp-sys\programs\<镜像>`**，在原路径（如 `C:\Program Files\Foo`）建 **junction** 指过去；随后导入 Uninstall 键 |
 | 兜底 | 因为 Uninstall 键回来了，`winget` 会判定「已安装」而**跳过重装**，不会装两份 |
 
-**体积必须克制**：139 WebDAV 实测约 **0.45 MB/s**（1 GB ≈ 37 分钟），所以默认
-`programs.maxMBPerApp = 1024`、`programs.maxTotalMB = 2048`。超限的会**在日志里列名告警**，不会静默丢。
-想放宽就改这两个值。
+**体积不设上限**（按需求）：`programs.maxMBPerApp = 0`、`programs.maxTotalMB = 0`（`0 = 不限`）。
 
-> 首次推送新程序集较慢（要传字节）；之后每次 `rclone sync` 只传**变化的部分**
-> （robocopy 保留时间戳，远端比对 size+mtime 后跳过），所以后续开机很快。
+> 139 WebDAV 实测约 **0.45 MB/s**（1 GB ≈ 37 分钟，10 GB ≈ 6.3 小时）。因为不设上限，
+> 推送前会估算 `SNAPSHOT_ETA_MIN`，并按「job 预算 − 已耗时 − 15 分钟」给 rclone 设 `--max-duration`；
+> **大目录（`files` / `programs`）用 `rclone copy`** —— 只增不删、可断点续传，被中断也不会毁远端，
+> 下次开机接着传。元数据小树（manifest/registry/shortcuts/system/apps）仍用 `sync`（排除大目录）。
 
-- 开关：`programs.enabled` / `preferJunction` / `maxMBPerApp` / `maxTotalMB` / `blocklist` / `excludePaths`
+- 开关：`programs.enabled` / `preferJunction` / `maxMBPerApp` / `maxTotalMB` / `blocklist` / `excludePaths` / `dataGlobs`
 - 默认只在**收尾全量**快照里采集（`programs.captureInQuick=false`，避免每 60 分钟重复备份）
 - 不想用 junction（直接还原到 C 盘原路径）：`programs.preferJunction = false`
+
+#### ⑨ 程序关联数据 + 文件关联（浏览器数据也在这）
+
+光有程序目录不够 —— 程序的配置/账号/数据库通常在别处。所以补齐：
+
+| 类别 | 做法 |
+|------|------|
+| **AppData / ProgramData** | 由 `DisplayName`（去版本号）+ `Publisher`（非微软）生成候选名，在 `%APPDATA%`、`%LOCALAPPDATA%`、`%LOCALAPPDATA%\Programs`、`%PROGRAMDATA%` 下**只匹配一级子目录**；发布商目录下再做二级匹配。可用 `programs.dataGlobs` 显式补充 |
+| **绝不遍历整个 LocalAppData** | 硬排除 `Microsoft` / `Packages` / `Temp` / `Programs` 根；缓存目录继续走 `files.excludeDirNames` |
+| **文件关联 / COM** | 只导出**命中被备份程序 installLocation** 的 ProgID/CLSID（读顶层键默认值与 `shell\open\command` 做子串匹配），**绝不导整棵 HKCR**；可用 `registry.hkcrProgIds` 手动补 |
+| **Edge 数据** | `files.dirs` 里加了 `%LOCALAPPDATA%\Microsoft\Edge\User Data`，并排除 `Service Worker` / `IndexedDB` / `File System` / `ShaderCache` / `Media Cache` / `Crashpad` 等缓存目录 |
+
+- 开关：`programs.dataGlobs`、`registry.hkcr`
+- **不做**：服务（`HKLM\SYSTEM\...\Services`）与计划任务（`System32\Tasks`）—— 按需求排除
+
+> ⚠️ Edge 的 cookie / 密码由 **DPAPI**（绑「用户+本机」）加密，跨机后 SID 与机器密钥都不同 → **解不开**。
+> 历史 / 书签 / 偏好 / `Web Data` 能正常回来。要恢复登录态请用 Edge 账号同步。
 - 开机基线由 `pre-restore.ps1` 的**第 0 阶段**在任何还原动作之前记录；上次备份过的程序清单也会带过来，
   保证「跨运行持久」——已还原的程序下次关机时仍会被备份，不会因为「基线里有」而被漏掉
 
@@ -324,7 +356,7 @@ Windows 更新缓存、安装包残留。
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（16 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（18 步，见下表）
 └── scripts/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
@@ -334,7 +366,7 @@ cloud-rdp/
     ├── pre-restore.ps1                 # 预还原：记录程序基线→拉取→校验→规划→准备→回滚记录→preCommands→驱动还原
     ├── snapshot-config.json            # 整机快照清单（改这里调整备份/还原范围 + C 盘阈值）
     ├── portable-lib.ps1                # 可移动程序：识别 / 搬运 / 按原路径还原
-    ├── programs-lib.ps1                # 【新】安装型程序：目录级备份 / Uninstall 注册表 / junction 还原
+    ├── programs-lib.ps1                # 安装型程序：目录级备份 / Uninstall 注册表 / junction 还原 / 关联数据匹配 / HKCR 命中
     ├── disk-guard.ps1                  # C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
     ├── slim-image.ps1                  # 【新】开机瘦身：删镜像自带大件（VS / Android SDK / 工具缓存），约释放 70 GB
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
@@ -343,21 +375,22 @@ cloud-rdp/
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 16 步：
+工作流 18 步：
 
 | # | 步骤 | 说明 |
 |---|------|------|
 | 0 | 拉仓库 | `actions/checkout` |
 | **0b** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
 | **0c** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
-| 1–2 | 开 RDP / 建账号+数据目录 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
+| 1–2 | 开 RDP + **关防火墙** / 建账号+数据目录 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
 | 3–6 | Tailscale / AList 密码 / rclone / 部署 AList | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys` |
 | **7** | **（可选）迁移 139 老路径** | 仅当 `migrate_139=true` |
 | **8** | **从 139 拉取数据** | `sync-down.ps1` |
 | **9** | **预还原** | `pre-restore.ps1 -Pull`（记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
 | **10b** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
-| **11** | **额度 + 打印连接信息** | 记下 Tailscale IP；含 C/D 盘占用与本次增量 |
+| **11a** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
+| **11** | **打印连接信息** | 记下 Tailscale IP；含 C/D 盘占用、本次增量、开机预还原状态 |
 | 12 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照 |
 | 13 | 收尾 | `if: always()`：C 盘清理 + 全量同步数据 + 抓整机快照 |
 
@@ -381,16 +414,22 @@ cloud-rdp/
 | `SLIM_STATUS=PARTIAL` | 清单没覆盖到某个大件 | 看日志里瘦身后的百分比；把大件路径加进 `snapshot-config.json` 的 `slim.targets` |
 | 瘦身后某个程序打不开 | 它依赖被删掉的镜像组件（如 .NET / Java 运行时） | 把对应项在 `slim.targets` 里改 `enabled: false`，或让它装到 D 盘 |
 | 瘦身太慢 | 删除 ~70 GB 需要几分钟；开了 DISM 更久 | 正常。想更快就把 `slim.targets` 里的大件精简 |
+| 桌面 / 文档没了 | 旧版：有一次开机用户没登录 → 暂存被清空 → `rclone sync` 把云端那份删了 | **已修**：profile 不存在时保留上一份用户数据。若已丢，只能靠更早的备份 |
+| 开机后桌面是空的 | `SNAPSHOT_USER_PRERESTORE=SKIPPED`（预创建 profile 失败） | 看 `D:\cloudrdp-sys\_state\user-restore.log`；登录任务会兜底重试，公共桌面会有失败标记 |
+| Edge 登录态没了 | cookie/密码由 DPAPI 加密，跨机解不开 | 正常。用 Edge 账号同步恢复；历史/书签/偏好应该都在 |
+| 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
+| SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
+| 定时场不跑额度检测 | 按需求跳过（`if: workflow_dispatch`） | 正常。手动 Run workflow 才显示额度 |
 | C 盘增量显示 `OVER` | 有大文件写进了 C 盘，或新程序装到了 C 盘 | 大文件放 `D:\a\cloud-rdp`；新装程序选 D 盘；或调大 `disk.maxIncrementalPercent` |
 | 某程序还原后打不开 | 写死了绝对路径 / 需要注册服务 / 体积超上限被跳过 | 看日志里 `跳过：xxx`；调大 `programs.maxMBPerApp`，或设 `programs.preferJunction=false` 直接还原到原路径 |
-| 安装型程序备份很慢 | 139 WebDAV 约 0.45 MB/s，首次要传字节 | 正常，首次慢、之后只传变化；用 `programs.maxTotalMB` 控总量 |
+| 安装型程序备份很慢 | 139 WebDAV 约 0.45 MB/s + 体积不设上限 | 正常，首次慢、之后只传变化；看日志 `SNAPSHOT_ETA_MIN`，大目录用 `copy` 可续传 |
 | 上传大文件卡住 | 139 走 WebDAV 有 5 分钟超时 | 单文件建议 <500MB；超大文件用 139 官方客户端 |
 | 连不上 100.x.x.x | 本地没登录 Tailscale | 本地客户端登录同一账号，`tailscale status` 检查 |
 | 会话突然断开 | 6 小时到点，Job 被回收 | 正常，重新 Run workflow |
 | 整机还原显示 `PARTIAL` | 个别目录/注册表键还原失败（日志有明细） | 看日志 `[restore]` 行定位；多为该目录不存在或权限问题 |
 | 登录后个人配置没回来 | 登录还原任务失败或未触发 | 查「任务计划程序」里的 `CloudRDP-RestoreUser`；日志在首次登录时不可见，可手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
 | 关机前的改动丢了 | Job 被**硬杀**（超时/取消太快），收尾步骤没跑完 | 保活期每 60 分钟会自动抓一次快照，最多丢 1 小时内改动 |
-| 快照没上传 | 快照超过 `files.maxTotalMB`（默认 8GB） | 日志会告警并跳过后续目录；调大上限或从清单里删掉大目录 |
+| 快照没上传 | `files.maxTotalMB` 被设成了有限值且已超 | 现在默认 `0 = 不限`；日志会告警并跳过后续目录 |
 | 预检报「`AI文件库` 不存在」 | 139 里还没建这个文件夹（脚本刻意不自动创建） | 在 139 网页根目录下建好「AI文件库」后重跑；或改用「根 ID 法」（见 §4.⑥） |
 | 139 上找不到数据 | 还在老路径 `/CloudRDP` | Run workflow 时勾 `migrate_139=true` 迁移一次 |
 | 数据目录里混进了仓库文件 | rclone 排除规则没生效（`GITHUB_WORKSPACE` 与数据目录不匹配） | 看日志 `[sync-up] 排除:` 那行；确认里面有 `/cloud-rdp/**` 与 `/.git/**` |
@@ -416,6 +455,8 @@ cloud-rdp/
 - **Authorization 约 15 天过期**：需定期手动更新 Secret，否则工作流会在第 6 步失败。
 - **额度有限**：私有仓库约 5~6 次满时长会话/月，用完即停（Actions 会**静默停摆、不报错**）。
 - **机器是一次性的**：Job 结束即销毁。已纳入快照的内容（见第四节）可自动还原，其余会丢失。
+- **防火墙已关闭**（本项目要求）：机器无公网 IP、只走 Tailscale 内网，但内网可达面变大，请自行评估。
+- **Edge cookie / 密码等敏感凭证会被上传到 139**：如不接受，把 `files.dirs` 里 Edge 那条删掉即可。
 
 > 如果需要**稳定可靠、数据持久、可定时开关机**的云主机，请直接购买低价 VPS（约 $5–15/月），比本方案靠谱得多。
 

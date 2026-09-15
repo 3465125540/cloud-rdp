@@ -232,6 +232,14 @@ function Invoke-MachineRestore {
         }
     } else { Say "  系统设置还原已关闭（restore.system=false）" }
 
+    # ---------- 3b. 关闭 Windows 防火墙（本项目要求）----------
+    # 注意顺序：快照里的 system/firewall.wfw 若被导入，会**整策略覆盖**把防火墙改回开启，
+    # 所以这里在系统设置还原之后**无条件**再关一次（即使有人把 system.firewall 改回 true 也安全）。
+    try {
+        Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False -ErrorAction Stop
+        Say "  防火墙已关闭（Domain / Private / Public）"
+    } catch { Warn "关闭防火墙失败（可忽略）：$_" }
+
     # ---------- 4. 公共桌面快捷方式 ----------
     if ($doShortcuts) {
         $pubSc = Join-Path $Stage "shortcuts\public-desktop"
@@ -267,6 +275,93 @@ function Invoke-MachineRestore {
             }
         } else { Warn "未加载 programs-lib.ps1，跳过安装型程序还原" }
     } else { Say "  安装型程序还原已关闭（programs.enabled=false）" }
+
+    # ---------- 4d. 个人配置预还原（开机即还原，不依赖首次登录任务）----------
+    # 做法：先用 Start-Process -Credential 强制 Windows 创建并注册该用户的配置文件
+    # （.NET 会带 LOGON_WITH_PROFILE，即 LoadUserProfile），再 reg load 它的 NTUSER.DAT
+    # 导入 HKCU，最后 robocopy 个人文件（无 /PURGE）。失败则交给登录任务兜底。
+    $userHome    = ("C:\Users\" + $RdpUser)
+    $userPreOk   = $false
+    if ($doFiles -or $doRegistry) {
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+                $ssPw = New-Object System.Security.SecureString
+                foreach ($ch in $env:RDP_PASSWORD.ToCharArray()) { $ssPw.AppendChar($ch) }
+                $ssPw.MakeReadOnly()
+                $credU = New-Object System.Management.Automation.PSCredential($RdpUser, $ssPw)
+                Start-Process -FilePath "cmd.exe" -ArgumentList "/c exit" -Credential $credU `
+                    -Wait -WindowStyle Hidden -ErrorAction Stop
+                Start-Sleep -Seconds 2
+            } else { Warn "  缺少 RDP_PASSWORD，无法预创建用户配置文件" }
+
+            $ntuser = Join-Path $userHome "NTUSER.DAT"
+            if (Test-Path -LiteralPath $ntuser) {
+                Say "  用户配置文件已创建并注册：$userHome"
+
+                # ① 导入 HKCU（__RDPUSER__ -> HKEY_USERS\_Restore）
+                if ($doRegistry) {
+                    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                    & reg.exe load "HKU\_Restore" "$ntuser" 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        $regDirU = Join-Path $Stage "registry\user"
+                        $nU = 0
+                        foreach ($f in @(Get-ChildItem -LiteralPath $regDirU -Filter *.reg -File -ErrorAction SilentlyContinue)) {
+                            try {
+                                $txt = Get-Content -LiteralPath $f.FullName -Raw -Encoding Unicode
+                                $txt = $txt.Replace(("HKEY_USERS\" + $UserHiveToken), "HKEY_USERS\_Restore")
+                                $tmpR = Join-Path $env:TEMP ("ureg_" + [guid]::NewGuid().ToString('N') + ".reg")
+                                $txt | Out-File -LiteralPath $tmpR -Encoding Unicode -Force
+                                & reg.exe import "$tmpR" 2>&1 | Out-Null
+                                if ($LASTEXITCODE -eq 0) { $nU++ }
+                                Remove-Item -LiteralPath $tmpR -Force -ErrorAction SilentlyContinue
+                            } catch { }
+                        }
+                        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                        & reg.exe unload "HKU\_Restore" 2>&1 | Out-Null
+                        Say ("  个人 HKCU 已导入：{0} 个键文件" -f $nU)
+                    } else { Warn "  NTUSER.DAT 加载失败（将交给登录任务）" }
+                }
+
+                # ② 还原个人文件（无 /PURGE）+ 个人快捷方式
+                if ($doFiles) {
+                    $uPrefixMirror = ("C\Users\" + $RdpUser).ToLower()
+                    $nF = 0
+                    foreach ($e in @($mf.files.entries)) {
+                        $relU = [string]$e.mirror
+                        if ([string]::IsNullOrWhiteSpace($relU)) { continue }
+                        if (-not $relU.ToLower().StartsWith($uPrefixMirror)) { continue }
+                        $srcU = Join-Path (Join-Path $Stage "files") $relU
+                        if (-not (Test-Path -LiteralPath $srcU)) { continue }
+                        $dstU = Get-AbsFromMirror -Rel $relU
+                        $codeU = Invoke-RobocopyRestore -Src $srcU -Dst $dstU
+                        if ($codeU -ge 8) { $problems.Add("user-pre:$relU"); Warn "  预还原失败：$relU" }
+                        else { $nF++; Say "  预还原 $relU" }
+                    }
+                    foreach ($pairU in @(
+                        @{ src = "shortcuts\user-desktop";   dst = (Join-Path $userHome "Desktop") },
+                        @{ src = "shortcuts\user-startmenu"; dst = (Join-Path $userHome "AppData\Roaming\Microsoft\Windows\Start Menu") }
+                    )) {
+                        $sU = Join-Path $Stage $pairU.src
+                        if (Test-Path -LiteralPath $sU) {
+                            $codeU2 = Invoke-RobocopyRestore -Src $sU -Dst $pairU.dst
+                            if ($codeU2 -lt 8) { Say "  预还原快捷方式 -> $($pairU.dst)" }
+                        }
+                    }
+                    Say ("  个人文件预还原：{0} 个目录" -f $nF)
+                }
+
+                # ③ 属主交回该用户
+                try {
+                    & icacls.exe "$userHome" /setowner "$RdpUser" /T /C /Q 2>&1 | Out-Null
+                    & icacls.exe "$userHome" /grant "$($RdpUser):(OI)(CI)F" /T /C /Q 2>&1 | Out-Null
+                } catch { }
+                $userPreOk = $true
+            } else {
+                Warn "  用户配置文件未创建成功（将交给登录任务）"
+            }
+        } catch { Warn "开机预还原个人配置失败（将交给登录任务）：$_" }
+    }
+    Set-GhEnv ("SNAPSHOT_USER_PRERESTORE=" + $(if ($userPreOk) { "OK" } else { "SKIPPED" }))
 
     # ---------- 5. 注册「首次登录还原个人配置」计划任务 ----------
     if (-not $NoTask) {
@@ -417,11 +512,35 @@ function Invoke-UserRestore {
     $status = if ($problems.Count -eq 0) { "OK" } else { "PARTIAL" }
     Say ("个人配置还原完成：{0} 个目录 | 状态 {1}" -f $restored, $status)
 
-    # ---------- 6. 自注销，避免每次登录都覆盖用户改动 ----------
+    # ---------- 5b. 日志落盘（用户会话里看不到控制台，便于事后排查）----------
     try {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-        Say "已注销登录还原任务（仅执行一次）"
-    } catch { Warn "注销登录任务失败：$_" }
+        $logDir = Join-Path $SysDir "_state"
+        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+        ("[{0}] status={1} restored={2} problems={3}" -f (Get-Date).ToString('o'), $status, $restored, (($problems | Select-Object -First 20) -join ',')) |
+            Out-File -LiteralPath (Join-Path $logDir "user-restore.log") -Append -Encoding utf8
+    } catch { }
+
+    # ---------- 6. 只在成功时自注销；失败则保留任务，下次登录自动重试 ----------
+    if ($problems.Count -eq 0) {
+        try {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            Say "已注销登录还原任务（仅执行一次）"
+        } catch { Warn "注销登录任务失败：$_" }
+        try {
+            $mkOk = Join-Path $env:PUBLIC "Desktop\_CloudRDP_还原失败.txt"
+            if (Test-Path -LiteralPath $mkOk) { Remove-Item -LiteralPath $mkOk -Force -ErrorAction SilentlyContinue }
+        } catch { }
+    } else {
+        Warn ("个人配置还原有 {0} 项问题 —— 保留登录任务，下次登录自动重试" -f $problems.Count)
+        try {
+            $mkBad = Join-Path $env:PUBLIC "Desktop\_CloudRDP_还原失败.txt"
+            $body = "个人配置还原失败`r`n时间: {0}`r`n问题:`r`n{1}`r`n`r`n日志: {2}\_state\user-restore.log`r`n手动重试:`r`n  {2}\_snapshot\_tools\restore-snapshot.ps1 -Scope user" -f `
+                (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'),
+                (($problems | ForEach-Object { "  - $_" }) -join "`r`n"),
+                $SysDir
+            $body | Out-File -LiteralPath $mkBad -Encoding UTF8
+        } catch { }
+    }
 }
 
 # ================================================================ 入口

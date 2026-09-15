@@ -263,11 +263,11 @@ function Get-ProgramsToBackup {
 
         $size = [long]$a.estimatedSizeKB * 1KB
         if ($size -le 0) { $size = Get-ProgramTreeBytes -Path $loc }
-        if (($size / 1MB) -gt $MaxMBPerApp) {
+        if ($MaxMBPerApp -gt 0 -and ($size / 1MB) -gt $MaxMBPerApp) {
             $skipped.Add(("{0}（{1:N0} MB > 单程序上限 {2} MB）" -f $name, ($size / 1MB), $MaxMBPerApp))
             continue
         }
-        if ((($totalBytes + $size) / 1MB) -gt $MaxTotalMB) {
+        if ($MaxTotalMB -gt 0 -and (($totalBytes + $size) / 1MB) -gt $MaxTotalMB) {
             $skipped.Add(("{0}（超出总量上限 {1} MB）" -f $name, $MaxTotalMB))
             continue
         }
@@ -480,4 +480,200 @@ function Restore-Programs {
     }
 
     return @{ restored = $restored; junctioned = $junctioned; problems = $problems.ToArray() }
+}
+
+
+# ---------------------------------------------------------------- 关联数据（AppData / ProgramData）
+
+function Get-ProgramCfg($obj, $name, $fallback) {
+    if ($null -eq $obj) { return $fallback }
+    if ($obj -is [System.Collections.IDictionary]) {
+        if ($obj.Contains($name) -and $null -ne $obj[$name]) { return $obj[$name] }
+        return $fallback
+    }
+    $p = $obj.PSObject.Properties[$name]
+    if ($null -eq $p -or $null -eq $p.Value) { return $fallback }
+    return $p.Value
+}
+
+# 展开 %VAR% 形式的环境变量
+function Expand-ProgramPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    try { return [Environment]::ExpandEnvironmentVariables($Path) } catch { return $Path }
+}
+
+# 生成用于匹配数据目录的候选名（保守：不用「第一个词」，避免匹配到 Microsoft / Windows 这类泛化目录）
+function Get-ProgramDataNameCandidates {
+    param($Program)
+    $names = New-Object System.Collections.Generic.List[string]
+    $dn = [string]$Program.displayName
+    if (-not [string]::IsNullOrWhiteSpace($dn)) {
+        $names.Add($dn.Trim())
+        $noVer = ($dn -replace '\s+v?[\d][\d\.]*\s*$', '').Trim()      # 去尾部版本号
+        if ($noVer -and $noVer -ne $dn) { $names.Add($noVer) }
+    }
+    $pub = [string]$Program.publisher
+    if (-not [string]::IsNullOrWhiteSpace($pub) -and $pub -notmatch '(?i)^Microsoft') {
+        $names.Add($pub.Trim())
+        $pw = ($pub -split '[\s,]+')[0].Trim()                          # 发布商首词（品牌名）
+        if ($pw.Length -ge 4) { $names.Add($pw) }
+    }
+    $deny = @('microsoft','windows','common','package','packages','programs','temp','system','update','installer','shared')
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $names) {
+        $t = [string]$n
+        if ($t.Length -lt 4) { continue }
+        if ($deny -contains $t.ToLower()) { continue }
+        $out.Add($t)
+    }
+    return $out.ToArray()
+}
+
+# 找出「某个已备份程序」在 AppData / ProgramData 下的关联数据目录。
+# 只匹配一级子目录名（+ 发布商目录下的二级），**绝不遍历整个 LocalAppData 的内容**。
+function Get-ProgramDataDirs {
+    param(
+        [object[]]$Programs,
+        [object[]]$DataGlobs = @(),
+        [int]     $MaxDirs   = 80
+    )
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($env:APPDATA, $env:LOCALAPPDATA,
+                     $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs' }),
+                     $env:ProgramData)) {
+        if ([string]::IsNullOrWhiteSpace($r)) { continue }
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        if (-not $roots.Contains($r)) { $roots.Add($r) }
+    }
+
+    # 明确排除的系统级数据根（别把整棵 Microsoft / Packages 拖走）
+    $hardSkip = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($env:APPDATA, $env:LOCALAPPDATA, $env:ProgramData)) {
+        if ([string]::IsNullOrWhiteSpace($r)) { continue }
+        $hardSkip.Add((Join-Path $r 'Microsoft'))
+        $hardSkip.Add((Join-Path $r 'Packages'))
+        $hardSkip.Add((Join-Path $r 'Temp'))
+    }
+    if ($env:LOCALAPPDATA) { $hardSkip.Add((Join-Path $env:LOCALAPPDATA 'Programs')) }
+
+    $found = New-Object System.Collections.Generic.List[string]
+    $seen  = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    function Test-Skip([string]$p) {
+        $pl = $p.ToLower()
+        foreach ($x in $hardSkip) { if ($pl -eq $x.ToLower()) { return $true } }
+        return $false
+    }
+
+    # ---------- 1) 显式 dataGlobs（优先，可精确覆盖）----------
+    foreach ($g in $DataGlobs) {
+        if ($null -eq $g) { continue }
+        foreach ($d in @(Get-ProgramCfg $g 'dirs' @())) {
+            if ([string]::IsNullOrWhiteSpace($d)) { continue }
+            $exp = Expand-ProgramPath ([string]$d)
+            if ([string]::IsNullOrWhiteSpace($exp)) { continue }
+            if (Test-Skip $exp) { continue }
+            if ((Test-Path -LiteralPath $exp) -and $seen.Add($exp.ToLower())) { $found.Add($exp) }
+        }
+    }
+
+    # ---------- 2) 按程序名 / 发布商匹配一级子目录 ----------
+    foreach ($p in $Programs) {
+        if ($found.Count -ge $MaxDirs) { break }
+        $names = @(Get-ProgramDataNameCandidates -Program $p)
+        if (@($names).Count -eq 0) { continue }
+        $pub = [string]$p.publisher
+        $pubOk = (-not [string]::IsNullOrWhiteSpace($pub)) -and ($pub -notmatch '(?i)^Microsoft')
+
+        foreach ($root in $roots) {
+            if ($found.Count -ge $MaxDirs) { break }
+            foreach ($sub in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
+                if ($found.Count -ge $MaxDirs) { break }
+                $nm = $sub.Name
+                $hit = $false
+                foreach ($n in $names) {
+                    if ($nm -ieq $n) { $hit = $true; break }
+                    if ($nm -like ($n + '*')) { $hit = $true; break }
+                }
+                if ($hit) {
+                    if (-not (Test-Skip $sub.FullName) -and $seen.Add($sub.FullName.ToLower())) { $found.Add($sub.FullName) }
+                    continue
+                }
+                # 发布商目录下的二级匹配：%APPDATA%\<Publisher>\<App>
+                if ($pubOk -and ($nm -ieq $pub -or $nm -like ($pub + '*'))) {
+                    foreach ($sub2 in @(Get-ChildItem -LiteralPath $sub.FullName -Directory -Force -ErrorAction SilentlyContinue)) {
+                        if ($found.Count -ge $MaxDirs) { break }
+                        foreach ($n in $names) {
+                            if ($sub2.Name -ieq $n -or $sub2.Name -like ('*' + $n + '*')) {
+                                if (-not (Test-Skip $sub2.FullName) -and $seen.Add($sub2.FullName.ToLower())) { $found.Add($sub2.FullName) }
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return $found.ToArray()
+}
+
+# ---------------------------------------------------------------- 文件关联 / COM（HKCR）
+
+# 找出与「被备份程序」相关的文件关联键。
+# 只返回命中的 ProgID / CLSID，**绝不导整棵 HKCR**（那含海量系统项）。
+function Get-HkcrMatches {
+    param(
+        [string[]]$ProgramPaths = @(),
+        [string[]]$ExtraProgIds = @(),
+        [int]     $MaxKeys      = 300
+    )
+
+    $hits = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $roots = @(
+        @{ ps = 'HKLM:\SOFTWARE\Classes'; reg = 'HKLM\SOFTWARE\Classes' },
+        @{ ps = 'HKCU:\Software\Classes'; reg = 'HKCU\Software\Classes' }
+    )
+
+    # 1) 手动指定的 ProgID（精确）
+    foreach ($pidItem in $ExtraProgIds) {
+        if ([string]::IsNullOrWhiteSpace($pidItem)) { continue }
+        foreach ($r in $roots) {
+            $rk = $r.reg + '\' + $pidItem
+            if ((Test-Path -LiteralPath ($r.ps + '\' + $pidItem)) -and $seen.Add($rk.ToLower())) { $hits.Add($rk) }
+        }
+    }
+
+    # 2) 按 installLocation 子串匹配（只读顶层键的默认值 / shell\open\command）
+    $norm = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $ProgramPaths) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $norm.Add((([string]$p).TrimEnd('\')).ToLower())
+    }
+    if ($norm.Count -gt 0) {
+        foreach ($r in $roots) {
+            if (-not (Test-Path -LiteralPath $r.ps)) { continue }
+            foreach ($k in @(Get-ChildItem -LiteralPath $r.ps -ErrorAction SilentlyContinue)) {
+                if ($hits.Count -ge $MaxKeys) { break }
+                $dflt = ''
+                $cmd  = ''
+                try { $dflt = [string](Get-ItemProperty -LiteralPath $k.PSPath -Name '(default)' -ErrorAction SilentlyContinue).'(default)' } catch { }
+                try { $cmd  = [string](Get-ItemProperty -LiteralPath ($k.PSPath + '\shell\open\command') -Name '(default)' -ErrorAction SilentlyContinue).'(default)' } catch { }
+                $blob = (($dflt + ' ') + $cmd).ToLower()
+                if ([string]::IsNullOrWhiteSpace($blob)) { continue }
+                foreach ($n in $norm) {
+                    if ($blob.Contains($n)) {
+                        $rk = $r.reg + '\' + $k.PSChildName
+                        if ($seen.Add($rk.ToLower())) { $hits.Add($rk) }
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    return $hits.ToArray()
 }

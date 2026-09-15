@@ -35,7 +35,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
+    [string]$ConfigPath = "",
     [string]$Mode = "",
     [int]   $TargetPercent = 0,
     [string[]]$ExtraPaths = @(),
@@ -45,6 +45,11 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+
+# 配置文件路径：不在 param 默认值里依赖 $PSScriptRoot（某些调用方式下它可能为空），显式兜底
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+    $ConfigPath = Join-Path $PSScriptRoot "snapshot-config.json"
+}
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }

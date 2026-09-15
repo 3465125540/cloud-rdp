@@ -11,6 +11,8 @@
       "C:\\scripts",
       "C:\\apps",
       "%RDPUSERPROFILE%\\Desktop",
+      "%PUBLIC%\\Desktop",
+      "%RDPUSERPROFILE%\\AppData\\Local\\Microsoft\\Edge\\User Data",
       "%RDPUSERPROFILE%\\Documents",
       "%RDPUSERPROFILE%\\Downloads",
       "%RDPUSERPROFILE%\\Pictures",
@@ -43,7 +45,19 @@
       "tmp",
       "$RECYCLE.BIN",
       "System Volume Information",
-      "CrashDumps"
+      "CrashDumps",
+      "Service Worker",
+      "IndexedDB",
+      "File System",
+      "Application Cache",
+      "ShaderCache",
+      "GrShaderCache",
+      "DawnCache",
+      "DawnGraphiteCache",
+      "DawnWebGPUCache",
+      "Media Cache",
+      "Crashpad",
+      "BrowserMetrics"
     ],
     "excludeFilePatterns": [
       "*.tmp",
@@ -54,8 +68,10 @@
       "*.crdownload",
       "*.part"
     ],
-    "_comment_maxTotalMB": "快照总大小上限（MB）。超过则只保留已抓取部分并告警，避免把 139 塞爆",
-    "maxTotalMB": 8192
+    "_comment_maxTotalMB": "快照总大小上限（MB）。0 = 不限（本项目按需求设为不限）",
+    "maxTotalMB": 0,
+    "_comment_tombstones": "显式清理清单：列出的相对路径（相对暂存根，如 files/C/apps/old）会从远端快照删除。用于弥补「大目录用 rclone copy 不删远端」",
+    "tombstones": []
   },
 
   "registry": {
@@ -77,7 +93,11 @@
       { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "name": "HKLM-Env" },
       { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\Language", "name": "HKLM-Language" },
       { "path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\Locale", "name": "HKLM-Locale" }
-    ]
+    ],
+    "_comment_hkcr": "文件关联 / COM：只导出「命中被备份程序 installLocation」的 ProgID/CLSID，绝不导整棵 HKCR",
+    "hkcr": true,
+    "_comment_hkcrProgIds": "手动补充要导出的 ProgID（一般留空即可）",
+    "hkcrProgIds": []
   },
 
   "apps": {
@@ -115,7 +135,7 @@
     "culture": true,
     "powerPlan": true,
     "wallpaper": true,
-    "firewall": true,
+    "firewall": false,
     "defenderExclusions": true
   },
 
@@ -154,9 +174,12 @@
     "enabled": true,
     "captureInQuick": false,
     "preferJunction": true,
-    "maxMBPerApp": 1024,
-    "maxTotalMB": 2048,
+    "_comment_size0": "0 = 不限（本项目按需求设为不限）。139 实测约 0.45 MB/s，推送前会估算 ETA 并给 rclone 设 --max-duration",
+    "maxMBPerApp": 0,
+    "maxTotalMB": 0,
     "excludePaths": [],
+    "_comment_dataGlobs": "程序关联数据的显式补充/覆盖：dirs 里写 %VAR% 形式路径。留空则只按程序名/发布商自动匹配",
+    "dataGlobs": [],
     "_comment_imageBlockPaths": "留空=使用脚本内置的 runner 镜像路径黑名单（VS / Android SDK / hostedtoolcache / AzureCLI …）",
     "imageBlockPaths": [],
     "blocklist": [
@@ -217,6 +240,7 @@
       { "path": "C:\\Program Files (x86)\\Google", "enabled": true },
       { "path": "C:\\Program Files\\Mozilla Firefox", "enabled": true },
       { "path": "C:\\Program Files (x86)\\IIS Express", "enabled": true },
+      { "path": "C:\\Program Files\\Unity Hub", "enabled": true, "note": "Unity Hub" },
       { "path": "C:\\Program Files\\dotnet", "enabled": false, "note": "默认关：.NET 运行时可能被你要装的程序依赖（pwsh 自带运行时，不依赖它）" },
       { "path": "C:\\Program Files\\nodejs", "enabled": false, "note": "默认关：可能被你要装的程序依赖" },
       { "path": "C:\\Program Files\\Java", "enabled": false, "note": "默认关：可能被你要装的程序依赖" },

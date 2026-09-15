@@ -227,10 +227,67 @@ if ($Stage -notmatch '_snapshot') {     # 安全护栏：只允许清理名字�
     Set-GhEnv "SNAPSHOT_STATUS=FAILED"
     exit 0
 }
+
+# ---------- 0a. 用户数据保命（关键）----------
+# 问题：本次开机的用户配置文件若不存在（用户从没登录过），本次抓取抓不到任何用户数据；
+#       而下面会**整个清空暂存目录**，再配合推送（远端镜像本地）——
+#       结果就是「把云端那份桌面/文档/HKCU 删掉」，永久丢失。
+# 做法：profile 不存在时，先把上一份快照里的用户子树搬到 holding（放在系统目录，不会被清），
+#       清空重建后搬回，并在后面把它们的 manifest 条目合并回去。
+# 语义：profile 存在（用户登录过）→ 全量重抓，删除照常生效；不存在 → 保留上一份。
+$userProfileExists = Test-Path -LiteralPath ("C:\Users\" + $RdpUser + "\NTUSER.DAT")
+$holdDir = Join-Path $SysDir "_hold"
+$userSubtrees = @(
+    ("files\C\Users\" + $RdpUser),
+    "registry\user",
+    "shortcuts\user-desktop",
+    "shortcuts\user-startmenu"
+)
+$heldSubtrees = New-Object System.Collections.Generic.List[string]
+$prevManifest = $null
+
+if (-not $userProfileExists) {
+    $prevManifestPath = Join-Path $Stage "manifest.json"
+    if (Test-Path -LiteralPath $prevManifestPath) {
+        try { $prevManifest = Get-Content -LiteralPath $prevManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    }
+    if (Test-Path -LiteralPath $holdDir) { Remove-Item -LiteralPath $holdDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $Stage) {
+        New-Item -ItemType Directory -Force -Path $holdDir | Out-Null
+        foreach ($rel in $userSubtrees) {
+            $srcH = Join-Path $Stage $rel
+            if (-not (Test-Path -LiteralPath $srcH)) { continue }
+            $dstH = Join-Path $holdDir $rel
+            $parentH = Split-Path $dstH -Parent
+            if ($parentH) { New-Item -ItemType Directory -Force -Path $parentH | Out-Null }
+            try {
+                Move-Item -LiteralPath $srcH -Destination $dstH -Force -ErrorAction Stop
+                $heldSubtrees.Add($rel)
+            } catch { Warn "保留用户数据失败：$rel（$_）" }
+        }
+    }
+    Say ("用户配置文件不存在（C:\Users\{0}）—— 本次保留上一份用户数据：{1} 个子树" -f $RdpUser, $heldSubtrees.Count)
+    Set-GhEnv "SNAPSHOT_USER_PRESERVED=YES"
+} else {
+    Say ("用户配置文件存在（C:\Users\{0}）—— 用户数据全量重抓，删除照常生效" -f $RdpUser)
+    Set-GhEnv "SNAPSHOT_USER_PRESERVED=NO"
+}
+
 if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue }
 foreach ($sub in @("files", "registry\user", "registry\machine", "apps", "system", "shortcuts", "_tools")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage $sub) | Out-Null
 }
+
+# 把保留的用户子树搬回暂存（合并式：本次新抓到的内容会覆盖同名文件）
+foreach ($rel in $heldSubtrees) {
+    $srcH = Join-Path $holdDir $rel
+    $dstH = Join-Path $Stage $rel
+    if (-not (Test-Path -LiteralPath $srcH)) { continue }
+    $parentH = Split-Path $dstH -Parent
+    if ($parentH) { New-Item -ItemType Directory -Force -Path $parentH | Out-Null }
+    & robocopy $srcH $dstH /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XJ 2>&1 | Out-Null
+}
+if ($heldSubtrees.Count -gt 0) { Remove-Item -LiteralPath $holdDir -Recurse -Force -ErrorAction SilentlyContinue }
 
 $mode = if ($Quick) { "quick" } else { "full" }
 Say "开始抓取整机快照（模式=$mode）→ $Stage"
@@ -257,7 +314,7 @@ foreach ($raw in $dirs) {
     $dst = Join-Path (Join-Path $Stage "files") $rel
 
     $size = Get-TreeSize -Path $src
-    if ((($totalBytes + $size.Bytes) / 1MB) -gt $maxTotalMB) {
+    if ($maxTotalMB -gt 0 -and (($totalBytes + $size.Bytes) / 1MB) -gt $maxTotalMB) {
         Warn ("体积上限 {0} MB 已达，跳过后续目录：{1}" -f $maxTotalMB, $src)
         $skippedDirs.Add($src)
         continue
@@ -449,6 +506,63 @@ else {
     }
 }
 
+# ---------------------------------------------------------------- 3d. 程序关联数据（AppData / ProgramData）
+
+if ($programsEnabled -and @($programsCaptured).Count -gt 0) {
+    if (Get-Command Get-ProgramDataDirs -ErrorAction SilentlyContinue) {
+        $dataGlobs = @(Get-Cfg $programsCfg 'dataGlobs' @())
+        $dataDirs  = @(Get-ProgramDataDirs -Programs @($programsCaptured) -DataGlobs $dataGlobs)
+        Say ("  程序关联数据目录：命中 {0} 个" -f $dataDirs.Count)
+        foreach ($d in $dataDirs) {
+            if (-not (Test-Path -LiteralPath $d)) { continue }
+            $relD = Get-MirrorRel -Abs $d
+            $dstD = Join-Path (Join-Path $Stage "files") $relD
+            if (Test-Path -LiteralPath $dstD) { continue }        # 已被 files.dirs 抓过，别重复
+            $codeD = Invoke-Robocopy -Src $d -Dst $dstD -ExcludeDirs $exDirs -ExcludeFiles $exFiles
+            if ($codeD -ge 8) { Warn "关联数据 robocopy 失败（码 $codeD）：$d"; $problems.Add("data:$d"); continue }
+            $gotD = Get-TreeSize -Path $dstD
+            $totalBytes += $gotD.Bytes
+            $totalFiles += $gotD.Files
+            $fileEntries.Add([pscustomobject]@{
+                source = $d; originalPath = $d; mirror = $relD; files = $gotD.Files; bytes = $gotD.Bytes; robocopy = $codeD
+            })
+            Say ("  关联数据 {0}  ->  {1} 个文件 / {2:N2} MB" -f $d, $gotD.Files, ($gotD.Bytes / 1MB))
+        }
+    } else { Warn "未加载 programs-lib.ps1，跳过程序关联数据采集" }
+}
+
+# ---- 3e. 文件关联 / COM（只导命中被备份程序的 ProgID/CLSID，绝不导整棵 HKCR）----
+if (-not $Quick) {
+    if ([bool](Get-Cfg $cfg.registry 'hkcr' $true)) {
+        if (Get-Command Get-HkcrMatches -ErrorAction SilentlyContinue) {
+            $progLocs = @()
+            foreach ($g in $programsCaptured) { if ($g.originalPath) { $progLocs += [string]$g.originalPath } }
+            foreach ($pp in $portableCaptured) { if ($pp.originalPath) { $progLocs += [string]$pp.originalPath } }
+            $manualIds = @(Get-Cfg $cfg.registry 'hkcrProgIds' @())
+            if ((@($progLocs).Count -gt 0) -or (@($manualIds).Count -gt 0)) {
+                $hkKeys = @(Get-HkcrMatches -ProgramPaths $progLocs -ExtraProgIds $manualIds)
+                if ($hkKeys.Count -gt 0) {
+                    $hkOut = Join-Path $Stage "registry\machine\HKCR-apps.reg"
+                    $parts = New-Object System.Collections.Generic.List[string]
+                    foreach ($key in $hkKeys) {
+                        $tmpReg = Join-Path $env:TEMP ("hkcr_" + [guid]::NewGuid().ToString('N') + ".reg")
+                        & reg.exe export "$key" "$tmpReg" /y 2>&1 | Out-Null
+                        if ((Test-Path -LiteralPath $tmpReg) -and $LASTEXITCODE -eq 0) {
+                            $parts.Add((Get-Content -LiteralPath $tmpReg -Raw -Encoding Unicode))
+                        }
+                        Remove-Item -LiteralPath $tmpReg -Force -ErrorAction SilentlyContinue
+                    }
+                    if ($parts.Count -gt 0) {
+                        ($parts -join "`r`n") | Out-File -LiteralPath $hkOut -Encoding Unicode
+                        $regFiles.Add("registry\machine\HKCR-apps.reg")
+                        Say ("  文件关联/COM：导出 {0} 个键" -f $parts.Count)
+                    } else { Warn "文件关联/COM：命中 {0} 个键但导出全部失败" -f $hkKeys.Count }
+                } else { Say "  文件关联/COM：无命中键" }
+            } else { Say "  文件关联/COM：本次没有要备份的程序，跳过" }
+        } else { Warn "未加载 programs-lib.ps1，跳过文件关联导出" }
+    } else { Say "  文件关联/COM：已关闭（registry.hkcr=false）" }
+}
+
 # ---------------------------------------------------------------- 4. 系统设置
 
 $sys = [ordered]@{ capturedUtc = (Get-Date).ToUniversalTime().ToString("o"); capturedLocal = (Get-Date).ToString("o") }
@@ -549,6 +663,42 @@ foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json")) {
 
 $status = if ($problems.Count -eq 0) { "OK" } else { "PARTIAL" }
 
+# ---- 合并被保留的用户条目（profile 不存在时，见 0a）----
+if ($prevManifest -and $heldSubtrees.Count -gt 0) {
+    $userMirrorPrefix = ("C\Users\" + $RdpUser).ToLower()
+    $curMirrors = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($e in $fileEntries) { if ($e.mirror) { [void]$curMirrors.Add(([string]$e.mirror).ToLower()) } }
+    $keptFiles = 0
+    foreach ($e in @($prevManifest.files.entries)) {
+        $m = [string]$e.mirror
+        if ([string]::IsNullOrWhiteSpace($m)) { continue }
+        if (-not $m.ToLower().StartsWith($userMirrorPrefix)) { continue }
+        if ($curMirrors.Contains($m.ToLower())) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $Stage "files") $m))) { continue }
+        $fileEntries.Add($e)
+        $totalFiles += [int]$e.files
+        $totalBytes += [long]$e.bytes
+        [void]$curMirrors.Add($m.ToLower())
+        $keptFiles++
+    }
+    $curReg = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($r in $regFiles) { [void]$curReg.Add(([string]$r).ToLower()) }
+    $keptReg = 0
+    foreach ($r in @($prevManifest.registry)) {
+        $rs = [string]$r
+        if (-not $rs.ToLower().StartsWith("registry\user\")) { continue }
+        if ($curReg.Contains($rs.ToLower())) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $Stage $rs))) { continue }
+        $regFiles.Add($rs)
+        [void]$curReg.Add($rs.ToLower())
+        $keptReg++
+    }
+    # 个人快捷方式被保留时，确保 plan 里仍有 shortcut 条目
+    $scFiles = @(Get-ChildItem -LiteralPath (Join-Path $Stage "shortcuts") -Recurse -File -ErrorAction SilentlyContinue).Count
+    if ($scFiles -gt $scCount) { $scCount = $scFiles }
+    Say ("  合并保留的用户条目：文件 {0} 个 / 注册表 {1} 个" -f $keptFiles, $keptReg)
+}
+
 # ---- 还原计划（v2）：每条 = 类型 / 原路径 / 存储路径 / 作用域 ----
 # 这是「还原机器设置包含原文件路径 + 程序列表」的权威载体，还原侧优先消费它。
 $userPrefix = ("C:\Users\" + $RdpUser)
@@ -640,12 +790,54 @@ if ($Push) {
     }
     Say "推送到 $Remote ..."
     & $RcloneExe mkdir $Remote --timeout 0 --contimeout 0 2>&1 | Out-Null
-    # 用 sync：远端镜像本地，避免已删除的文件在还原时「复活」
-    & $RcloneExe sync $Stage $Remote `
-        --transfers 4 --checkers 8 `
-        --timeout 0 --contimeout 0 `
-        --retries 3 --low-level-retries 5 `
-        --stats-one-line -v
+
+    # ---------- 传输策略（体积不设上限时的保护）----------
+    # 139 实测约 0.45 MB/s：先估算耗时；再按「job 预算 − 已耗时 − 15 分钟」给 rclone 一个
+    # --max-duration，到点会优雅退出而不是被 GitHub 硬杀（大目录用 copy 可续传，不会毁远端）。
+    $progBytesTotal = [long]0
+    foreach ($g in $programsCaptured) { $progBytesTotal += [long]$g.bytes }
+    $mbps = 0.45
+    $pushMB  = [math]::Round(($totalBytes + $progBytesTotal) / 1MB, 1)
+    $etaMin  = [int][math]::Ceiling($pushMB / $mbps / 60)
+    Say ("  待推送约 {0} MB，按 {1} MB/s 估算需 ~{2} 分钟" -f $pushMB, $mbps, $etaMin)
+    Set-GhEnv ("SNAPSHOT_ETA_MIN=" + $etaMin)
+    Set-GhEnv ("SNAPSHOT_PUSH_MB=" + $pushMB)
+
+    $maxDurArg = @()
+    $jobBudgetMin = 360
+    $jobStartFile = Join-Path $SysDir "_state\job-start.txt"
+    if (Test-Path -LiteralPath $jobStartFile) {
+        try {
+            $t0 = [datetime]::Parse((Get-Content -LiteralPath $jobStartFile -Raw).Trim()).ToUniversalTime()
+            $elapsedMin = [int]((Get-Date).ToUniversalTime() - $t0).TotalMinutes
+            $remainMin = $jobBudgetMin - $elapsedMin - 15
+            if ($remainMin -gt 5) {
+                $maxDurArg = @('--max-duration', ($remainMin.ToString() + 'm'))
+                Say ("  job 已跑 {0} 分钟，给 rclone 设 --max-duration {1}m" -f $elapsedMin, $remainMin)
+                if ($etaMin -gt $remainMin) {
+                    Warn ("  估算耗时 {0} 分钟 > 剩余 {1} 分钟 —— 本次可能传不完；大目录用 copy 可续传，下次继续" -f $etaMin, $remainMin)
+                }
+            }
+        } catch { Warn "读取 job 起始时间失败：$_" }
+    }
+    if ($maxDurArg.Count -eq 0 -and $etaMin -gt 300) { Warn "估算耗时较长（$etaMin 分钟），本次可能传不完（可续传）" }
+
+    $rcCommon = @('--transfers','4','--checkers','8','--timeout','0','--contimeout','0',
+                  '--retries','3','--low-level-retries','5','--stats-one-line','-v') + $maxDurArg
+
+    # ① 大目录（files / programs）：用 copy —— 只增不删、可断点续传，被中断也不会删远端
+    foreach ($big in @('files', 'programs')) {
+        $bigPath = Join-Path $Stage $big
+        if (-not (Test-Path -LiteralPath $bigPath)) { continue }
+        Say ("  推送大目录 {0}（copy，可续传）..." -f $big)
+        & $RcloneExe copy $bigPath (($Remote.TrimEnd('/')) + '/' + $big) @rcCommon 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Warn ("  {0} 推送返回码 {1}（copy 可续传，下次继续）" -f $big, $LASTEXITCODE) }
+    }
+
+    # ② 其余（manifest/registry/shortcuts/system/apps/_tools）：用 sync —— 远端镜像本地，
+    #    避免已删除的元数据在还原时「复活」；用 --exclude 保护大目录不被删除
+    Say "  推送元数据（sync，排除大目录）..."
+    & $RcloneExe sync $Stage $Remote --exclude "/files/**" --exclude "/programs/**" @rcCommon
     if ($LASTEXITCODE -eq 0) {
         Say "推送完成"
         Set-GhEnv "SNAPSHOT_PUSH=OK"

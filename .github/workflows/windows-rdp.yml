@@ -76,14 +76,20 @@ jobs:
 
       - name: 0c. C 盘守卫：记录基线（在瘦身之后）
         shell: pwsh
-        run: .\scripts\disk-guard.ps1 -Baseline
+        run: |
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:CLOUDRDP_SYS_DIR '_state') | Out-Null
+          (Get-Date).ToUniversalTime().ToString('o') | Out-File (Join-Path $env:CLOUDRDP_SYS_DIR '_state\job-start.txt') -Encoding ascii
+          .\scripts\disk-guard.ps1 -Baseline
 
-      - name: 1. 开启远程桌面 + 放行防火墙
+      - name: 1. 开启远程桌面 + 关闭 Windows 防火墙
         shell: pwsh
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          # 关闭 Windows 防火墙（Domain/Private/Public）—— 镜像现在默认开启，会拦掉 SMB(445)/AList(5244) 等
+          Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False -ErrorAction SilentlyContinue
+          Write-Host ("[fw] 防火墙状态: " + ((Get-NetFirewallProfile | ForEach-Object { "$($_.Name)=$($_.Enabled)" }) -join ' '))
 
       - name: 2. 创建管理员账号 + 数据目录 + 桌面快捷方式
         shell: pwsh
@@ -156,13 +162,17 @@ jobs:
         shell: pwsh
         run: .\scripts\disk-guard.ps1 -Enforce
 
-      - name: 11. 估算额度 + 打印连接信息
+      - name: 11a. 估算额度（仅手动触发；定时场跳过）
+        if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_BILLING_TOKEN: ${{ secrets.GH_BILLING_TOKEN }}
+        run: .\scripts\quota-report.ps1
+
+      - name: 11. 打印连接信息
+        shell: pwsh
         run: |
-          & .\scripts\quota-report.ps1
           Write-Host ""
           Write-Host "==========================================" -ForegroundColor Green
           Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
@@ -214,6 +224,12 @@ jobs:
             if ($sl -eq "PARTIAL") {
               Write-Host "  (瘦身后仍高于目标 —— 把大件路径加到 snapshot-config.json 的 slim.targets)" -ForegroundColor DarkGray
             }
+          }
+          $up = $env:SNAPSHOT_USER_PRERESTORE
+          if (-not [string]::IsNullOrWhiteSpace($up)) {
+            $upc = "DarkGray"
+            if ($up -eq "OK") { $upc = "Green" } elseif ($up -eq "SKIPPED") { $upc = "Yellow" }
+            Write-Host "  开机预还原   : $up   (个人桌面/文档/HKCU 在开机阶段就放好，不等首次登录)" -ForegroundColor $upc
           }
           $pv = $env:SNAPSHOT_PREVALIDATE
           if (-not [string]::IsNullOrWhiteSpace($pv)) {
