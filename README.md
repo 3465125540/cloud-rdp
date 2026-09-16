@@ -315,7 +315,7 @@ Windows 更新缓存、安装包残留。
 
 | 环节 | 做法 |
 |------|------|
-| 识别 | 扫三处 Uninstall 注册表（HKLM 64/32 + HKCU），要求 `InstallLocation` 存在、非系统目录、`Publisher` 非微软、名字不命中黑名单 |
+| 识别 | 扫三处 Uninstall 注册表（HKLM 64/32 + HKCU），要求 `InstallLocation` 存在、非系统目录、`Publisher` 非微软、名字不命中黑名单；**缺失时从 `DisplayIcon`/`UninstallString` 推断**（见 ⑪） |
 | **只备份用户装的** | 三重保险：① **增量判定**（开机基线里的镜像自带程序一律跳过）② **静态黑名单** `imageBlockPaths`（VS / Android SDK / hostedtoolcache / AzureCLI …）③ **体积上限** |
 | 备份 | 程序目录镜像到 `<Stage>\programs\<盘符>\<路径>`，并**逐程序 `reg export` 它的 Uninstall 键** |
 | 还原 | 程序实体落 **`D:\cloudrdp-sys\programs\<镜像>`**，在原路径（如 `C:\Program Files\Foo`）建 **junction** 指过去；随后导入 Uninstall 键 |
@@ -372,6 +372,45 @@ runner 镜像默认 **en-US**，NvdAdmin 首次登录是纯英文界面且**没�
 - 开关：`snapshot-config.json` 的 `chinese.enabled` / `installLanguagePack`；手动触发可用输入 **`chinese`** 填 `off` 跳过
 - fail-soft：**永不返回非 0**，语言包下载失败只告警（界面可能仍是英文，但区域 / 键盘布局已改）
 
+#### ⑪ 快捷方式：以线索补抓程序本体 + 还原后校验修复
+
+**现象**：桌面图标双击报「目标驱动器或网络连接不可用」。根因有两条：
+
+1. 快捷方式管线**从不解析 `.lnk`**（备份 `Copy-Item`、还原 `robocopy`，字节级原样搬运）；
+2. 程序识别一直依赖 Uninstall 注册表的 `InstallLocation` —— 很多程序（尤其中文软件、用户级安装）**不写这个字段** → 程序本体没被备份 → 还原后快捷方式必然断链。
+
+**主修复：让程序本体跟着回来**
+
+| 手段 | 说明 |
+|------|------|
+| **推断安装目录** | `InstallLocation` 缺失/不可用时，从 `DisplayIcon`（去 `,0` 索引、去引号）或 `UninstallString`（解析带引号的 exe）取父目录；`MsiExec` / `C:\Windows\Installer` 一律不采纳 |
+| **以快捷方式为线索补抓** | 扫公共桌面 / 用户桌面 / 用户开始菜单的 `.lnk`，读 `TargetPath`，用**边界法**推断「程序根目录」：取最长匹配边界（`C:\Program Files`、`…\AppData\Local\Programs`、盘根…）下的**第一级目录** |
+| **并入现有程序管线** | 补抓的目录作为 `reason=shortcut` 的合成条目并入 `Get-ProgramsToBackup` → 自动获得 **junction 还原**（实体落 D 盘、原路径照常可用） |
+| **跨运行持久** | `pre-restore` 把上次快照的程序**目录清单**写进 `_state/prev-programs.json`，备份侧以 `AlwaysIncludeLocations` 视同 `prev` 继续带上（否则还原回来的程序下次会被当「镜像自带」漏掉） |
+
+**跳过规则**（防御式：宁可不抓，也不误吞）：
+
+| 情形 | 判定 |
+|------|------|
+| 目标不存在 / 非绝对路径 / UNC / 直接躺在边界下的散落文件 | 跳过并**记名** |
+| 目标落在 `SystemRoots` / `ImageBlockPaths` / `programs.excludePaths` / 工作区 / 数据目录 / 系统目录 | 跳过 |
+| `.url` | 不参与补抓（校验阶段单独处理） |
+| 盘符不在 `shortcuts.captureDrives`（默认仅 `C:`） | 跳过 |
+| 单目录 > `captureMaxMBPerTarget` / 累计 > `captureMaxTotalMB` | 跳过并**记名告警**（不静默丢） |
+| `_失效快捷方式` 目录内的 `.lnk` | 跳过（避免搬来搬去） |
+
+**兜底：还原后校验与修复**（`Repair-Shortcuts`，机器级 + 用户级各跑一次，
+**必须在程序还原之后** —— 否则 junction 还没建，会把好链误判为死链）
+
+- 目标存在 → 不动
+- 目标缺失 → 按文件名在**已还原的程序目录**里**唯一定位** → 改写 `TargetPath` / `WorkingDirectory`；定位不到 → 移入同目录下 **`_失效快捷方式\`**（非破坏、可找回）
+- `.url`：`http(s)` 一律不动；`file:` 指向缺失本地文件才移入失效文件夹
+- **幂等**：失效文件夹内的不再搬；仅在内容变化时改写
+
+- 开关：`shortcuts.captureTargets` / `validateOnRestore` / `parkBroken` / `parkFolder` / `captureDrives` / `captureMaxMBPerTarget` / `captureMaxTotalMB`；`programs.deriveInstallLocation`
+- 连接信息会显示：`快捷方式补抓 : 上次快照含 N 个补抓程序（X MB）` 与 `快捷方式校验 : 公共桌面 检查 N / 修复 M / 移入失效 K`
+- **完全回滚**：三个开关全关（`captureTargets` / `validateOnRestore` / `deriveInstallLocation`）即退回旧行为
+
 ---
 
 ## 五、目录结构
@@ -414,7 +453,7 @@ cloud-rdp/
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
 | **10b** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **11a** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
-| **11** | **打印连接信息** | 记下 Tailscale IP；含 C/D 盘占用、本次增量、开机预还原状态 |
+| **11** | **打印连接信息** | 记下 Tailscale IP；含 C/D 盘占用、本次增量、开机预还原状态、快捷方式补抓/校验（见 ⑪） |
 | 12 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照 |
 | 13 | 收尾 | `if: always()`：C 盘清理 + 全量同步数据 + 抓整机快照 |
 
@@ -465,6 +504,10 @@ cloud-rdp/
 | 登录后还是英文界面 | 语言包没装成功（`CHINESE_LANGPACK=FAILED`），或快照里的英文 HKCU 覆盖了设置 | 看第 9b 步日志；确认 `chinese.enabled=true` 且该步在「9. 预还原」**之后**执行 |
 | 中文输入法打不出字 | 用户 hive 写入失败（`CHINESE_USERHIVE` 非 `OK`） | 看日志 `[chinese]` 行；登录任务会兜底。也可登录后到「设置 → 时间和语言」手动添加中文 |
 | Unity Hub 又出现了 | 旧快照里含它 | 已在 `programs.excludePaths`（不备份/不还原）+ `slim.alwaysDelete`（开机删）双重排除；若仍出现，检查 139 上 `_snapshot/programs` 是否残留 |
+| 桌面图标报「目标驱动器或网络连接不可用」 | 程序本体没被备份（该程序 Uninstall 键无 `InstallLocation`）→ 快捷方式成死链 | 见 ⑪：`shortcuts.captureTargets=true` + `programs.deriveInstallLocation=true` 会自动补抓；还原后校验会尝试修复，修不好的移入 `_失效快捷方式` |
+| 桌面多出 `_失效快捷方式` 文件夹 | 校验发现死链、且无法唯一定位到已还原的程序 | 正常（非破坏保留）。装回程序后把图标拖回桌面即可；该文件夹不会被再次备份 |
+| 快捷方式补抓把大目录也抓了 | 该 `.lnk` 指向一个大目录（如某游戏） | 调小 `shortcuts.captureMaxMBPerTarget` / `captureMaxTotalMB`（超限会记名告警，不静默） |
+
 | 不想让 `.workbuddy-ai` 被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy-ai` 那行（改完提交即可） |
 
 ---

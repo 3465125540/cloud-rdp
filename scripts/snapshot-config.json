@@ -58,7 +58,8 @@
       "DawnWebGPUCache",
       "Media Cache",
       "Crashpad",
-      "BrowserMetrics"
+      "BrowserMetrics",
+      "_失效快捷方式"
     ],
     "excludeFilePatterns": [
       "*.tmp",
@@ -147,7 +148,18 @@
     "publicDesktop": true,
     "userDesktop": true,
     "userStartMenu": true,
-    "machineStartMenu": false
+    "machineStartMenu": false,
+    "_comment_captureTargets": "以快捷方式为线索补抓「程序本体」：扫桌面/开始菜单的 .lnk，推断它指向的程序根目录并纳入备份。解决「程序没写 InstallLocation → 没被备份 → 还原后快捷方式变死链」。",
+    "captureTargets": true,
+    "_comment_captureDrives": "只从这些盘符的快捷方式目标补抓（默认只 C 盘，最保守；需要时加 \"D:\"）",
+    "captureDrives": [ "C:" ],
+    "_comment_captureSize": "快捷方式线索补抓的独立体积预算（不占 programs.* 的预算）。超限会在日志里记名告警，不静默丢。",
+    "captureMaxMBPerTarget": 1024,
+    "captureMaxTotalMB": 2048,
+    "_comment_validateOnRestore": "还原后校验每个快捷方式的目标：能唯一定位到已还原的程序就改写指向；修不好的移入 parkFolder（非破坏、可找回）。",
+    "validateOnRestore": true,
+    "parkBroken": true,
+    "parkFolder": "_失效快捷方式"
   },
 
   "restore": {
@@ -177,6 +189,8 @@
     "enabled": true,
     "captureInQuick": false,
     "preferJunction": true,
+    "_comment_deriveInstallLocation": "InstallLocation 缺失时，从 DisplayIcon / UninstallString 推断安装目录（很多中文软件、用户级安装不写 InstallLocation，导致程序本体抓不到）",
+    "deriveInstallLocation": true,
     "_comment_size0": "0 = 不限（本项目按需求设为不限）。139 实测约 0.45 MB/s，推送前会估算 ETA 并给 rclone 设 --max-duration",
     "maxMBPerApp": 0,
     "maxTotalMB": 0,

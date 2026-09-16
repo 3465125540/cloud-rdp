@@ -169,6 +169,7 @@ function Get-InstalledPrograms {
                 version          = [string]$props.DisplayVersion
                 publisher        = [string]$props.Publisher
                 installLocation  = [string]$props.InstallLocation
+                displayIcon      = [string]$props.DisplayIcon
                 uninstallString  = [string]$props.UninstallString
                 estimatedSizeKB  = $est
                 windowsInstaller = $props.WindowsInstaller
@@ -179,6 +180,62 @@ function Get-InstalledPrograms {
         }
     }
     return $list.ToArray()
+}
+
+# 目录是否可作为「程序安装目录」（存在 + 不在系统/镜像路径内）
+function Test-ProgramDirUsable {
+    param(
+        [string]$Dir,
+        [string[]]$SystemRoots     = @(),
+        [string[]]$ImageBlockPaths = @()
+    )
+    if ([string]::IsNullOrWhiteSpace($Dir)) { return $false }
+    $d = ([string]$Dir).TrimEnd('\')
+    if (-not (Test-Path -LiteralPath $d -PathType Container)) { return $false }
+    $dl = $d.ToLower()
+    foreach ($s in (@($SystemRoots) + @($ImageBlockPaths))) {
+        if ([string]::IsNullOrWhiteSpace($s)) { continue }
+        $sl = ([string]$s).TrimEnd('\').ToLower()
+        if ($dl -eq $sl -or $dl.StartsWith($sl + '\')) { return $false }
+    }
+    return $true
+}
+
+# InstallLocation 为空/不存在时，从 DisplayIcon / UninstallString 推断安装目录。
+# 为什么需要：很多程序（尤其中文软件、用户级安装）的 Uninstall 键里**不写 InstallLocation**，
+# 导致「程序本体」被整条跳过 —— 这是桌面快捷方式还原后变死链的主因之一。
+function Resolve-ProgramInstallDir {
+    param(
+        $Entry,
+        [string[]]$SystemRoots     = @(),
+        [string[]]$ImageBlockPaths = @()
+    )
+
+    # ① 原本就有可用的 InstallLocation
+    $loc = ([string]$Entry.installLocation).TrimEnd('\')
+    if (Test-ProgramDirUsable -Dir $loc -SystemRoots $SystemRoots -ImageBlockPaths $ImageBlockPaths) { return $loc }
+
+    # ② 从 DisplayIcon / UninstallString 推断
+    foreach ($raw in @([string]$Entry.displayIcon, [string]$Entry.uninstallString)) {
+        if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+        $s = $raw.Trim()
+        $s = ($s -split ',')[0].Trim()                       # 去掉图标索引（如 "C:\App\app.exe,0"）
+        if ($s.StartsWith('"')) { $s = $s.Substring(1) }     # 去前引号
+        $q = $s.IndexOf('"')
+        if ($q -ge 0) { $s = $s.Substring(0, $q) }           # 去后引号及其后参数
+        $s = $s.Trim()
+        if ([string]::IsNullOrWhiteSpace($s)) { continue }
+        if ($s -notmatch '^[A-Za-z]:\\') { continue }        # 只要绝对路径
+        if ($s -match '(?i)\\msiexec(\.exe)?$') { continue } # MSI 卸载器，不是安装目录
+        if ($s -match '(?i)^[A-Za-z]:\\Windows\\') { continue }
+        $dir = $null
+        if     (Test-Path -LiteralPath $s -PathType Leaf)      { $dir = Split-Path -Path $s -Parent }
+        elseif (Test-Path -LiteralPath $s -PathType Container) { $dir = $s }
+        if ($dir -and (Test-ProgramDirUsable -Dir $dir -SystemRoots $SystemRoots -ImageBlockPaths $ImageBlockPaths)) {
+            return $dir.TrimEnd('\')
+        }
+    }
+    return $null
 }
 
 # 单条记录是否「值得备份的安装型程序」
@@ -223,18 +280,22 @@ function Get-ProgramsToBackup {
         [object[]]$All,
         [string[]]$BaselineRegPaths      = @(),   # 开机基线（镜像自带）→ 跳过
         [string[]]$AlwaysIncludeRegPaths = @(),   # 之前备份过的 → 必须继续带（跨运行持久）
+        [string[]]$AlwaysIncludeLocations= @(),   # 之前备份过的「目录」→ 必须继续带（快捷方式补抓跨运行持久）
         [string[]]$ExcludePaths          = @(),   # 已被 portable 处理过的目录
         [string[]]$SystemRoots           = @(),
         [string[]]$ImageBlockPaths       = @(),
         [string[]]$Blocklist             = @(),
         [int]     $MaxMBPerApp           = 1024,
-        [int]     $MaxTotalMB            = 2048
+        [int]     $MaxTotalMB            = 2048,
+        [bool]    $DeriveInstallLocation = $true  # InstallLocation 缺失时从 DisplayIcon/UninstallString 推断
     )
 
     $baseSet = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($x in $BaselineRegPaths)      { if ($x) { [void]$baseSet.Add($x.ToLower()) } }
     $prevSet = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($x in $AlwaysIncludeRegPaths) { if ($x) { [void]$prevSet.Add($x.ToLower()) } }
+    $locSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($x in $AlwaysIncludeLocations) { if ($x) { [void]$locSet.Add((([string]$x).TrimEnd('\')).ToLower()) } }
 
     $selected = New-Object System.Collections.Generic.List[object]
     $skipped  = New-Object System.Collections.Generic.List[string]
@@ -244,6 +305,16 @@ function Get-ProgramsToBackup {
     foreach ($a in $All) {
         $name = [string]$a.displayName
         $loc  = ([string]$a.installLocation).TrimEnd('\')
+
+        # InstallLocation 缺失/不可用时，尝试从 DisplayIcon / UninstallString 推断
+        if ($DeriveInstallLocation -and -not (Test-ProgramDirUsable -Dir $loc -SystemRoots $SystemRoots -ImageBlockPaths $ImageBlockPaths)) {
+            $derived = Resolve-ProgramInstallDir -Entry $a -SystemRoots $SystemRoots -ImageBlockPaths $ImageBlockPaths
+            if ($derived) {
+                $a | Add-Member -NotePropertyName installLocation -NotePropertyValue $derived -Force
+                $a | Add-Member -NotePropertyName derived         -NotePropertyValue $true     -Force
+                $loc = $derived
+            }
+        }
 
         if (-not (Test-ProgramCandidate -Entry $a -SystemRoots $SystemRoots -ImageBlockPaths $ImageBlockPaths -Blocklist $Blocklist)) {
             continue
@@ -256,10 +327,12 @@ function Get-ProgramsToBackup {
         }
         if ($excluded) { continue }
 
-        $regKey  = ([string]$a.regPath).ToLower()
-        $isNew   = -not $baseSet.Contains($regKey)
-        $isPrev  = $prevSet.Contains($regKey)
-        if (-not $isNew -and -not $isPrev) { continue }      # 镜像自带的，跳过
+        $regKey     = ([string]$a.regPath).ToLower()
+        $isShortcut = ([string]$a.reason -eq 'shortcut')
+        $isNew      = -not $baseSet.Contains($regKey)
+        $isPrev     = $prevSet.Contains($regKey) -or ($loc -and $locSet.Contains($loc.ToLower()))
+        # 快捷方式线索合成的条目没有 regPath，不受「镜像自带」增量门约束
+        if (-not $isShortcut -and -not $isNew -and -not $isPrev) { continue }
 
         $size = [long]$a.estimatedSizeKB * 1KB
         if ($size -le 0) { $size = Get-ProgramTreeBytes -Path $loc }
@@ -283,7 +356,7 @@ function Get-ProgramsToBackup {
             scope            = [string]$a.scope
             regPath          = [string]$a.regPath
             windowsInstaller = $a.windowsInstaller
-            reason           = $(if ($isNew) { 'new' } else { 'prev' })
+            reason           = $(if ($isShortcut) { 'shortcut' } elseif ($isNew) { 'new' } else { 'prev' })
         })
     }
 
@@ -341,8 +414,10 @@ function Backup-Programs {
             if (-not [string]::IsNullOrWhiteSpace([string]$a.regPath)) {
                 & reg.exe export "$($a.regPath)" "$regFile" /y 2>&1 | Out-Null
                 $regOk = ($LASTEXITCODE -eq 0)
+                # 只有「本来有 regPath 却导出失败」才算 problem。
+                # 快捷方式线索补抓的条目本来就没有 Uninstall 键（regPath 为空），不算失败。
+                if (-not $regOk) { $problems.Add("reg:$($a.displayName)") }
             }
-            if (-not $regOk) { $problems.Add("reg:$($a.displayName)") }
 
             $captured.Add([pscustomobject]@{
                 name             = [string]$a.displayName
@@ -687,4 +762,270 @@ function Get-HkcrMatches {
     }
 
     return $hits.ToArray()
+}
+
+# ---------------------------------------------------------------- 快捷方式线索（补抓程序本体）
+# 为什么需要：程序本体的识别一直依赖 Uninstall 注册表的 InstallLocation，
+# 而很多程序（尤其中文软件、用户级安装）根本不写这个字段 → 程序没被备份 →
+# 还原后桌面快捷方式报「目标驱动器或网络连接不可用」。
+# 这里反过来：以桌面/开始菜单的快捷方式为线索，推断它指向的「程序根目录」并纳入备份。
+
+# 给定目标文件路径 + 边界集合，推断「程序根目录」= 边界下的第一级目录
+function Get-ShortcutProgramRoot {
+    param(
+        [string]$Target,
+        [string[]]$Boundaries = @()
+    )
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $null }
+    $t = $Target.Trim()
+    if ($t -notmatch '^[A-Za-z]:\\') { return $null }
+    $tl = $t.ToLower()
+
+    $bestLen = -1
+    $bestOrig = $null
+    foreach ($b in $Boundaries) {
+        if ([string]::IsNullOrWhiteSpace($b)) { continue }
+        $bo = ([string]$b).TrimEnd('\')
+        $bl = $bo.ToLower()
+        if ($tl -eq $bl) { continue }
+        if ($tl.StartsWith($bl + '\')) {
+            if ($bl.Length -gt $bestLen) { $bestLen = $bl.Length; $bestOrig = $bo }
+        }
+    }
+    if (-not $bestOrig) { return $null }
+
+    $rel = $t.Substring($bestOrig.Length).TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($rel)) { return $null }
+    $parts = @($rel -split '\\')
+    if ($parts.Count -lt 2) { return $null }      # 直接躺在边界下的散落文件 → 不采纳
+    return ($bestOrig + '\' + $parts[0])
+}
+
+# 扫快捷方式目录 → 推断要补抓的程序根目录
+function Get-ShortcutTargets {
+    param(
+        [string[]]$Dirs            = @(),
+        [string[]]$Boundaries      = @(),
+        [string[]]$SkipPrefixes    = @(),
+        [string[]]$SkipFolderNames = @('_失效快捷方式'),
+        [string[]]$CaptureDrives   = @('C:'),
+        [int]     $MaxMBPerTarget  = 1024,
+        [int]     $MaxTotalMB      = 2048
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $resolved   = New-Object System.Collections.Generic.List[object]
+    $skipped    = New-Object System.Collections.Generic.List[string]
+    $seen       = New-Object 'System.Collections.Generic.HashSet[string]'
+    $totalBytes = [long]0
+
+    $com = $null
+    try { $com = New-Object -ComObject WScript.Shell } catch { }
+
+    foreach ($d in $Dirs) {
+        if ([string]::IsNullOrWhiteSpace($d) -or -not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($l in @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter *.lnk -ErrorAction SilentlyContinue)) {
+            $inPark = $false
+            foreach ($fn in $SkipFolderNames) {
+                if (-not [string]::IsNullOrWhiteSpace($fn) -and $l.FullName -match ('(?i)\\' + [regex]::Escape($fn) + '\\')) { $inPark = $true; break }
+            }
+            if ($inPark) { continue }
+
+            $target = $null
+            if ($com) { try { $target = [string]$com.CreateShortcut($l.FullName).TargetPath } catch { $target = $null } }
+            if ([string]::IsNullOrWhiteSpace($target)) { continue }
+            $t = $target.Trim()
+
+            if ($t -notmatch '^[A-Za-z]:\\') { $skipped.Add("$($l.Name) -> 非绝对路径"); continue }
+            if (-not (Test-Path -LiteralPath $t)) { $skipped.Add("$($l.Name) -> 目标不存在: $t"); continue }
+
+            $drv = $t.Substring(0, 2).ToUpper()
+            if (@($CaptureDrives) -notcontains $drv) { continue }
+
+            $tl = $t.ToLower()
+            $skipIt = $false
+            foreach ($sp in $SkipPrefixes) {
+                if ([string]::IsNullOrWhiteSpace($sp)) { continue }
+                $spl = ([string]$sp).TrimEnd('\').ToLower()
+                if ($tl -eq $spl -or $tl.StartsWith($spl + '\')) { $skipIt = $true; break }
+            }
+            if ($skipIt) { continue }
+
+            $root = Get-ShortcutProgramRoot -Target $t -Boundaries $Boundaries
+            if (-not $root) { $skipped.Add("$($l.Name) -> 无法推断程序根目录"); continue }
+            if (-not (Test-Path -LiteralPath $root -PathType Container)) { $skipped.Add("$($l.Name) -> 根目录不存在: $root"); continue }
+
+            $rl = $root.ToLower()
+            $skipIt = $false
+            foreach ($sp in $SkipPrefixes) {
+                if ([string]::IsNullOrWhiteSpace($sp)) { continue }
+                $spl = ([string]$sp).TrimEnd('\').ToLower()
+                if ($rl -eq $spl -or $rl.StartsWith($spl + '\')) { $skipIt = $true; break }
+            }
+            if ($skipIt) { continue }
+            if (-not $seen.Add($rl)) { continue }
+
+            $bytes = Get-ProgramTreeBytes -Path $root
+            if ($MaxMBPerTarget -gt 0 -and ($bytes / 1MB) -gt $MaxMBPerTarget) {
+                $skipped.Add(("{0}（{1:N0} MB > 单目录上限 {2} MB）" -f $root, ($bytes / 1MB), $MaxMBPerTarget)); continue
+            }
+            if ($MaxTotalMB -gt 0 -and (($totalBytes + $bytes) / 1MB) -gt $MaxTotalMB) {
+                $skipped.Add(("{0}（超出总量上限 {1} MB）" -f $root, $MaxTotalMB)); continue
+            }
+            $totalBytes += $bytes
+
+            $candidates.Add([pscustomobject]@{
+                installLocation = $root
+                displayName     = (Split-Path -Path $root -Leaf)
+                version         = ''
+                publisher       = ''
+                bytes           = $bytes
+                scope           = 'machine'
+                regPath         = ''
+                reason          = 'shortcut'
+                shortcut        = $l.FullName
+                target          = $t
+            })
+            $resolved.Add([pscustomobject]@{ shortcut = $l.FullName; target = $t; root = $root })
+        }
+    }
+
+    return @{ candidates = $candidates.ToArray(); skipped = $skipped.ToArray(); resolved = $resolved.ToArray(); totalBytes = $totalBytes }
+}
+
+# 在已还原的程序目录里按文件名唯一定位（用于快捷方式修复）
+function Find-RestoredFile {
+    param(
+        [string]  $FileName,
+        [object[]]$ProgramEntries = @(),
+        [int]     $MaxSearch      = 3
+    )
+    if ([string]::IsNullOrWhiteSpace($FileName)) { return $null }
+    $hits = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $ProgramEntries) {
+        $op = [string]$p.originalPath
+        if ([string]::IsNullOrWhiteSpace($op) -or -not (Test-Path -LiteralPath $op)) { continue }
+        $f = @(Get-ChildItem -LiteralPath $op -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($f.Count -gt 0) {
+            $hits.Add($f[0].FullName)
+            if ($hits.Count -ge $MaxSearch) { break }
+        }
+    }
+    if ($hits.Count -eq 1) { return $hits[0] }
+    return $null
+}
+
+# ---------------------------------------------------------------- 快捷方式校验与修复（还原后兜底）
+
+# 还原之后调用：校验每个快捷方式的目标；能唯一定位到已还原的程序就改写指向；
+# 修不好的移入「_失效快捷方式」文件夹（非破坏、可找回）。幂等：park 目录内的不再搬。
+function Repair-Shortcuts {
+    param(
+        [string[]]$Dirs               = @(),
+        [string]$ProgramsManifestPath = '',
+        [string]$ParkFolder           = '_失效快捷方式',
+        [switch]$ParkBroken,
+        [string]$LogPath              = ''
+    )
+
+    $checked = 0; $ok = 0; $repaired = 0; $parked = 0; $skipped = 0
+    $lines = New-Object System.Collections.Generic.List[string]
+
+    # 已还原程序条目（用于修复时的唯一定位）
+    $programs = @()
+    if (-not [string]::IsNullOrWhiteSpace($ProgramsManifestPath) -and (Test-Path -LiteralPath $ProgramsManifestPath)) {
+        try {
+            $pj = Get-Content -LiteralPath $ProgramsManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $programs = @($pj.programs)
+        } catch { $programs = @() }
+    }
+
+    $com = $null
+    try { $com = New-Object -ComObject WScript.Shell } catch { }
+
+    foreach ($d in $Dirs) {
+        if ([string]::IsNullOrWhiteSpace($d) -or -not (Test-Path -LiteralPath $d)) { continue }
+        $parkDir = Join-Path $d $ParkFolder
+        $parkRe  = '(?i)\\' + [regex]::Escape($ParkFolder) + '\\'
+
+        foreach ($l in @(Get-ChildItem -LiteralPath $d -File -Recurse -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Extension -eq '.lnk' -or $_.Extension -eq '.url' })) {
+            if ($l.FullName -match $parkRe) { continue }
+            $checked++
+
+            # ---------- .url ----------
+            if ($l.Extension -eq '.url') {
+                $broken = $false; $local = ''
+                try {
+                    $txt = Get-Content -LiteralPath $l.FullName -Raw -Encoding Default
+                    $m = [regex]::Match($txt, '(?im)^\s*URL\s*=\s*(.+)$')
+                    if ($m.Success) {
+                        $u = $m.Groups[1].Value.Trim()
+                        if ($u -match '^(?i)file:/*(.+)$') {
+                            $local = ($Matches[1] -replace '/', '\')
+                            if (-not (Test-Path -LiteralPath $local)) { $broken = $true }
+                        }
+                    }
+                } catch { }
+                if (-not $broken) { $ok++; continue }
+                if ($ParkBroken) {
+                    try {
+                        New-Item -ItemType Directory -Force -Path $parkDir | Out-Null
+                        $dest = Join-Path $parkDir $l.Name
+                        if (Test-Path -LiteralPath $dest) { $dest = Join-Path $parkDir ([IO.Path]::GetFileNameWithoutExtension($l.Name) + "_" + [guid]::NewGuid().ToString('N').Substring(0, 6) + $l.Extension) }
+                        Move-Item -LiteralPath $l.FullName -Destination $dest -Force -ErrorAction Stop
+                        $parked++; $lines.Add("PARKED    $($l.Name) -> 本地目标缺失: $local")
+                    } catch { $skipped++; $lines.Add("SKIP      $($l.Name)（移动失败）") }
+                } else { $skipped++; $lines.Add("BROKEN    $($l.Name) -> 本地目标缺失: $local") }
+                continue
+            }
+
+            # ---------- .lnk ----------
+            if (-not $com) { $skipped++; continue }
+            $sc = $null
+            try { $sc = $com.CreateShortcut($l.FullName) } catch { $skipped++; continue }
+            $target = [string]$sc.TargetPath
+            if ([string]::IsNullOrWhiteSpace($target)) { $skipped++; continue }
+            if (Test-Path -LiteralPath $target) { $ok++; continue }
+
+            # 尝试修复：按文件名在已还原程序里唯一定位
+            $leaf = Split-Path -Path $target -Leaf
+            $hit  = Find-RestoredFile -FileName $leaf -ProgramEntries $programs
+            if ($hit) {
+                try {
+                    $sc.TargetPath = $hit
+                    if (-not [string]::IsNullOrWhiteSpace([string]$sc.WorkingDirectory)) {
+                        $sc.WorkingDirectory = Split-Path -Path $hit -Parent
+                    }
+                    $sc.Save()
+                    $repaired++; $lines.Add("REPAIRED  $($l.Name): $target  ->  $hit")
+                    continue
+                } catch { }
+            }
+
+            # 修不好 → park
+            if ($ParkBroken) {
+                try {
+                    New-Item -ItemType Directory -Force -Path $parkDir | Out-Null
+                    $dest = Join-Path $parkDir $l.Name
+                    if (Test-Path -LiteralPath $dest) { $dest = Join-Path $parkDir ([IO.Path]::GetFileNameWithoutExtension($l.Name) + "_" + [guid]::NewGuid().ToString('N').Substring(0, 6) + $l.Extension) }
+                    Move-Item -LiteralPath $l.FullName -Destination $dest -Force -ErrorAction Stop
+                    $parked++; $lines.Add("PARKED    $($l.Name) -> 目标缺失: $target")
+                } catch { $skipped++; $lines.Add("SKIP      $($l.Name)（移动失败）") }
+            } else {
+                $skipped++; $lines.Add("BROKEN    $($l.Name) -> 目标缺失: $target")
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        try {
+            $dir = Split-Path -Path $LogPath -Parent
+            if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            $head = ("[{0}] 快捷方式校验：检查 {1} / 正常 {2} / 修复 {3} / 移入失效 {4} / 跳过 {5}" -f (Get-Date).ToString('s'), $checked, $ok, $repaired, $parked, $skipped)
+            ([object[]]@($head) + [object[]]$lines.ToArray()) | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
+        } catch { }
+    }
+
+    return @{ checked = $checked; ok = $ok; repaired = $repaired; parked = $parked; skipped = $skipped }
 }

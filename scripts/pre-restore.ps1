@@ -149,18 +149,38 @@ if ($mf.rdpUser) { $RdpUser = $mf.rdpUser }
 # 记录「上次备份过的程序」-> 关机时继续带上（跨运行持久：镜像里没有它们，但必须留住）
 try {
     $prevRegs = @()
+    $prevLocs = @()
     if ($mf.apps -and $mf.apps.programs) {
         foreach ($pg in @($mf.apps.programs)) {
-            if ($pg.regPath) { $prevRegs += [string]$pg.regPath }
+            if ($pg.regPath)      { $prevRegs += [string]$pg.regPath }
+            if ($pg.originalPath) { $prevLocs += [string]$pg.originalPath }
         }
     }
     $prevArr = [object[]]$prevRegs
+    $locArr  = [object[]]$prevLocs
     ([pscustomobject]@{
         recordedUtc = (Get-Date).ToUniversalTime().ToString('o')
         count       = $prevArr.Count
         regPaths    = $prevArr
+        locations   = $locArr
     } | ConvertTo-Json -Depth 4) | Out-File -LiteralPath (Join-Path $stateDir "prev-programs.json") -Encoding UTF8
-    Say ("上次备份过的程序：{0} 项（本次会继续带上）" -f $prevArr.Count)
+    Say ("上次备份过的程序：{0} 项 / {1} 个目录（本次会继续带上）" -f $prevArr.Count, $locArr.Count)
+
+    # 上次快照里的「快捷方式线索补抓」统计 —— 供连接信息显示。
+    # 为什么在这里：收尾全量备份发生在第 13 步，那时连接信息（第 11 步）早已打印。
+    $prevShortcutN  = 0
+    $prevShortcutMB = 0.0
+    if ($mf.apps -and $mf.apps.programs) {
+        foreach ($pg in @($mf.apps.programs)) {
+            if ([string]$pg.source -eq 'shortcut') {
+                $prevShortcutN++
+                $prevShortcutMB += ([double]$pg.bytes / 1MB)
+            }
+        }
+    }
+    Set-GhEnv ("SNAPSHOT_PROGRAMS=" + @($mf.apps.programs).Count)
+    Set-GhEnv ("SNAPSHOT_SHORTCUTS_CAPTURED=" + $prevShortcutN)
+    Set-GhEnv ("SNAPSHOT_SHORTCUTS_MB=" + [math]::Round($prevShortcutMB, 1))
 } catch { Warn "记录历史程序清单失败：$_" }
 
 $mfVersion = 1

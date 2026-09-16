@@ -366,6 +366,32 @@ function Invoke-MachineRestore {
     }
     Set-GhEnv ("SNAPSHOT_USER_PRERESTORE=" + $(if ($userPreOk) { "OK" } else { "SKIPPED" }))
 
+    # ---------- 4e. 快捷方式校验与修复（必须在程序还原之后）----------
+    # 为什么必须在这里：4b/4c 还原程序时会建 junction 让「原安装路径」重新可用；
+    # 若在此之前校验，会把好链误判为死链。修不好的移入「_失效快捷方式」文件夹（非破坏）。
+    $scCfg        = Get-Cfg $cfg 'shortcuts' $null
+    $doScValidate = [bool](Get-Cfg $scCfg 'validateOnRestore' $true)
+    if ($doScValidate) {
+        if (Get-Command Repair-Shortcuts -ErrorAction SilentlyContinue) {
+            $scParkFolder = [string](Get-Cfg $scCfg 'parkFolder' '_失效快捷方式')
+            if ([string]::IsNullOrWhiteSpace($scParkFolder)) { $scParkFolder = '_失效快捷方式' }
+            $scParkBroken = [bool](Get-Cfg $scCfg 'parkBroken' $true)
+            $scDirsToCheck = New-Object System.Collections.Generic.List[string]
+            $scDirsToCheck.Add("$env:PUBLIC\Desktop")
+            if ([bool](Get-Cfg $scCfg 'machineStartMenu' $false)) { $scDirsToCheck.Add("$env:ProgramData\Microsoft\Windows\Start Menu") }
+            try {
+                $scRes = Repair-Shortcuts -Dirs $scDirsToCheck.ToArray() `
+                            -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
+                            -ParkFolder $scParkFolder -ParkBroken:$scParkBroken
+                Say ("  快捷方式校验（公共桌面）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
+                     $scRes.checked, $scRes.ok, $scRes.repaired, $scRes.parked, $scRes.skipped)
+                Set-GhEnv ("SNAPSHOT_SC_CHECKED="  + $scRes.checked)
+                Set-GhEnv ("SNAPSHOT_SC_REPAIRED=" + $scRes.repaired)
+                Set-GhEnv ("SNAPSHOT_SC_PARKED="   + $scRes.parked)
+            } catch { Warn "  快捷方式校验失败（可忽略）：$_" }
+        } else { Warn "  未加载 programs-lib.ps1，跳过快捷方式校验" }
+    } else { Say "  快捷方式校验已关闭（shortcuts.validateOnRestore=false）" }
+
     # ---------- 5. 注册「首次登录还原个人配置」计划任务 ----------
     if (-not $NoTask) {
         try {
@@ -498,6 +524,28 @@ function Invoke-UserRestore {
                 Say ("  安装型程序（用户级）已还原：{0} 个（{1} 个 junction）" -f $pgRes.restored, $pgRes.junctioned)
                 foreach ($pb in @($pgRes.problems)) { $problems.Add("program:$pb") }
             }
+        }
+    }
+
+    # ---------- 3d. 快捷方式校验与修复（用户级：桌面 + 开始菜单；必须在程序还原之后）----------
+    $scCfgU        = Get-Cfg $cfg 'shortcuts' $null
+    $doScValidateU = [bool](Get-Cfg $scCfgU 'validateOnRestore' $true)
+    if ($doScValidateU) {
+        if (Get-Command Repair-Shortcuts -ErrorAction SilentlyContinue) {
+            $scParkFolderU = [string](Get-Cfg $scCfgU 'parkFolder' '_失效快捷方式')
+            if ([string]::IsNullOrWhiteSpace($scParkFolderU)) { $scParkFolderU = '_失效快捷方式' }
+            $scParkBrokenU = [bool](Get-Cfg $scCfgU 'parkBroken' $true)
+            $scDirsU = New-Object System.Collections.Generic.List[string]
+            $scDirsU.Add((Join-Path $env:USERPROFILE "Desktop"))
+            $scDirsU.Add((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu"))
+            try {
+                $scResU = Repair-Shortcuts -Dirs $scDirsU.ToArray() `
+                            -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
+                            -ParkFolder $scParkFolderU -ParkBroken:$scParkBrokenU `
+                            -LogPath (Join-Path $SysDir "_state\user-restore.log")
+                Say ("  快捷方式校验（个人）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
+                     $scResU.checked, $scResU.ok, $scResU.repaired, $scResU.parked, $scResU.skipped)
+            } catch { Warn "  快捷方式校验失败（可忽略）：$_" }
         }
     }
 

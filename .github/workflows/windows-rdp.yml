@@ -212,8 +212,22 @@ jobs:
             Write-Host "  !! 整机还原失败：本次是全新环境，之前装的软件/设置不会自动回来 !!" -ForegroundColor Red
           }
           $pgN = $env:SNAPSHOT_PROGRAMS
-          if (-not [string]::IsNullOrWhiteSpace($pgN)) {
-            Write-Host "  安装型程序   : 快照含 $pgN 个（实体落 D 盘，原安装路径用 junction 指过来）" -ForegroundColor DarkGray
+          if (-not [string]::IsNullOrWhiteSpace($pgN) -and $pgN -ne "0") {
+            Write-Host "  安装型程序   : 上次快照含 $pgN 个（实体落 D 盘，原安装路径用 junction 指过来）" -ForegroundColor DarkGray
+          }
+          $scC = $env:SNAPSHOT_SHORTCUTS_CAPTURED
+          if (-not [string]::IsNullOrWhiteSpace($scC) -and $scC -ne "0") {
+            $scM = $env:SNAPSHOT_SHORTCUTS_MB
+            $scS = $env:SNAPSHOT_SHORTCUTS_SKIPPED
+            $scExtra = ""
+            if (-not [string]::IsNullOrWhiteSpace($scS) -and $scS -ne "0") { $scExtra = "  [超限/无法推断跳过 $scS 个]" }
+            Write-Host "  快捷方式补抓 : 上次快照含 $scC 个补抓程序（$scM MB）$scExtra" -ForegroundColor DarkGray
+          }
+          $scK = $env:SNAPSHOT_SC_CHECKED
+          if (-not [string]::IsNullOrWhiteSpace($scK)) {
+            $scR = $env:SNAPSHOT_SC_REPAIRED
+            $scP = $env:SNAPSHOT_SC_PARKED
+            Write-Host "  快捷方式校验 : 公共桌面 检查 $scK / 修复 $scR / 移入失效 $scP   (个人桌面登录时校验)" -ForegroundColor DarkGray
           }
           $dg = $env:DISK_GUARD_STATUS
           if (-not [string]::IsNullOrWhiteSpace($dg)) {

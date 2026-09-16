@@ -467,8 +467,13 @@ else {
         try { $baseRegs = @((Get-Content -LiteralPath $baseFile -Raw -Encoding UTF8 | ConvertFrom-Json).regPaths) } catch { $baseRegs = @() }
     }
     $prevRegs = @()
+    $prevLocs = @()
     if (Test-Path -LiteralPath $prevFile) {
-        try { $prevRegs = @((Get-Content -LiteralPath $prevFile -Raw -Encoding UTF8 | ConvertFrom-Json).regPaths) } catch { $prevRegs = @() }
+        try {
+            $pj = Get-Content -LiteralPath $prevFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $prevRegs = @($pj.regPaths)
+            if ($pj.PSObject.Properties['locations']) { $prevLocs = @($pj.locations) }
+        } catch { $prevRegs = @(); $prevLocs = @() }
     }
 
     if (@($baseRegs).Count -eq 0) {
@@ -478,23 +483,88 @@ else {
         $allApps = @(Get-InstalledPrograms)
         Say ("  已装程序总数：{0}（镜像基线 {1} / 历史备份 {2}）" -f $allApps.Count, @($baseRegs).Count, @($prevRegs).Count)
 
-        # 已被 portable 处理过的目录不重复备份
+        # 不备份的目录：已被 portable 处理过的 + 配置里显式排除的（后者此前漏了，补齐）
         $portablePaths = @()
         foreach ($pp in $portableCaptured) { $portablePaths += [string]$pp.originalPath }
+        $programsExcludePaths = @(Get-Cfg $programsCfg 'excludePaths' @())
+        $excludeAll = [object[]](@($portablePaths) + @($programsExcludePaths))
 
         $imgBlock = @(Get-Cfg $programsCfg 'imageBlockPaths' @())
         if (@($imgBlock).Count -eq 0) { $imgBlock = @(Get-ProgramImageBlockPaths) }
+        $sysRoots = @(Get-ProgramSystemRoots)
 
         $sel = Get-ProgramsToBackup -All $allApps `
-            -BaselineRegPaths $baseRegs -AlwaysIncludeRegPaths $prevRegs -ExcludePaths $portablePaths `
-            -SystemRoots (Get-ProgramSystemRoots) -ImageBlockPaths $imgBlock `
+            -BaselineRegPaths $baseRegs -AlwaysIncludeRegPaths $prevRegs -AlwaysIncludeLocations $prevLocs `
+            -ExcludePaths $excludeAll `
+            -SystemRoots $sysRoots -ImageBlockPaths $imgBlock `
             -Blocklist @(Get-Cfg $programsCfg 'blocklist' @()) `
             -MaxMBPerApp ([int](Get-Cfg $programsCfg 'maxMBPerApp' 1024)) `
-            -MaxTotalMB  ([int](Get-Cfg $programsCfg 'maxTotalMB' 2048))
+            -MaxTotalMB  ([int](Get-Cfg $programsCfg 'maxTotalMB' 2048)) `
+            -DeriveInstallLocation ([bool](Get-Cfg $programsCfg 'deriveInstallLocation' $true))
 
         foreach ($sk in @($sel.skipped)) { Warn ("  跳过：{0}" -f $sk) }
         $selArr = [object[]]$sel.selected
         Say ("  安装型程序待备份：{0} 个 / {1:N1} MB" -f $selArr.Count, ($sel.totalBytes / 1MB))
+
+        # ---------- 3c-2. 以快捷方式为线索补抓程序本体 ----------
+        # 为什么：程序识别一直依赖 Uninstall 注册表的 InstallLocation，而很多程序（尤其中文软件、
+        # 用户级安装）不写这个字段 → 程序没被备份 → 还原后桌面快捷方式报「目标不可用」。
+        $scCfg            = Get-Cfg $cfg 'shortcuts' $null
+        $scCaptureTargets = [bool](Get-Cfg $scCfg 'captureTargets' $true)
+        $scStats = @{ candidates = 0; skipped = 0; bytes = [long]0 }
+        if ($scCaptureTargets -and (Get-Command Get-ShortcutTargets -ErrorAction SilentlyContinue)) {
+            $scDirs = New-Object System.Collections.Generic.List[string]
+            if ([bool](Get-Cfg $scCfg 'publicDesktop' $true))  { $scDirs.Add("$env:PUBLIC\Desktop") }
+            if ([bool](Get-Cfg $scCfg 'userDesktop'   $true))  { $scDirs.Add("C:\Users\$RdpUser\Desktop") }
+            if ([bool](Get-Cfg $scCfg 'userStartMenu' $true))  { $scDirs.Add("C:\Users\$RdpUser\AppData\Roaming\Microsoft\Windows\Start Menu") }
+            if ([bool](Get-Cfg $scCfg 'machineStartMenu' $true)) { $scDirs.Add("$env:ProgramData\Microsoft\Windows\Start Menu") }
+
+            $boundaries = New-Object System.Collections.Generic.List[string]
+            foreach ($b in @('C:\', 'D:\', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData',
+                             "C:\Users\$RdpUser", "C:\Users\$RdpUser\AppData",
+                             "C:\Users\$RdpUser\AppData\Local", "C:\Users\$RdpUser\AppData\Local\Programs",
+                             "C:\Users\$RdpUser\AppData\Roaming")) { $boundaries.Add([string]$b) }
+            foreach ($b in $sysRoots) { $boundaries.Add([string]$b) }
+            foreach ($b in $imgBlock) { $boundaries.Add([string]$b) }
+
+            $skipPrefixes = New-Object System.Collections.Generic.List[string]
+            foreach ($b in $sysRoots) { $skipPrefixes.Add([string]$b) }
+            foreach ($b in $imgBlock) { $skipPrefixes.Add([string]$b) }
+            foreach ($b in $programsExcludePaths) { $skipPrefixes.Add([string]$b) }
+            foreach ($b in @($env:GITHUB_WORKSPACE, $env:CLOUDRDP_DATA_DIR, $env:CLOUDRDP_SYS_DIR,
+                             $env:CLOUDRDP_SNAPSHOT_STAGE, $env:CLOUDRDP_PROGRAMS_DIR, $env:CLOUDRDP_PORTABLE_DIR)) {
+                if (-not [string]::IsNullOrWhiteSpace($b)) { $skipPrefixes.Add([string]$b) }
+            }
+
+            $scRes = Get-ShortcutTargets -Dirs $scDirs.ToArray() -Boundaries $boundaries.ToArray() `
+                        -SkipPrefixes $skipPrefixes.ToArray() `
+                        -SkipFolderNames @([string](Get-Cfg $scCfg 'parkFolder' '_失效快捷方式')) `
+                        -CaptureDrives @(Get-Cfg $scCfg 'captureDrives' @('C:')) `
+                        -MaxMBPerTarget ([int](Get-Cfg $scCfg 'captureMaxMBPerTarget' 1024)) `
+                        -MaxTotalMB     ([int](Get-Cfg $scCfg 'captureMaxTotalMB' 2048))
+
+            $scCands = [object[]]$scRes.candidates
+            $scStats.candidates = $scCands.Count
+            $scStats.skipped    = @($scRes.skipped).Count
+            $scStats.bytes      = [long]$scRes.totalBytes
+            foreach ($sk in @($scRes.skipped)) { Warn ("  快捷方式线索跳过：{0}" -f $sk) }
+
+            if ($scCands.Count -gt 0) {
+                # 与注册表选中项按 installLocation 去重
+                $have = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($x in $selArr) { if ($x.installLocation) { [void]$have.Add((([string]$x.installLocation).TrimEnd('\')).ToLower()) } }
+                $merged = New-Object System.Collections.Generic.List[object]
+                foreach ($x in $selArr) { $merged.Add($x) }
+                foreach ($c in $scCands) {
+                    $cl = (([string]$c.installLocation).TrimEnd('\')).ToLower()
+                    if ($have.Add($cl)) { $merged.Add($c) }
+                }
+                $selArr = [object[]]$merged.ToArray()
+                Say ("  快捷方式线索补抓：{0} 个目录 / {1:N1} MB（合并后共 {2} 个）" -f $scCands.Count, ($scStats.bytes / 1MB), $selArr.Count)
+            } else {
+                Say "  快捷方式线索补抓：无新增"
+            }
+        }
 
         if ($selArr.Count -gt 0) {
             $b = Backup-Programs -Apps $selArr -Stage $Stage -ProgramsRoot $programsRoot
@@ -503,6 +573,10 @@ else {
             try { Write-ProgramsManifest -Apps $programsCaptured -Path (Join-Path $Stage "programs\programs.json") } catch { Warn "写程序清单失败：$_" }
             Say ("  安装型程序已备份：{0} 个" -f $programsCaptured.Count)
         }
+
+        Set-GhEnv ("SNAPSHOT_SHORTCUTS_CAPTURED=" + $scStats.candidates)
+        Set-GhEnv ("SNAPSHOT_SHORTCUTS_SKIPPED="  + $scStats.skipped)
+        Set-GhEnv ("SNAPSHOT_SHORTCUTS_MB="       + [math]::Round($scStats.bytes / 1MB, 1))
     }
 }
 
@@ -627,6 +701,11 @@ Say "  系统设置已记录"
 
 # ---------------------------------------------------------------- 5. 快捷方式
 
+$scCfgForPark   = Get-Cfg $cfg 'shortcuts' $null
+$parkFolderName = [string](Get-Cfg $scCfgForPark 'parkFolder' '_失效快捷方式')
+if ([string]::IsNullOrWhiteSpace($parkFolderName)) { $parkFolderName = '_失效快捷方式' }
+$parkRe = '(?i)\\' + [regex]::Escape($parkFolderName) + '\\'
+
 $scMap = @()
 if ([bool](Get-Cfg $cfg.shortcuts 'publicDesktop' $true)) { $scMap += @{ src = "$env:PUBLIC\Desktop"; dst = "shortcuts\public-desktop" } }
 if ([bool](Get-Cfg $cfg.shortcuts 'userDesktop'   $true)) { $scMap += @{ src = ("C:\Users\$RdpUser\Desktop"); dst = "shortcuts\user-desktop" } }
@@ -638,8 +717,9 @@ foreach ($m in $scMap) {
     if (-not (Test-Path -LiteralPath $m.src)) { continue }
     $dst = Join-Path $Stage $m.dst
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
+    # 排除「_失效快捷方式」目录（还原时把修不好的死链移进去，不该再被备份回去）
     $lnks = @(Get-ChildItem -LiteralPath $m.src -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Extension -eq '.lnk' -or $_.Extension -eq '.url' })
+              Where-Object { ($_.Extension -eq '.lnk' -or $_.Extension -eq '.url') -and ($_.FullName -notmatch $parkRe) })
     foreach ($l in $lnks) {
         $relL = $l.FullName.Substring($m.src.Length).TrimStart('\')
         $target = Join-Path $dst $relL
