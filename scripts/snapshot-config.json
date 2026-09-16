@@ -68,7 +68,8 @@
       "desktop.ini",
       "*.swp",
       "*.crdownload",
-      "*.part"
+      "*.part",
+      "_CloudRDP_*.txt"
     ],
     "_comment_maxTotalMB": "快照总大小上限（MB）。0 = 不限（本项目按需求设为不限）",
     "maxTotalMB": 0,

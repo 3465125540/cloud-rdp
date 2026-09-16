@@ -82,7 +82,16 @@
 
 **② 手动** —— 仓库顶部 → **Actions** → 左侧 **Windows Cloud RDP** → **Run workflow**（手动触发跑满 5 小时 50 分）。
 
-启动后等约 6–10 分钟，展开 **11. 估算额度 + 打印连接信息** 步骤记下 **Tailscale IP**；也可在 https://login.tailscale.com/admin/machines 看到 `github-rdp-server*` 设备。
+**启动后约 2~3 分钟**，展开 **`0d. 打印连接信息（可立即连接）`** 步骤记下 **Tailscale IP** —— 此刻就能连进来。
+
+> ⏱️ **剩下的是后台初始化**：C 盘瘦身 → 数据/桌面恢复 → 中文环境 → 软件重装，通常再要 **30~60 分钟**
+> （取决于 139 云盘速度，实测约 0.45 MB/s）。
+> **等到日志出现 `>>> ENV READY —— 环境初始化完成 <<<`（第 13 步）**，才代表「满血」环境就绪。
+> 提前登录也能用，但数据 / 桌面 / 中文输入法可能还在恢复中。
+
+> 💡 人在 RDP 里看不到 Actions 日志 —— 公共桌面会放一个标记文件：
+> 初始化中叫 `_CloudRDP_SETTING_UP.txt`（含 IP / 账号 / 密码），完成后自动改名为 `_CloudRDP_READY.txt`。
+> 也可以在 https://login.tailscale.com/admin/machines 看到 `github-rdp-server*` 设备。
 
 > ⚠️ **额度警告（实测口径）**：GitHub Free 私有仓库 **2000 分钟/月**，
 > 官方 Billing API 显示额度**按原始分钟抵扣、不乘 Windows 2× 倍率**
@@ -91,7 +100,7 @@
 > 额度耗尽后 Actions 直接停摆、**不会报错**，直到次月 1 号重置。
 > 想长期每天跑，必须换**公开仓库**（无限额度，但有风控/封号风险）或**真·云服务器**。
 
-> 💡 **内置额度告警**：每次开机时 step 11 会算出本月已用额度并显示剩余 ——
+> 💡 **内置额度告警**：每次开机时 step 12 会算出本月已用额度，并在 step 13 的汇总里显示剩余 ——
 > **≤50% 变黄、≤20% 变红**。
 > - **首选数据源**：官方 Billing API `GET /users/{owner}/settings/billing/usage?year=&month=`
 >   → 账号级准确数字，**需要 `user` scope 的令牌**（存于 Secret `GH_BILLING_TOKEN`）
@@ -158,7 +167,7 @@
 
 | 作用域 | 何时 | 以谁的身份 | 干什么 |
 |--------|------|-----------|--------|
-| `machine` | 开机第 9 步 | `runneradmin` | 拉快照、还原机器级文件、导入机器注册表、恢复时区/电源/关防火墙、还原公共桌面、**预创建用户配置文件并把个人桌面/文档/HKCU 直接还原到位**，再注册登录任务作兜底 |
+| `machine` | 开机第 8 步 | `runneradmin` | 拉快照、还原机器级文件、导入机器注册表、恢复时区/电源/关防火墙、还原公共桌面、**预创建用户配置文件并把个人桌面/文档/HKCU 直接还原到位**，再注册登录任务作兜底 |
 | `user` | RDP 用户**首次登录**时 | `NvdAdmin` | 兜底重放个人目录文件、HKCU、个人快捷方式与壁纸；**成功才自注销，失败保留任务下次重试**并在公共桌面写标记 |
 
 > **开机即预还原**：先用 `Start-Process -Credential` 让 Windows 真正创建并注册该用户的配置文件
@@ -203,7 +212,7 @@
 
 #### ④ 预还原（还原前的一步）
 
-开机第 9 步跑 `scripts/pre-restore.ps1 -Pull`，负责「把**关机前的完整状态**校验清楚、准备就绪，再驱动全量还原」：
+开机第 8 步跑 `scripts/pre-restore.ps1 -Pull`，负责「把**关机前的完整状态**校验清楚、准备就绪，再驱动全量还原」：
 
 | 阶段 | 做什么 |
 |------|--------|
@@ -223,7 +232,7 @@
 `restore.installApps` **默认开启**。还原后第 10 步调 `scripts/reinstall-apps.ps1 -Background`：
 
 - 读 `D:\cloudrdp-sys\_snapshot\apps\winget-export.json`，**逐包** `winget install --id <id> -e --silent`，**每包独立 try/catch 失败不中断**
-- **用 `Start-Process` 拉起后台进程后立即返回** → 第 11 步的连接信息**秒出**，你马上就能连 RDP，装包在后台继续
+- **用 `Start-Process` 拉起后台进程后立即返回** → **`0d` 的抢先版连接信息秒出**，你马上就能连 RDP，装包在后台继续
 - 日志 `D:\cloudrdp-sys\_snapshot\_logs\apps-reinstall.log`；进度 `D:\cloudrdp-sys\_snapshot\_logs\apps-status.json`
 - 临时关闭：`Run workflow` 时把 `install_apps` 填 `false`，或改 `restore.installApps`
 - 限量试跑：`restore.maxPackages`（0 = 不限）
@@ -241,7 +250,7 @@
 ```
 
 - 启动时会**预检** `AI文件库` 是否存在；**缺失就明确报错、不静默创建**（避免建出影子目录）
-- **一次性迁移**：`Run workflow` 时把 `migrate_139` 填 `true`，第 7 步会 `rclone copy`（**不 move**）把老数据搬到新位置；
+- **一次性迁移**：`Run workflow` 时把 `migrate_139` 填 `true`，第 6 步会 `rclone copy`（**不 move**）把老数据搬到新位置；
   幂等守卫：仅当「新路径为空 且 老路径非空」才执行。老数据原样保留，可随时切回
 - **备选「根 ID 法」**：若不想让远端路径出现中文，可把 Secret/环境变量 `ALIST_139_ROOT_FOLDER_ID` 设为
   「AI文件库」的**文件夹 ID**（139 网页 F12 从请求里取），AList 的 `/cloudrdp` 会直接映射到该文件夹，
@@ -253,7 +262,7 @@
 （Visual Studio 2022 / Android SDK / `hostedtoolcache` / Windows SDK / SQL Server / JDK / 浏览器 …），
 **开机就是约 80%**。要让它 ≤30%，只能把这些**用不到的大件删掉**。于是分两手：
 
-**① 开机瘦身（`scripts/slim-image.ps1`，第 0b 步）** —— 删镜像大件，约释放 **70 GB**：
+**① 开机瘦身（`scripts/slim-image.ps1`，第 1 步）** —— 删镜像大件，约释放 **70 GB**：
 
 | 目标 | 约占用 |
 |------|--------|
@@ -304,7 +313,7 @@ Windows 更新缓存、安装包残留。
 - 两个脚本都**永不返回非 0**，不会因为磁盘问题挡住 RDP 启动
 
 **③ 关闭 Windows 防火墙** —— runner 镜像（windows-2025）现在**默认开启**防火墙，会拦掉 SMB(445)、AList(5244) 等。
-现在三层处理：第 1 步 `Set-NetFirewallProfile -All -Enabled False` 关闭；`system.firewall=false`
+现在三层处理：第 0a 步 `Set-NetFirewallProfile -All -Enabled False` 关闭；`system.firewall=false`
 不再导出/导入 `.wfw` 整策略（**避免它把防火墙改回开启**）；还原流程在系统设置之后**无条件再关一次**。
 > 只关 Tailscale 内网可达性，机器没有公网 IP，暴露面可控。
 
@@ -354,7 +363,7 @@ Windows 更新缓存、安装包残留。
 #### ⑩ 中文环境：简体中文 + 微软拼音输入法（登录前生效）
 
 runner 镜像默认 **en-US**，NvdAdmin 首次登录是纯英文界面且**没有中文输入法**。
-`scripts/setup-chinese.ps1` 在**整机还原之后、保活之前**（第 9b 步）把环境配好：
+`scripts/setup-chinese.ps1` 在**整机还原之后、保活之前**（第 9 步）把环境配好：
 
 | 层级 | 做什么 |
 |------|--------|
@@ -437,25 +446,27 @@ cloud-rdp/
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 19 步：
+工作流 20 步。**0d 之后就能连**，其余在后台继续跑：
 
 | # | 步骤 | 说明 |
 |---|------|------|
 | 0 | 拉仓库 | `actions/checkout` |
-| **0b** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
-| **0c** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
-| 1–2 | 开 RDP + **关防火墙** / 建账号+数据目录 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
-| 3–6 | Tailscale / AList 密码 / rclone / 部署 AList | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys` |
-| **7** | **（可选）迁移 139 老路径** | 仅当 `migrate_139=true` |
-| **8** | **从 139 拉取数据** | `sync-down.ps1` |
-| **9** | **预还原** | `pre-restore.ps1 -Pull`（记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
-| **9b** | **设置中文 + 微软拼音** | `setup-chinese.ps1`：装语言包 + 写 NvdAdmin HKCU（**必须在还原之后**，见 ⑩） |
+| **0a** | 记录 job 起点 + 开 RDP + **关防火墙** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算） |
+| **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
+| **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
+| **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
+| **1** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
+| **2** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
+| 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
+| **7** | **从 139 拉取数据** | `sync-down.ps1`（实测 ≈19 分钟；139 约 0.45 MB/s） |
+| **8** | **预还原** | `pre-restore.ps1 -Pull`（记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
+| **9** | **设置中文 + 微软拼音** | `setup-chinese.ps1`：装语言包 + 写 NvdAdmin HKCU（**必须在还原之后**，见 ⑩） |
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
-| **10b** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
-| **11a** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
-| **11** | **打印连接信息** | 记下 Tailscale IP；含 C/D 盘占用、本次增量、开机预还原状态、快捷方式补抓/校验（见 ⑪） |
-| 12 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照 |
-| 13 | 收尾 | `if: always()`：C 盘清理 + 全量同步数据 + 抓整机快照 |
+| **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
+| **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
+| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行 + 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
+| 14 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照 |
+| 15 | 收尾 | `if: always()`：C 盘清理 + 全量同步数据 + 抓整机快照 |
 
 139 云盘内的存放位置：
 
@@ -470,8 +481,8 @@ cloud-rdp/
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| 第 6 步报「创建 139 存储失败」 | `Authorization` 过期或复制多了 `Basic` | 重新获取 Authorization，只取 `Basic ` 后那段，更新 Secret |
-| 第 6 步报驱动不存在 | AList 版本驱动名不同 | 日志会打印可用驱动列表，改 `setup-alist.ps1` 里的 `$driverKey` |
+| 第 5 步报「创建 139 存储失败」 | `Authorization` 过期或复制多了 `Basic` | 重新获取 Authorization，只取 `Basic ` 后那段，更新 Secret |
+| 第 5 步报驱动不存在 | AList 版本驱动名不同 | 日志会打印可用驱动列表，改 `setup-alist.ps1` 里的 `$driverKey` |
 | `sync-down` 退出码非 0 | 首次运行远端为空（正常）/ Authorization 过期 | 首次可忽略；否则更新 Secret |
 | C 盘占用显示 80%+ | 瘦身被关了（`slim.mode=off` 或输入 `slim_image=off`），或瘦身失败 | 见 ⑦；把 `slim.mode` 改回 `auto`，或看日志里 `SLIM_STATUS` |
 | `SLIM_STATUS=PARTIAL` | 清单没覆盖到某个大件 | 看日志里瘦身后的百分比；把大件路径加进 `snapshot-config.json` 的 `slim.targets` |
@@ -501,14 +512,17 @@ cloud-rdp/
 | winget 重装一直没动静 | 后台进程还在跑 / 清单为空（首次运行） | 看 `D:\cloudrdp-sys\_snapshot\_logs\apps-reinstall.log` 与 `apps-status.json`；首次运行无清单属正常 |
 | 想跳过自动重装 | —— | Run workflow 时把 `install_apps` 填 `false` |
 | `preCommands` 里的命令没生效 | 命令失败被 fail-soft 忽略（不阻断还原） | 看日志 `[pre-restore]   [n] 失败`；命令里建议用绝对路径 |
-| 登录后还是英文界面 | 语言包没装成功（`CHINESE_LANGPACK=FAILED`），或快照里的英文 HKCU 覆盖了设置 | 看第 9b 步日志；确认 `chinese.enabled=true` 且该步在「9. 预还原」**之后**执行 |
+| 登录后还是英文界面 | 语言包没装成功（`CHINESE_LANGPACK=FAILED`），或快照里的英文 HKCU 覆盖了设置 | 看第 9 步日志；确认 `chinese.enabled=true` 且该步在「8. 预还原」**之后**执行 |
 | 中文输入法打不出字 | 用户 hive 写入失败（`CHINESE_USERHIVE` 非 `OK`） | 看日志 `[chinese]` 行；登录任务会兜底。也可登录后到「设置 → 时间和语言」手动添加中文 |
 | Unity Hub 又出现了 | 旧快照里含它 | 已在 `programs.excludePaths`（不备份/不还原）+ `slim.alwaysDelete`（开机删）双重排除；若仍出现，检查 139 上 `_snapshot/programs` 是否残留 |
 | 桌面图标报「目标驱动器或网络连接不可用」 | 程序本体没被备份（该程序 Uninstall 键无 `InstallLocation`）→ 快捷方式成死链 | 见 ⑪：`shortcuts.captureTargets=true` + `programs.deriveInstallLocation=true` 会自动补抓；还原后校验会尝试修复，修不好的移入 `_失效快捷方式` |
 | 桌面多出 `_失效快捷方式` 文件夹 | 校验发现死链、且无法唯一定位到已还原的程序 | 正常（非破坏保留）。装回程序后把图标拖回桌面即可；该文件夹不会被再次备份 |
 | 快捷方式补抓把大目录也抓了 | 该 `.lnk` 指向一个大目录（如某游戏） | 调小 `shortcuts.captureMaxMBPerTarget` / `captureMaxTotalMB`（超限会记名告警，不静默） |
-
 | 不想让 `.workbuddy-ai` 被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy-ai` 那行（改完提交即可） |
+| 刚开机连进去发现桌面是空的 / 数据没同步完 | 你连得太早 —— `0d` 打印连接信息时，后台的数据同步与还原还没跑完 | 正常。等日志出现 `ENV READY`（第 13 步）再登录；或看公共桌面 `_CloudRDP_SETTING_UP.txt` → `_CloudRDP_READY.txt` |
+| 早连后中文输入法打不出中文 | `9. 设置中文` 还没跑完；旧逻辑在你已登录时会因 `reg load` 失败而整段跳过 | **已修**：检测到已登录就直接写 `HKU\<SID>`（不 load/unload），并立即触发用户级还原任务。若仍不行，`Win+Space` 切换或注销重登一次 |
+| 公共桌面出现 `_CloudRDP_SETTING_UP.txt` / `_CloudRDP_READY.txt` | 提示初始化进度的标记文件（人在 RDP 里看不到 Actions 日志） | 正常，可随时删。已加进 `files.excludeFilePatterns`，不会被快照备份/还原 |
+| 早连后程序图标还是死链 | 快捷方式校验（`8. 预还原` 里的 4e 段）跑完之后才修好 | 等 `ENV READY`；或手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
 
 ---
 
@@ -523,7 +537,7 @@ cloud-rdp/
 - **数据目录在 `D:\a\cloud-rdp`**：D 盘是 runner 的临时盘，机器销毁即消失 —— 持久化完全依赖 139，
   所以**务必确认每次运行日志里「数据恢复 / 整机还原」不是 `FAILED`**。
 - **自动重装会跑很久**：402 个包可能几十分钟，期间机器可用但会占带宽/CPU；不想要就把 `install_apps` 填 `false`。
-- **Authorization 约 15 天过期**：需定期手动更新 Secret，否则工作流会在第 6 步失败。
+- **Authorization 约 15 天过期**：需定期手动更新 Secret，否则工作流会在第 5 步失败。
 - **额度有限**：私有仓库约 5~6 次满时长会话/月，用完即停（Actions 会**静默停摆、不报错**）。
 - **机器是一次性的**：Job 结束即销毁。已纳入快照的内容（见第四节）可自动还原，其余会丢失。
 - **防火墙已关闭**（本项目要求）：机器无公网 IP、只走 Tailscale 内网，但内网可达面变大，请自行评估。

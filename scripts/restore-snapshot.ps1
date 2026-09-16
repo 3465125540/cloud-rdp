@@ -51,6 +51,14 @@ $programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
 if (Test-Path -LiteralPath $programsLib) { . $programsLib }
 else { Write-Warning "[restore] 未找到 programs-lib.ps1，安装型程序还原不可用" }
 
+# 用户注册表 hive 共享库（定位 / 判断是否已加载）
+# 用途：用户**已经登录**时（本次「连接信息提前打印」后很常见），hive 已被 Windows 加载，
+#       此时不能再 reg load，否则必然失败；直接写 HKU\<SID> 才对。
+$userHiveLib = Join-Path $PSScriptRoot "userhive-lib.ps1"
+$script:HasUserHiveLib = $false
+if (Test-Path -LiteralPath $userHiveLib) { . $userHiveLib; $script:HasUserHiveLib = $true }
+else { Write-Warning "[restore] 未找到 userhive-lib.ps1，用户 hive 已加载时的兜底不可用" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -301,28 +309,65 @@ function Invoke-MachineRestore {
             if (Test-Path -LiteralPath $ntuser) {
                 Say "  用户配置文件已创建并注册：$userHome"
 
-                # ① 导入 HKCU（__RDPUSER__ -> HKEY_USERS\_Restore）
+                # ① 导入 HKCU
+                #    分两种情况（「连接信息提前打印」之后，用户常常已经登录了）：
+                #      a) hive 已被 Windows 加载（用户已登录）→ 直接写它的 hive，**绝不 load / 绝不 unload**
+                #         （unload 用户正在用的 hive 会让他的会话直接崩）
+                #      b) hive 未加载 → 走原路径：reg load 成 HKU\_Restore，写完 unload
+                #
+                #    ⚠️ 两个形式别混用（实测教训）：
+                #      · $hiveRoot    'HKU\...'         → 命令行 reg.exe add/query/delete
+                #      · $hiveRegRoot 'HKEY_USERS\...'  → **.reg 文件正文**；
+                #        reg import 不认 'HKU\' 前缀（exit=1 且键根本没写进去），必须用全名
                 if ($doRegistry) {
-                    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-                    & reg.exe load "HKU\_Restore" "$ntuser" 2>&1 | Out-Null
-                    if ($LASTEXITCODE -eq 0) {
-                        $regDirU = Join-Path $Stage "registry\user"
-                        $nU = 0
+                    $regDirU = Join-Path $Stage "registry\user"
+
+                    $hiveRoot    = $null
+                    $hiveRegRoot = $null
+                    $hiveLoaded  = $false       # $true = 用户自己的 hive，用完不能 unload
+                    if ($script:HasUserHiveLib -and (Get-Command Get-UserHiveRoot -ErrorAction SilentlyContinue)) {
+                        $hr = Get-UserHiveRoot -RdpUser $RdpUser
+                        if ($hr.loaded) {
+                            $hiveRoot    = [string]$hr.root
+                            $hiveRegRoot = [string]$hr.regRoot
+                            $hiveLoaded  = $true
+                            Say ("  用户已登录，直接写其 hive：{0}" -f $hiveRoot)
+                        }
+                    }
+
+                    if (-not $hiveLoaded) {
+                        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                        & reg.exe load "HKU\_Restore" "$ntuser" 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) {
+                            $hiveRoot    = "HKU\_Restore"
+                            $hiveRegRoot = "HKEY_USERS\_Restore"
+                        } else { Warn "  NTUSER.DAT 加载失败（将交给登录任务）" }
+                    }
+
+                    if ($hiveRoot -and $hiveRegRoot) {
+                        $nU = 0; $nUFail = 0
                         foreach ($f in @(Get-ChildItem -LiteralPath $regDirU -Filter *.reg -File -ErrorAction SilentlyContinue)) {
                             try {
                                 $txt = Get-Content -LiteralPath $f.FullName -Raw -Encoding Unicode
-                                $txt = $txt.Replace(("HKEY_USERS\" + $UserHiveToken), "HKEY_USERS\_Restore")
+                                $txt = $txt.Replace(("HKEY_USERS\" + $UserHiveToken), $hiveRegRoot)
                                 $tmpR = Join-Path $env:TEMP ("ureg_" + [guid]::NewGuid().ToString('N') + ".reg")
                                 $txt | Out-File -LiteralPath $tmpR -Encoding Unicode -Force
                                 & reg.exe import "$tmpR" 2>&1 | Out-Null
-                                if ($LASTEXITCODE -eq 0) { $nU++ }
+                                if ($LASTEXITCODE -eq 0) { $nU++ } else { $nUFail++ }
                                 Remove-Item -LiteralPath $tmpR -Force -ErrorAction SilentlyContinue
-                            } catch { }
+                            } catch { $nUFail++ }
                         }
-                        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-                        & reg.exe unload "HKU\_Restore" 2>&1 | Out-Null
-                        Say ("  个人 HKCU 已导入：{0} 个键文件" -f $nU)
-                    } else { Warn "  NTUSER.DAT 加载失败（将交给登录任务）" }
+                        if (-not $hiveLoaded) {
+                            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                            & reg.exe unload "HKU\_Restore" 2>&1 | Out-Null
+                        }
+                        Say ("  个人 HKCU 已导入：{0} 个键文件（{1}）" -f $nU, $(if ($hiveLoaded) { "写入已加载 hive" } else { "临时 load/unload" }))
+                        # 不再静默：导入失败必须可见（曾因前缀写错导致整批静默失败）
+                        if ($nUFail -gt 0) {
+                            Warn ("  个人 HKCU 有 {0} 个键文件导入失败（检查 .reg 前缀是否 HKEY_USERS\ 全名）" -f $nUFail)
+                            $problems.Add("user-hkcu-import")
+                        }
+                    }
                 }
 
                 # ② 还原个人文件（无 /PURGE）+ 个人快捷方式
@@ -405,6 +450,16 @@ function Invoke-MachineRestore {
             if (-not (Test-Path -LiteralPath $cfgSrc) -and (Test-Path -LiteralPath $ConfigPath)) {
                 Copy-Item -LiteralPath $ConfigPath -Destination $cfgSrc -Force -ErrorAction SilentlyContinue
             }
+            # 共享库也要在 _tools 里，否则登录任务跑的 user 作用域会因缺库而静默降级
+            foreach ($lib in @("programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1")) {
+                $libDst = Join-Path $toolsDir $lib
+                if (-not (Test-Path -LiteralPath $libDst)) {
+                    $libSrc = Join-Path $PSScriptRoot $lib
+                    if (Test-Path -LiteralPath $libSrc) {
+                        Copy-Item -LiteralPath $libSrc -Destination $libDst -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
 
             $psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
             if (-not $psExe) { $psExe = (Get-Command powershell.exe -ErrorAction Stop).Source }
@@ -418,6 +473,28 @@ function Invoke-MachineRestore {
             Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
                 -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
             Say "已注册登录还原任务：$TaskName（$RdpUser 首次登录时执行）"
+
+            # 用户**已经登录**时，「登录时触发」不会再发生 —— 立刻手动触发一次。
+            # 任务以该用户 Interactive 身份运行，用的是他自己的 HKCU（不需要 reg load），
+            # 跑完会 Unregister-ScheduledTask 自注销，所以不会重复执行。
+            $alreadyLoggedIn = $false
+            if ($script:HasUserHiveLib -and (Get-Command Get-UserHiveRoot -ErrorAction SilentlyContinue)) {
+                $hrTask = Get-UserHiveRoot -RdpUser $RdpUser
+                $alreadyLoggedIn = [bool]$hrTask.loaded
+            }
+            if ($alreadyLoggedIn) {
+                try {
+                    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+                    Say "  用户已登录 → 已立即触发用户级还原任务（不等下次登录）"
+                    Set-GhEnv "SNAPSHOT_USER_TASK_RUN=TRIGGERED"
+                } catch {
+                    Warn "  用户已登录但触发还原任务失败：$_（个人配置可能不完整）"
+                    $problems.Add("logon-task-run")
+                    Set-GhEnv "SNAPSHOT_USER_TASK_RUN=FAILED"
+                }
+            } else {
+                Set-GhEnv "SNAPSHOT_USER_TASK_RUN=WAIT_LOGON"
+            }
         } catch {
             Warn "注册登录还原任务失败：$_（个人配置将无法自动还原）"
             $problems.Add("logon-task")

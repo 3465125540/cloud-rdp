@@ -732,7 +732,10 @@ Say ("  快捷方式：{0} 个" -f $scCount)
 
 # ---------------------------------------------------------------- 6. 供还原用的脚本副本
 
-foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json")) {
+# 注意：必须把**共享库**一起带过去 —— 登录任务跑的是 $Stage\_tools\restore-snapshot.ps1，
+# 它要 dot-source programs-lib / portable-lib / userhive-lib；漏带会导致用户级还原静默降级。
+foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json",
+                 "programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1")) {
     $src = Join-Path $PSScriptRoot $f
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $Stage "_tools\$f") -Force -ErrorAction SilentlyContinue

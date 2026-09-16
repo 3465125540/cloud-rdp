@@ -42,6 +42,14 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $PSScriptRoot 'snapshot-config.json'
 }
 
+# 用户注册表 hive 共享库（定位 / 判断是否已加载）
+# 「连接信息提前打印」之后，用户常常已经登录 —— 此时 hive 已被 Windows 加载，
+# 不能再 reg load（必然失败），要直接写 HKU\<SID>，并且**绝不能 unload**。
+$userHiveLib = Join-Path $PSScriptRoot 'userhive-lib.ps1'
+$script:HasUserHiveLib = $false
+if (Test-Path -LiteralPath $userHiveLib) { . $userHiveLib; $script:HasUserHiveLib = $true }
+else { Write-Warning '[chinese] 未找到 userhive-lib.ps1，用户已登录时的兜底不可用' }
+
 # 微软拼音输入法 TIP（简体中文默认输入法）
 $PinyinTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
 # 语言 -> 键盘布局 LCID（写入 Keyboard Layout\Preload）
@@ -204,19 +212,41 @@ if (-not $SkipUserHive -and -not $DryRun) {
             }
         }
 
-        # ② 加载 NTUSER.DAT → 写语言键 → 卸载
+        # ② 写语言键
+        #    两种情况（「连接信息提前打印」之后，用户常常已经登录）：
+        #      a) hive 已被 Windows 加载 → 直接写 HKU\<SID>，**不 load / 绝不 unload**
+        #         （unload 用户正在用的 hive 会让他的会话直接崩）
+        #      b) hive 未加载 → reg load 成 HKU\_LangCfg，写完 unload
         if (Test-Path -LiteralPath $ntuser) {
-            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-            & reg.exe load 'HKU\_LangCfg' "$ntuser" 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                $res = Write-ChineseUserHive -Hive 'HKU\_LangCfg' -Locale $loc -SecLocale $sec -Tip $PinyinTip
-                # 回读校验
-                $chk = (& reg.exe query 'HKU\_LangCfg\Keyboard Layout\Preload' /v 1 2>&1 | Out-String)
+            $hiveTarget = $null       # 目标 hive 根
+            $hiveLoaded = $false      # $true = 用户自己的 hive，用完不能 unload
+
+            if ($script:HasUserHiveLib -and (Get-Command Get-UserHiveRoot -ErrorAction SilentlyContinue)) {
+                $hr = Get-UserHiveRoot -RdpUser $RdpUser
+                if ($hr.loaded) {
+                    $hiveTarget = [string]$hr.root
+                    $hiveLoaded = $true
+                    Say ("用户已登录，直接写其 hive：{0}" -f $hiveTarget)
+                }
+            }
+
+            if (-not $hiveLoaded) {
                 [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-                & reg.exe unload 'HKU\_LangCfg' 2>&1 | Out-Null
+                & reg.exe load 'HKU\_LangCfg' "$ntuser" 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) { $hiveTarget = 'HKU\_LangCfg' }
+            }
+
+            if ($hiveTarget) {
+                $res = Write-ChineseUserHive -Hive $hiveTarget -Locale $loc -SecLocale $sec -Tip $PinyinTip
+                # 回读校验
+                $chk = (& reg.exe query ("$hiveTarget\Keyboard Layout\Preload") /v 1 2>&1 | Out-String)
+                if (-not $hiveLoaded) {
+                    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                    & reg.exe unload 'HKU\_LangCfg' 2>&1 | Out-Null
+                }
                 if ($res.fail -eq 0 -and $chk -match $PreloadMap[$loc]) {
                     $hiveState = 'OK'
-                    Say ("  用户语言设置已写入：{0} 项成功" -f $res.ok)
+                    Say ("  用户语言设置已写入：{0} 项成功（{1}）" -f $res.ok, $(if ($hiveLoaded) { '写入已加载 hive' } else { '临时 load/unload' }))
                 } else {
                     $hiveState = 'PARTIAL'
                     Warn ("  用户语言设置：成功 {0} / 失败 {1}" -f $res.ok, $res.fail)
@@ -243,7 +273,14 @@ if (-not $SkipUserHive -and -not $DryRun) {
 
 # ---------------------------------------------------------------- 4. 增强：在该用户会话里跑 Set-WinUserLanguageList
 # 直接写注册表已足够；这一步是「用官方 API 再确认一次」，失败不影响。
-if (-not $DryRun -and $hiveState -eq 'OK' -and -not [string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+# 放宽条件：hive 写失败（LOADFAIL/PARTIAL）但用户**已登录**时也跑 ——
+# 此时在他的会话里跑 Set-WinUserLanguageList 正是最有效的补救（用的是他自己的 HKCU）。
+$userLoggedIn = $false
+if ($script:HasUserHiveLib -and (Get-Command Get-UserHiveRoot -ErrorAction SilentlyContinue)) {
+    try { $userLoggedIn = [bool](Get-UserHiveRoot -RdpUser $RdpUser).loaded } catch { $userLoggedIn = $false }
+}
+$enhanceGate = ($hiveState -eq 'OK') -or (($hiveState -eq 'LOADFAIL' -or $hiveState -eq 'PARTIAL') -and $userLoggedIn)
+if (-not $DryRun -and $enhanceGate -and -not [string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
     try {
         $ssPw2 = New-Object System.Security.SecureString
         foreach ($ch in $env:RDP_PASSWORD.ToCharArray()) { $ssPw2.AppendChar($ch) }

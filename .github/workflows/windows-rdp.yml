@@ -74,29 +74,20 @@ jobs:
     steps:
       - name: 0. 拉取仓库
         uses: actions/checkout@v4
-
-      - name: 0b. 开机瘦身（删镜像自带大件，约 70 GB）
-        shell: pwsh
-        run: .\scripts\slim-image.ps1
-
-      - name: 0c. C 盘守卫：记录基线（在瘦身之后）
+      - name: 0a. 记录 job 起点 + 开启远程桌面 + 关闭 Windows 防火墙
         shell: pwsh
         run: |
+          # job 起点时间戳：backup-snapshot.ps1 用它算 ETA / 剩余时间预算。
+          # 必须尽早写（不能等到瘦身之后），否则 ETA 会偏乐观。
           New-Item -ItemType Directory -Force -Path (Join-Path $env:CLOUDRDP_SYS_DIR '_state') | Out-Null
           (Get-Date).ToUniversalTime().ToString('o') | Out-File (Join-Path $env:CLOUDRDP_SYS_DIR '_state\job-start.txt') -Encoding ascii
-          .\scripts\disk-guard.ps1 -Baseline
-
-      - name: 1. 开启远程桌面 + 关闭 Windows 防火墙
-        shell: pwsh
-        run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           # 关闭 Windows 防火墙（Domain/Private/Public）—— 镜像现在默认开启，会拦掉 SMB(445)/AList(5244) 等
           Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False -ErrorAction SilentlyContinue
           Write-Host ("[fw] 防火墙状态: " + ((Get-NetFirewallProfile | ForEach-Object { "$($_.Name)=$($_.Enabled)" }) -join ' '))
-
-      - name: 2. 创建管理员账号 + 数据目录 + 桌面快捷方式
+      - name: 0b. 创建管理员账号 + 数据目录 + 桌面快捷方式
         shell: pwsh
         run: |
           $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
@@ -115,8 +106,7 @@ jobs:
             $lnk.Save()
             Write-Host "已创建桌面快捷方式: CloudData -> $dataDir"
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
-
-      - name: 3. 安装并连接 Tailscale
+      - name: 0c. 安装并连接 Tailscale
         shell: pwsh
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
@@ -130,64 +120,125 @@ jobs:
           $ts_ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
           "TS_IP=$ts_ip" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
 
-      - name: 4. 生成 AList 管理员密码（本机专用）
+          # 「可连」时刻：供 0d 打印拿到 IP 的耗时、13 打印就绪总耗时
+          (Get-Date).ToUniversalTime().ToString('o') | Out-File (Join-Path $env:CLOUDRDP_SYS_DIR '_state\rdp-ready-at.txt') -Encoding ascii
+      - name: 0d. 打印连接信息（可立即连接）
+        shell: pwsh
+        run: |
+          $sysDir    = $env:CLOUDRDP_SYS_DIR
+          $startFile = Join-Path $sysDir '_state\job-start.txt'
+          $elapsed   = '?'
+          if (Test-Path -LiteralPath $startFile) {
+            try {
+              $st = [datetime]::Parse((Get-Content -LiteralPath $startFile -Raw).Trim()).ToUniversalTime()
+              $elapsed = [math]::Round(((Get-Date).ToUniversalTime() - $st).TotalMinutes, 1)
+            } catch { }
+          }
+
+          Write-Host ""
+          Write-Host "==========================================" -ForegroundColor Green
+          Write-Host "  >>> RDP 现在就能连（环境仍在后台初始化）<<<" -ForegroundColor Cyan
+          Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
+          Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
+          Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
+          Write-Host "  拿到 IP 耗时 : $elapsed 分钟" -ForegroundColor DarkGray
+          Write-Host ""
+          Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
+          Write-Host "  >> 看不到 IP 时：https://login.tailscale.com/admin/machines 找 github-rdp-server*" -ForegroundColor DarkGray
+          Write-Host ""
+          Write-Host "  [后台仍在进行] C盘瘦身 -> 数据/桌面恢复 -> 中文环境 -> 软件重装" -ForegroundColor DarkYellow
+          Write-Host "    预计 30~60 分钟（取决于 139 云盘速度，实测约 0.45 MB/s）" -ForegroundColor DarkGray
+          Write-Host "    想用满血环境，等日志出现 【ENV READY】 再登录更稳妥；" -ForegroundColor DarkGray
+          Write-Host "    现在登录也能用，但数据 / 桌面 / 中文输入法可能还在恢复中。" -ForegroundColor DarkGray
+          Write-Host "==========================================" -ForegroundColor Green
+
+          # 公共桌面放标记文件（用户人在 RDP 里，看不到 Actions 日志）
+          try {
+            $marker = Join-Path $env:PUBLIC 'Desktop\_CloudRDP_SETTING_UP.txt'
+            @(
+              "环境初始化中 ..."
+              ""
+              "Tailscale IP : $env:TS_IP"
+              "Username     : $env:RDP_USER"
+              "Password     : $env:RDP_PASSWORD"
+              ""
+              "后台仍在进行：C盘瘦身 -> 数据/桌面恢复 -> 中文环境 -> 软件重装"
+              "初始化完成后，本文件会改名为 _CloudRDP_READY.txt"
+            ) | Out-File -LiteralPath $marker -Encoding UTF8
+          } catch { Write-Host "写桌面标记文件失败: $_" }
+      - name: 1. 开机瘦身（删镜像自带大件，约 70 GB）
+        shell: pwsh
+        run: .\scripts\slim-image.ps1
+      - name: 2. C 盘守卫：记录基线（在瘦身之后）
+        shell: pwsh
+        run: .\scripts\disk-guard.ps1 -Baseline
+      - name: 3. 生成 AList 管理员密码（本机专用）
         shell: pwsh
         run: |
           $chars = (48..57) + (65..90) + (97..122)
           $pass = -join ($chars | Get-Random -Count 24 | ForEach-Object { [char]$_ })
           "ALIST_ADMIN_PASS=$pass" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
-
-      - name: 5. 安装并配置 rclone
+      - name: 4. 安装并配置 rclone
         shell: pwsh
         run: .\scripts\setup-rclone.ps1
-
-      - name: 6. 部署 AList 并挂载 139 云盘
+      - name: 5. 部署 AList 并挂载 139 云盘
         shell: pwsh
         env:
           ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
         run: .\scripts\setup-alist.ps1
-
-      - name: 7. （可选）迁移 139 老路径到 AI文件库
+      - name: 6. （可选）迁移 139 老路径到 AI文件库
         shell: pwsh
         run: .\scripts\migrate-139.ps1
-
-      - name: 8. 从 139 云盘拉取数据
+      - name: 7. 从 139 云盘拉取数据
         shell: pwsh
         run: .\scripts\sync-down.ps1
-
-      - name: 9. 预还原（校验 → 规划 → 准备 → 驱动全量还原）
+      - name: 8. 预还原（校验 → 规划 → 准备 → 驱动全量还原）
         shell: pwsh
         run: .\scripts\pre-restore.ps1 -Pull
-
-      - name: 9b. 设置中文 + 微软拼音输入法（登录前生效）
+      - name: 9. 设置中文 + 微软拼音输入法（登录前生效）
         shell: pwsh
         run: .\scripts\setup-chinese.ps1
-
       - name: 10. 后台重装软件（异步，不阻塞连接）
         shell: pwsh
         run: .\scripts\reinstall-apps.ps1 -Background
-
-      - name: 10b. C 盘守卫：清理超限增量 + 报告
+      - name: 11. C 盘守卫：清理超限增量 + 报告
         shell: pwsh
         run: .\scripts\disk-guard.ps1 -Enforce
-
-      - name: 11a. 估算额度（仅手动触发；定时场跳过）
+      - name: 12. 估算额度（仅手动触发；定时场跳过）
         if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_BILLING_TOKEN: ${{ secrets.GH_BILLING_TOKEN }}
         run: .\scripts\quota-report.ps1
-
-      - name: 11. 打印连接信息
+      - name: 13. 环境就绪汇总（ENV READY）
         shell: pwsh
         run: |
+          # 就绪耗时：从 job 起点 / 从拿到 IP 各算一次
+          $sysDir    = $env:CLOUDRDP_SYS_DIR
+          $startFile = Join-Path $sysDir '_state\job-start.txt'
+          $readyFile = Join-Path $sysDir '_state\rdp-ready-at.txt'
+          $totalMin  = '?'
+          $afterIpMin = '?'
+          try {
+            $nowU = (Get-Date).ToUniversalTime()
+            if (Test-Path -LiteralPath $startFile) {
+              $st = [datetime]::Parse((Get-Content -LiteralPath $startFile -Raw).Trim()).ToUniversalTime()
+              $totalMin = [math]::Round(($nowU - $st).TotalMinutes, 1)
+            }
+            if (Test-Path -LiteralPath $readyFile) {
+              $rdy = [datetime]::Parse((Get-Content -LiteralPath $readyFile -Raw).Trim()).ToUniversalTime()
+              $afterIpMin = [math]::Round(($nowU - $rdy).TotalMinutes, 1)
+            }
+          } catch { }
+
           Write-Host ""
           Write-Host "==========================================" -ForegroundColor Green
-          Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
+          Write-Host "  >>> ENV READY —— 环境初始化完成 <<<" -ForegroundColor Cyan
           Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
           Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
+          Write-Host "  开机总耗时   : $totalMin 分钟（其中拿到 IP 后 $afterIpMin 分钟用于初始化）" -ForegroundColor DarkGray
           $rs = $env:RESTORE_STATUS
           if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }
           $rc = "DarkGray"
@@ -285,10 +336,40 @@ jobs:
               Write-Host "  !! 额度告急：只剩 $($env:QUOTA_LEFT_MIN) 分钟，定时任务随时静默停摆，次月 1 号才重置 !!" -ForegroundColor Red
             }
           }
+          $utr = $env:SNAPSHOT_USER_TASK_RUN
+          if (-not [string]::IsNullOrWhiteSpace($utr)) {
+            $utrTxt = switch ($utr) {
+              "TRIGGERED"   { "已立即触发（你已登录，不等下次登录）" }
+              "WAIT_LOGON"  { "等你首次登录时执行" }
+              "FAILED"      { "触发失败 —— 个人配置可能不完整" }
+              default       { $utr }
+            }
+            $utrColor = "DarkGray"
+            if ($utr -eq "FAILED") { $utrColor = "Yellow" }
+            Write-Host "  用户级还原   : $utrTxt" -ForegroundColor $utrColor
+          }
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "==========================================" -ForegroundColor Green
 
-      - name: 12. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
+          # 桌面标记文件：初始化中 -> 就绪
+          try {
+            $upMarker   = Join-Path $env:PUBLIC 'Desktop\_CloudRDP_SETTING_UP.txt'
+            $readyMark  = Join-Path $env:PUBLIC 'Desktop\_CloudRDP_READY.txt'
+            @(
+              "环境初始化完成（ENV READY）"
+              ""
+              "Tailscale IP : $env:TS_IP"
+              "Username     : $env:RDP_USER"
+              "Password     : $env:RDP_PASSWORD"
+              "开机总耗时   : $totalMin 分钟"
+              ""
+              "数据恢复     : $env:RESTORE_STATUS"
+              "整机还原     : $env:SNAPSHOT_STATUS"
+              "中文环境     : $env:CHINESE_STATUS"
+            ) | Out-File -LiteralPath $readyMark -Encoding UTF8
+            if (Test-Path -LiteralPath $upMarker) { Remove-Item -LiteralPath $upMarker -Force -ErrorAction SilentlyContinue }
+          } catch { Write-Host "更新桌面标记文件失败: $_" }
+      - name: 14. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
         shell: pwsh
         run: |
           $now = (Get-Date).ToUniversalTime()
@@ -320,8 +401,7 @@ jobs:
               if ($n % 60 -eq 0) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 每 60 分钟：整机快照（快速模式）
           }
           Write-Host "[keepalive] 已到窗口结束时间，开始收尾"
-
-      - name: 13. 收尾：C 盘清理 + 全量同步数据 + 抓取整机快照
+      - name: 15. 收尾：C 盘清理 + 全量同步数据 + 抓取整机快照
         if: always()
         shell: pwsh
         run: |

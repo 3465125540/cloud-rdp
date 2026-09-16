@@ -167,7 +167,7 @@ try {
     Say ("上次备份过的程序：{0} 项 / {1} 个目录（本次会继续带上）" -f $prevArr.Count, $locArr.Count)
 
     # 上次快照里的「快捷方式线索补抓」统计 —— 供连接信息显示。
-    # 为什么在这里：收尾全量备份发生在第 13 步，那时连接信息（第 11 步）早已打印。
+    # 为什么在这里：收尾全量备份发生在第 15 步，而 0d 的抢先版连接信息更早（Tailscale 之后）就打印了。
     $prevShortcutN  = 0
     $prevShortcutMB = 0.0
     if ($mf.apps -and $mf.apps.programs) {
