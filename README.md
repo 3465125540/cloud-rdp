@@ -29,11 +29,12 @@
 
 ---
 
-## 三、配置 2 个 Secret + 1 个写死密码（截图级）
+## 三、配置 Secret（截图级）
 
 进入仓库 → **Settings** → 左侧 **Secrets and variables** → **Actions** → **New repository secret**。
 
-> 说明：RDP 密码**不走 Secret**，直接写死在 `.github/workflows/windows-rdp.yml` 的 `env:` 里（当前值 `Rdp@2026#Nvd`）。只有下面 2 个走 Secret。
+> ⚠️ **仓库必须是公开的**（见第六节额度说明）—— 公开后 Actions 日志全球可见，
+> 所以**任何密码都绝不能写进仓库**：RDP 密码走 Secret，登录信息改由邮件投递。
 
 ### 1. `TAILSCALE_AUTHKEY`
 
@@ -41,16 +42,33 @@
 2. 勾选 **Reusable**、**Ephemeral**，Expiration 选 **90 days**
 3. 复制生成的 `tskey-auth-...`，填入 Secret
 
-### 2. 密码与用户名（写死在 workflow，无需配 Secret）
+### 2. `RDP_PASSWORD`（RDP 登录密码）
 
-打开 `.github/workflows/windows-rdp.yml`，改顶部 `env:` 两行即可：
+- 值：自定义（**别用弱密码** —— 公库场景下这是唯一屏障）
+- `RDP_USERNAME` 仍写死在 workflow 顶部 `env:`（默认 `NvdAdmin`，不是敏感信息）
+- 该值会被 GitHub 在日志里**自动打码成 `***`**；真正的交付途径是**邮件**与**公共桌面标记文件**
 
-- `RDP_USERNAME`：默认 `NvdAdmin`
-- `RDP_PASSWORD`：默认 `Rdp@2026#Nvd`（改时**务必保留两侧引号**，`#` 在 YAML 里敏感）
+### 3. 邮箱投递（可选，但强烈建议）
 
-改完提交推送，不需要任何 Secret。
+开机后自动把「Tailscale IP + 账号 + 密码」发到你的邮箱 —— 因为公库日志里密码只会显示 `***`。
 
-### 3. `ALIST_139_AUTHORIZATION`（关键，约 15 天过期）
+| Secret | 说明 | 示例 |
+|--------|------|------|
+| `MAIL_TO` | 收件邮箱（必填；多个用 `,` 分隔） | `you@qq.com` |
+| `MAIL_USER` | 发件邮箱账号 | `sender@qq.com` |
+| `MAIL_PASS` | 发件邮箱的 **SMTP 授权码**（不是登录密码） | `abcdwxyzabcdwxyz` |
+| `MAIL_SMTP_HOST` | SMTP 服务器 | `smtp.qq.com` |
+| `MAIL_SMTP_PORT` | 端口，默认 `465` | `465` |
+| `MAIL_FROM` | 发件人地址，默认 = `MAIL_USER` | 可留空 |
+| `MAIL_FROM_NAME` | 发件人显示名，默认 `CloudRDP` | 可留空 |
+| `MAIL_CC` | 抄送 | 可留空 |
+
+> - **QQ 邮箱**：`smtp.qq.com` + `465`（设置 → 账户 → 开启 SMTP 服务 → 拿**授权码**）
+> - **163 邮箱**：`smtp.163.com` + `465`
+> - 端口会自动推断加密方式：`465`=隐式 SSL、`587`=STARTTLS、`25`=明文；也可用 `MAIL_SECURITY` 强制。
+> - **不配这组 Secret 也能跑**：脚本会打印「跳过发信」并正常继续，密码改从公共桌面标记文件取。
+
+### 4. `ALIST_139_AUTHORIZATION`（关键，约 15 天过期）
 
 1. 浏览器登录 https://yun.139.com/
 2. 按 **F12** 打开开发者工具 → **Application（应用）** 面板
@@ -67,7 +85,7 @@
 
 ### 1. 上传代码
 
-把本仓库推送到你的**私有** GitHub 仓库（命令见文末）。
+把本仓库推送到你的**公开** GitHub 仓库（命令见文末）。
 
 ### 2. 启动云主机
 
@@ -93,12 +111,19 @@
 > 初始化中叫 `_CloudRDP_SETTING_UP.txt`（含 IP / 账号 / 密码），完成后自动改名为 `_CloudRDP_READY.txt`。
 > 也可以在 https://login.tailscale.com/admin/machines 看到 `github-rdp-server*` 设备。
 
-> ⚠️ **额度警告（实测口径）**：GitHub Free 私有仓库 **2000 分钟/月**，
+> ✅ **本仓库用公开仓库跑** —— 公开仓库的 Actions 额度**免费且无限**，这是唯一能长期每天跑的办法。
+> 私有仓库只有 **2000 分钟/月**，一次满时长 run ≈ **350 分钟** → 整月仅 **5~6 次**，
+> 超额后 Actions **直接停摆且不报错**（表现为：手动触发 7 秒失败，注解写
+> `recent account payments have failed or your spending limit needs to be increased`）。
+>
+> ⚠️ **公开的代价**：Actions 日志全球可见，所以**绝不能把密码写进仓库** ——
+> 见第三节：RDP 密码走 Secret（日志自动打码成 `***`），连接信息靠**邮件 + 公共桌面标记文件**交付。
+> 日志里可见的只有 Tailscale 设备名（`github-rdp-server*`）与内网 IP，而它们只在你的 tailnet 内可达。
+>
+> 私有仓库的额度实测口径（保留，用来说明「为什么必须公开」）：
 > 官方 Billing API 显示额度**按原始分钟抵扣、不乘 Windows 2× 倍率**
-> （实测：本月 1858 分钟 Windows 用量 → `grossAmount` $18.58、`netAmount` **$0.00**，全额抵扣）。
-> 一次满时长 run ≈ **350 分钟** → 整月约 **5~6 次**。
+> （实测：某月 1858 分钟 Windows 用量 → `grossAmount` $18.58、`netAmount` **$0.00**，全额抵扣）。
 > 额度耗尽后 Actions 直接停摆、**不会报错**，直到次月 1 号重置。
-> 想长期每天跑，必须换**公开仓库**（无限额度，但有风控/封号风险）或**真·云服务器**。
 
 > 💡 **内置额度告警**：每次开机时 step 12 会算出本月已用额度，并在 step 13 的汇总里显示剩余 ——
 > **≤50% 变黄、≤20% 变红**。
@@ -112,7 +137,8 @@
 
 1. **前提**：本地电脑已安装 Tailscale 并登录**同一账号**
 2. `Win + R` → `mstsc` → 计算机填 **Tailscale IP** → 连接
-3. 用户名 `NvdAdmin`，密码为 workflow 里写死的 `RDP_PASSWORD`（默认 `Rdp@2026#Nvd`）
+3. 用户名 `NvdAdmin`，密码见**开机后收到的邮件**（或公共桌面 `_CloudRDP_*.txt`）——
+   它就是 Secret `RDP_PASSWORD` 的值，日志里只会显示 `***`
 4. 证书警告点「是/继续」
 
 ### 4. 数据与整机状态持久化
@@ -125,7 +151,7 @@
 - 云主机里用 **`D:\a\cloud-rdp`** 存数据（**公共桌面已放 `CloudData` 快捷方式**，双击即达）
 - **开机自动恢复**：每次启动自动把 139 云盘的 `/AI文件库/CloudRDP` 拉回 `D:\a\cloud-rdp`
 - 运行中每 10 分钟推送到 139 云盘；关闭会话后还会做一次全量推送
-- 恢复结果会显示在 **「11. 估算额度 + 打印连接信息」** 步骤里：
+- 恢复结果会显示在 **「13. 环境就绪汇总（ENV READY）」** 步骤里：
 
   | 状态 | 含义 |
   |------|------|
@@ -446,7 +472,7 @@ cloud-rdp/
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 20 步。**0d 之后就能连**，其余在后台继续跑：
+工作流 21 步。**0d 之后就能连**，其余在后台继续跑：
 
 | # | 步骤 | 说明 |
 |---|------|------|
@@ -454,7 +480,8 @@ cloud-rdp/
 | **0a** | 记录 job 起点 + 开 RDP + **关防火墙** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
-| **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
+| **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；公共桌面放 `_CloudRDP_SETTING_UP.txt`；密码因走 Secret 只显示 `***` |
+| **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机 |
 | **1** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
 | **2** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
 | 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
@@ -501,7 +528,10 @@ cloud-rdp/
 | 连不上 100.x.x.x | 本地没登录 Tailscale | 本地客户端登录同一账号，`tailscale status` 检查 |
 | 会话突然断开 | 6 小时到点，Job 被回收 | 正常，重新 Run workflow |
 | 填了 `duration_minutes=350` 但实际只保活约 275 分钟 | **保活时长自动收敛**：`360（job 上限）− 已用（含 setup）− 30（收尾预留）`。不收敛的话总时长会超 6 小时被强杀，**收尾全量快照就丢了** | 正常且是刻意的。想更长只能等 GitHub 放宽单 job 上限，或把 setup 阶段提速 |
-| job 起不来，7 秒就 `failure`，0 个步骤 | **额度封禁**：本月用量超免费额度且账号无可用的付款方式/支出上限 | 到 GitHub「Settings → Billing and plans」加付款方式或调高 spending limit；否则等次月 1 号额度重置。可用 `gh api repos/{owner}/{repo}/check-runs/{id}/annotations` 看到确切原因 |
+| job 起不来，7 秒就 `failure`，0 个步骤 | **额度封禁**（**只发生在私有仓库**）：本月用量超 2000 分钟且账号无可用的付款方式/支出上限 | **改公开仓库即可彻底解决**（无限额度，本仓库现为公开）；或到「Settings → Billing and plans」加付款方式/调高 spending limit，否则等次月 1 号重置。可用 `gh api repos/{owner}/{repo}/check-runs/{id}/annotations` 看确切原因 |
+| `0e` 步骤显示「跳过发信」 | 没配邮箱 Secret（`MAIL_TO`/`MAIL_USER`/`MAIL_PASS`/`MAIL_SMTP_HOST`） | 正常降级，不影响开机；要收邮件就按第三节配齐这几个 Secret |
+| `0e` 步骤报认证失败（`535`） | 把邮箱**登录密码**当成了 SMTP 授权码 | 到邮箱设置里开启 SMTP 服务并生成**授权码**（QQ：设置 → 账户 → POP3/SMTP服务 → 生成授权码） |
+| 邮箱没收到连接信息 | 进了垃圾箱，或被收件方拦截 | 查垃圾箱；把发件邮箱加进白名单。也可从公共桌面 `_CloudRDP_*.txt` 直接取密码 |
 | 整机还原显示 `PARTIAL` | 个别目录/注册表键还原失败（日志有明细） | 看日志 `[restore]` 行定位；多为该目录不存在或权限问题 |
 | 登录后个人配置没回来 | 登录还原任务失败或未触发 | 查「任务计划程序」里的 `CloudRDP-RestoreUser`；日志在首次登录时不可见，可手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
 | 关机前的改动丢了 | Job 被**硬杀**（超时/取消太快），收尾步骤没跑完 | 保活期每 60 分钟会自动抓一次快照，最多丢 1 小时内改动 |
@@ -549,7 +579,7 @@ cloud-rdp/
 
 ---
 
-## 八、推送到 GitHub（私有仓库）
+## 八、推送到 GitHub（公开仓库）
 
 ```bash
 # 在本目录下执行
@@ -558,17 +588,22 @@ git add .
 git commit -m "init: cloud-rdp"
 git branch -M main
 
-# 先在 GitHub 网页新建一个 Private 仓库，再把下面 URL 换成你的
+# 先在 GitHub 网页新建一个 Public 仓库，再把下面 URL 换成你的
 git remote add origin https://github.com/<你的用户名>/<仓库名>.git
 git push -u origin main
 ```
 
-推送后别忘了在 **Settings → Secrets and variables → Actions** 配置 **3 个 Secret**：
+> 已存在的仓库改公开：**Settings → General → 拉到最底 Danger Zone → Change repository visibility → Public**。
+> 改公开是为了拿到**无限 Actions 额度**（私有仓库 2000 分钟/月，会被一次满时长 run 吃掉约 350 分钟）。
+
+推送后别忘了在 **Settings → Secrets and variables → Actions** 配置 Secret：
 
 | Secret | 用途 | 是否必需 |
 |--------|------|----------|
 | `TAILSCALE_AUTHKEY` | Tailscale 组网 | ✅ 必需 |
+| `RDP_PASSWORD` | RDP 登录密码（日志自动打码） | ✅ 必需 |
 | `ALIST_139_AUTHORIZATION` | 139 云盘授权（约 15 天过期） | ✅ 必需 |
+| `MAIL_TO` / `MAIL_USER` / `MAIL_PASS` / `MAIL_SMTP_HOST` | 开机后把连接信息发到邮箱 | 可选（强烈建议，见第三节） |
 | `GH_BILLING_TOKEN` | 查官方 Billing API 拿账号级额度（需 `user` scope） | 可选（缺省回退本仓库估算） |
 
-RDP 密码写死在 workflow 里，无需配。
+> ⚠️ **绝不要把密码写回 workflow** —— 公开仓库的 git 历史无法撤回，一旦提交就永久泄漏。

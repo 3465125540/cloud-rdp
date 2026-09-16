@@ -6,6 +6,9 @@
 .DS_Store
 Thumbs.db
 
+# 本地校验脚手架（actionlint 对照实验 / 假 SMTP 端到端测试），不入库
+.tmp-lint/
+
 # 任何可能含密钥的本地文件
 .env
 *.secret

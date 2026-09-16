@@ -35,10 +35,10 @@ concurrency:
   group: cloud-rdp
   cancel-in-progress: false
 
-# 账号密码直接写死（私有仓库内可见；按用户要求不走 Secret）
+# 账号写死；密码走 Secret —— 仓库已转公开，明文会永久泄漏在公网（且 git 历史无法撤回）
 env:
   RDP_USERNAME: NvdAdmin
-  RDP_PASSWORD: "Rdp@2026#Nvd"
+  RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
   # ---------- 路径常量（唯一事实源，脚本以 $env: 读取并各有内置兜底）----------
   # 数据目录：⚠️ 它是 Actions 工作区的父目录，仓库 checkout 就在它下面（D:\a\cloud-rdp\cloud-rdp），
   #           sync-up/sync-down 会自动排除该子目录，避免把仓库传上云盘。
@@ -140,7 +140,7 @@ jobs:
           Write-Host "  >>> RDP 现在就能连（环境仍在后台初始化）<<<" -ForegroundColor Cyan
           Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
-          Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
+          Write-Host "  Password     : *** 见邮箱 / 公共桌面 _CloudRDP_SETTING_UP.txt" -ForegroundColor Yellow
           Write-Host "  拿到 IP 耗时 : $elapsed 分钟" -ForegroundColor DarkGray
           Write-Host ""
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
@@ -166,6 +166,25 @@ jobs:
               "初始化完成后，本文件会改名为 _CloudRDP_READY.txt"
             ) | Out-File -LiteralPath $marker -Encoding UTF8
           } catch { Write-Host "写桌面标记文件失败: $_" }
+      - name: 0e. 把连接信息发到邮箱（未配置邮箱则自动跳过）
+        continue-on-error: true
+        shell: pwsh
+        env:
+          MAIL_SMTP_HOST: ${{ secrets.MAIL_SMTP_HOST }}
+          MAIL_SMTP_PORT: ${{ secrets.MAIL_SMTP_PORT }}
+          MAIL_SECURITY: ${{ secrets.MAIL_SECURITY }}
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_PASS: ${{ secrets.MAIL_PASS }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_CC: ${{ secrets.MAIL_CC }}
+        run: |
+          # 密码已改走 Secret（仓库是公开的，明文会永久留在 git 历史里）。
+          # 日志里会被 GitHub 自动打码成 ***，所以这里主动把连接信息发到用户邮箱。
+          # 正文写在脚本里（不放 YAML here-string，免得被 YAML 缩进规则坑）。
+          # 未配置 MAIL_* 时脚本会打印提示并 exit 0 —— 不会让开机失败。
+          .\scripts\send-connection-mail.ps1
       - name: 1. 开机瘦身（删镜像自带大件，约 70 GB）
         shell: pwsh
         run: .\scripts\slim-image.ps1
@@ -237,7 +256,7 @@ jobs:
           Write-Host "  >>> ENV READY —— 环境初始化完成 <<<" -ForegroundColor Cyan
           Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
-          Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
+          Write-Host "  Password     : *** 见邮箱 / 公共桌面 _CloudRDP_READY.txt" -ForegroundColor Yellow
           Write-Host "  开机总耗时   : $totalMin 分钟（其中拿到 IP 后 $afterIpMin 分钟用于初始化）" -ForegroundColor DarkGray
           $rs = $env:RESTORE_STATUS
           if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }
