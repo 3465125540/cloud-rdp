@@ -35,10 +35,12 @@ concurrency:
   group: cloud-rdp
   cancel-in-progress: false
 
-# 账号写死；密码走 Secret —— 仓库已转公开，明文会永久泄漏在公网（且 git 历史无法撤回）
+# 账号密码直接写死（按需求：日志里明文打印，方便直接取用）
+# ⚠️ 本仓库是公开的 —— 这两个值会永久留在 git 历史与公开日志里，这是刻意的取舍：
+#    机器只能经 Tailscale 内网访问，tailnet 才是真正的安全边界，密码只当第二道门。
 env:
-  RDP_USERNAME: NvdAdmin
-  RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+  RDP_USERNAME: a
+  RDP_PASSWORD: "a"
   # ---------- 路径常量（唯一事实源，脚本以 $env: 读取并各有内置兜底）----------
   # 数据目录：⚠️ 它是 Actions 工作区的父目录，仓库 checkout 就在它下面（D:\a\cloud-rdp\cloud-rdp），
   #           sync-up/sync-down 会自动排除该子目录，避免把仓库传上云盘。
@@ -90,9 +92,35 @@ jobs:
       - name: 0b. 创建管理员账号 + 数据目录 + 桌面快捷方式
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:RDP_USERNAME)) { throw "缺少 RDP_USERNAME" }
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) { throw "缺少 RDP_PASSWORD" }
           $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction SilentlyContinue
+          $created = $false
+          try {
+            New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction Stop | Out-Null
+            $created = $true
+          } catch {
+            if ($_.Exception.Message -match 'already exists') {
+              Set-LocalUser -Name $env:RDP_USERNAME -Password $sec -ErrorAction SilentlyContinue
+              $created = $true
+            } else {
+              # 多半是本地密码策略拒绝（例如单字符密码）—— 一次性机器，放宽策略无副作用
+              Write-Host "[0b] 建账号被拒，尝试放宽本地密码策略：$($_.Exception.Message)"
+              $inf = Join-Path $env:TEMP 'secpol-rdp.inf'
+              $sdb = Join-Path $env:TEMP 'secpol-rdp.sdb'
+              & "$env:SystemRoot\System32\secedit.exe" /export /cfg $inf /quiet | Out-Null
+              $txt = [regex]::Replace((Get-Content -LiteralPath $inf -Raw -Encoding Unicode), 'PasswordComplexity\s*=\s*\d', 'PasswordComplexity = 0')
+              $txt = [regex]::Replace($txt, 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 0')
+              Set-Content -LiteralPath $inf -Value $txt -Encoding Unicode
+              & "$env:SystemRoot\System32\secedit.exe" /configure /db $sdb /cfg $inf /areas SECURITYPOLICY /quiet | Out-Null
+              New-LocalUser -Name $env:RDP_USERNAME -Password $sec -PasswordNeverExpires -ErrorAction Stop | Out-Null
+              $created = $true
+              Write-Host "[0b] 已放宽密码策略，账号创建成功"
+            }
+          }
+          if (-not $created) { throw "创建管理员账号失败" }
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Write-Host "[0b] 账号就绪: $env:RDP_USERNAME"
           "RDP_USER=$env:RDP_USERNAME" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
           # 数据目录 + 可移动程序暂存目录（公共桌面放快捷方式，避免把文件存到不会被同步的地方）
           try {
@@ -140,7 +168,7 @@ jobs:
           Write-Host "  >>> RDP 现在就能连（环境仍在后台初始化）<<<" -ForegroundColor Cyan
           Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
-          Write-Host "  Password     : *** 见邮箱 / 公共桌面 _CloudRDP_SETTING_UP.txt" -ForegroundColor Yellow
+          Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
           Write-Host "  拿到 IP 耗时 : $elapsed 分钟" -ForegroundColor DarkGray
           Write-Host ""
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
@@ -256,7 +284,7 @@ jobs:
           Write-Host "  >>> ENV READY —— 环境初始化完成 <<<" -ForegroundColor Cyan
           Write-Host "  Tailscale IP : $env:TS_IP" -ForegroundColor Yellow
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
-          Write-Host "  Password     : *** 见邮箱 / 公共桌面 _CloudRDP_READY.txt" -ForegroundColor Yellow
+          Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
           Write-Host "  开机总耗时   : $totalMin 分钟（其中拿到 IP 后 $afterIpMin 分钟用于初始化）" -ForegroundColor DarkGray
           $rs = $env:RESTORE_STATUS
           if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }

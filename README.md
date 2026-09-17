@@ -29,28 +29,37 @@
 
 ---
 
-## 三、配置 Secret（截图级）
+## 三、配置账号与 Secret（截图级）
 
 进入仓库 → **Settings** → 左侧 **Secrets and variables** → **Actions** → **New repository secret**。
 
-> ⚠️ **仓库必须是公开的**（见第六节额度说明）—— 公开后 Actions 日志全球可见，
-> 所以**任何密码都绝不能写进仓库**：RDP 密码走 Secret，登录信息改由邮件投递。
+> ⚠️ **仓库必须是公开的**（见第六节额度说明）—— 公开后 Actions 日志全球可见。
 
-### 1. `TAILSCALE_AUTHKEY`
+### 1. RDP 账号密码（写死在 workflow，日志明文打印）
+
+打开 `.github/workflows/windows-rdp.yml`，改顶部 `env:` 两行即可：
+
+- `RDP_USERNAME`：默认 `a`
+- `RDP_PASSWORD`：默认 `"a"`（改时**务必保留两侧引号**）
+
+这两个值**刻意写死**，原因是：
+
+- **日志里要明文打印**（第 0d 步「打印连接信息」）—— 一眼看到、直接拿去连，不用翻 Secret、不用等邮件。
+- GitHub 会把 **Secret 值自动打码成 `***`**，所以「想明文打印」与「用 Secret 存」**互斥**。
+
+> ⚠️ **代价**：仓库是公开的，这两个值会**永久留在 git 历史与公开日志**里，无法撤回。
+> 机器只能经 Tailscale 内网访问 —— **tailnet 才是真正的安全边界**，密码只当第二道门。
+> 想更稳就把密码换成强密码（代价是每次得复制粘贴，不能再手敲 `a`）。
+
+### 2. `TAILSCALE_AUTHKEY`
 
 1. Tailscale 后台 → 左侧 **Settings** → **Keys** → **Generate auth key…**
 2. 勾选 **Reusable**、**Ephemeral**，Expiration 选 **90 days**
 3. 复制生成的 `tskey-auth-...`，填入 Secret
 
-### 2. `RDP_PASSWORD`（RDP 登录密码）
+### 3. 邮箱投递（可选，默认关闭）
 
-- 值：自定义（**别用弱密码** —— 公库场景下这是唯一屏障）
-- `RDP_USERNAME` 仍写死在 workflow 顶部 `env:`（默认 `NvdAdmin`，不是敏感信息）
-- 该值会被 GitHub 在日志里**自动打码成 `***`**；真正的交付途径是**邮件**与**公共桌面标记文件**
-
-### 3. 邮箱投递（可选，但强烈建议）
-
-开机后自动把「Tailscale IP + 账号 + 密码」发到你的邮箱 —— 因为公库日志里密码只会显示 `***`。
+把「Tailscale IP + 账号 + 密码」**同时**发一份到你邮箱。**不配也能跑** —— 脚本会打印「跳过发信」并正常继续。
 
 | Secret | 说明 | 示例 |
 |--------|------|------|
@@ -66,7 +75,7 @@
 > - **QQ 邮箱**：`smtp.qq.com` + `465`（设置 → 账户 → 开启 SMTP 服务 → 拿**授权码**）
 > - **163 邮箱**：`smtp.163.com` + `465`
 > - 端口会自动推断加密方式：`465`=隐式 SSL、`587`=STARTTLS、`25`=明文；也可用 `MAIL_SECURITY` 强制。
-> - **不配这组 Secret 也能跑**：脚本会打印「跳过发信」并正常继续，密码改从公共桌面标记文件取。
+> - **不配这组 Secret 也能跑**：脚本会打印「跳过发信」并正常继续。密码照常在第 0d 步的日志里明文打印。
 
 ### 4. `ALIST_139_AUTHORIZATION`（关键，约 15 天过期）
 
@@ -137,8 +146,8 @@
 
 1. **前提**：本地电脑已安装 Tailscale 并登录**同一账号**
 2. `Win + R` → `mstsc` → 计算机填 **Tailscale IP** → 连接
-3. 用户名 `NvdAdmin`，密码见**开机后收到的邮件**（或公共桌面 `_CloudRDP_*.txt`）——
-   它就是 Secret `RDP_PASSWORD` 的值，日志里只会显示 `***`
+3. 用户名 `a`，密码 `a` —— 两个值都在 **第 0d 步「打印连接信息」的日志里明文打印**，
+   直接复制即可（也可从公共桌面 `_CloudRDP_*.txt` 取）
 4. 证书警告点「是/继续」
 
 ### 4. 数据与整机状态持久化
@@ -194,7 +203,7 @@
 | 作用域 | 何时 | 以谁的身份 | 干什么 |
 |--------|------|-----------|--------|
 | `machine` | 开机第 8 步 | `runneradmin` | 拉快照、还原机器级文件、导入机器注册表、恢复时区/电源/关防火墙、还原公共桌面、**预创建用户配置文件并把个人桌面/文档/HKCU 直接还原到位**，再注册登录任务作兜底 |
-| `user` | RDP 用户**首次登录**时 | `NvdAdmin` | 兜底重放个人目录文件、HKCU、个人快捷方式与壁纸；**成功才自注销，失败保留任务下次重试**并在公共桌面写标记 |
+| `user` | RDP 用户**首次登录**时 | `a` | 兜底重放个人目录文件、HKCU、个人快捷方式与壁纸；**成功才自注销，失败保留任务下次重试**并在公共桌面写标记 |
 
 > **开机即预还原**：先用 `Start-Process -Credential` 让 Windows 真正创建并注册该用户的配置文件
 > （`CreateProcessWithLogonW` 会 `LoadUserProfile`），再 `reg load` 它的 `NTUSER.DAT` 导入 HKCU
@@ -388,17 +397,17 @@ Windows 更新缓存、安装包残留。
 
 #### ⑩ 中文环境：简体中文 + 微软拼音输入法（登录前生效）
 
-runner 镜像默认 **en-US**，NvdAdmin 首次登录是纯英文界面且**没有中文输入法**。
+runner 镜像默认 **en-US**，RDP 用户 a 首次登录是纯英文界面且**没有中文输入法**。
 `scripts/setup-chinese.ps1` 在**整机还原之后、保活之前**（第 9 步）把环境配好：
 
 | 层级 | 做什么 |
 |------|--------|
 | **语言包** | `Install-Language zh-Hans-CN`（LanguagePackManagement 模块），失败回退 `Add-WindowsCapability` |
 | **机器级（HKLM）** | `Set-WinSystemLocale zh-CN` + `Set-WinUILanguageOverride` + `Set-WinDefaultInputMethodOverride`（微软拼音）+ `Set-WinHomeLocation`（中国） |
-| **用户级（NvdAdmin HKCU）** | 写「语言列表 `zh-Hans-CN` + `en-US`」+ **微软拼音 TIP** + `Keyboard Layout\Preload`（`1=00000804` 中文、`2=00000409` 美式键盘）。登录后即带中文输入法，`Win+Space` / `Ctrl+Space` 切换 |
+| **用户级（a 的 HKCU）** | 写「语言列表 `zh-Hans-CN` + `en-US`」+ **微软拼音 TIP** + `Keyboard Layout\Preload`（`1=00000804` 中文、`2=00000409` 美式键盘）。登录后即带中文输入法，`Win+Space` / `Ctrl+Space` 切换 |
 
 > **为什么直接写注册表**：`Set-WinUserLanguageList` 只作用于「当前用户」，而脚本以 `runneradmin` 身份运行。
-> 所以先 `reg load` NvdAdmin 的 `NTUSER.DAT`（复用预还原那套机制），按一台真实中文 Windows 的结构写入，
+> 所以先 `reg load` 用户 a 的 `NTUSER.DAT`（复用预还原那套机制），按一台真实中文 Windows 的结构写入，
 > 卸载后再尝试用 `Start-Process -Credential` 在该用户会话里跑一次 `Set-WinUserLanguageList` 做增强（失败不影响）。
 
 - **顺序很关键**：必须在**整机还原之后** —— 否则快照里导入的英文 HKCU（`Control Panel\International`）会把中文设置覆盖掉
@@ -446,13 +455,46 @@ runner 镜像默认 **en-US**，NvdAdmin 首次登录是纯英文界面且**没�
 - 连接信息会显示：`快捷方式补抓 : 上次快照含 N 个补抓程序（X MB）` 与 `快捷方式校验 : 公共桌面 检查 N / 修复 M / 移入失效 K`
 - **完全回滚**：三个开关全关（`captureTargets` / `validateOnRestore` / `deriveInstallLocation`）即退回旧行为
 
+### 5. 改 RDP 账号名（用户名自动迁移）
+
+用户名**被烤进了云端快照路径** —— `%RDPUSERPROFILE%\Desktop` 会镜像成
+`_snapshot/files/C/Users/<用户名>/Desktop`，而还原时又会用快照里记录的用户名覆盖当前用户名。
+所以直接改账号名会出现「文件还原到旧 profile、以新账号登录看不到」的**静默数据丢失**。
+
+项目内置了幂等迁移脚本 `scripts/rdpuser-migrate.ps1`，由 `pre-restore.ps1` 在
+「拉完快照之后、校验/规划/准备之前」自动调用。你只需要改 workflow 顶部两行：
+
+```yaml
+env:
+  RDP_USERNAME: <新名字>
+  RDP_PASSWORD: "<新密码>"
+```
+
+下次开机就会自动完成：
+
+| 步骤 | 内容 |
+|------|------|
+| 改目录 | `files` 与 `programs` 下的 `<盘>\Users\<旧名>` → `...\Users\<新名>` |
+| 改 JSON | `manifest.json` 及快照下所有 `*.json` 的每个字符串值（`\Users\旧名` 与 `/Users/旧名` 两种形式）+ `rdpUser` 字段 |
+| 改 REG  | 所有 `*.reg`（UTF-16LE）内的字面路径；`HKEY_USERS\__RDPUSER__` 占位符**不动**（它是 SID 归一化的锚点） |
+
+要点：
+
+- **幂等**：快照用户名已等于当前账号 → 直接跳过，不碰任何文件；重复跑无副作用
+- **双向自愈**：迁移方向由「当前账号」决定，所以**改回去也会自动迁移回去** —— 改名可逆
+- **不阻断开机**：迁移失败只告警并按旧名继续，机器始终可用
+- **`.lnk` 不迁移**（二进制）：死链交由还原后的 `Repair-Shortcuts` 修复
+- **旧目录保留在 139**：`files`/`programs` 用 `rclone copy` 推送（只增不删），旧的
+  `files/C/Users/<旧名>/` 会留在云端当回滚保险；确认新流程没问题后可手动删除
+- 结果透出 `SNAPSHOT_USERMIGRATE=OK|SKIPPED|FAILED`，可在日志里核对
+
 ---
 
 ## 五、目录结构
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（19 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（21 步，见下表）
 └── scripts/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
@@ -465,7 +507,8 @@ cloud-rdp/
     ├── programs-lib.ps1                # 安装型程序：目录级备份 / Uninstall 注册表 / junction 还原 / 关联数据匹配 / HKCR 命中
     ├── disk-guard.ps1                  # C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
     ├── slim-image.ps1                  # 【新】开机瘦身：删镜像自带大件（VS / Android SDK / 工具缓存），约释放 70 GB
-    ├── setup-chinese.ps1               # 【新】中文环境：装语言包 + 系统 locale + 写 NvdAdmin HKCU（微软拼音）
+    ├── setup-chinese.ps1               # 【新】中文环境：装语言包 + 系统 locale + 写 a 的 HKCU（微软拼音）
+    ├── rdpuser-migrate.ps1             # 【新】用户名变更迁移：快照目录名 + manifest 字面路径 + .reg 内容（幂等、可反向）
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
     ├── reinstall-apps.ps1              # winget 后台逐包重装（日志 + 进度 JSON）
@@ -480,14 +523,14 @@ cloud-rdp/
 | **0a** | 记录 job 起点 + 开 RDP + **关防火墙** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
-| **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；公共桌面放 `_CloudRDP_SETTING_UP.txt`；密码因走 Secret 只显示 `***` |
+| **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
 | **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机 |
 | **1** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
 | **2** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
 | 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
 | **7** | **从 139 拉取数据** | `sync-down.ps1`（实测 ≈19 分钟；139 约 0.45 MB/s） |
-| **8** | **预还原** | `pre-restore.ps1 -Pull`（记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
-| **9** | **设置中文 + 微软拼音** | `setup-chinese.ps1`：装语言包 + 写 NvdAdmin HKCU（**必须在还原之后**，见 ⑩） |
+| **8** | **预还原** | `pre-restore.ps1 -Pull`（拉取 → **用户名变更迁移** → 记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
+| **9** | **设置中文 + 微软拼音** | `setup-chinese.ps1`：装语言包 + 写 a 的 HKCU（**必须在还原之后**，见 ⑩） |
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
 | **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
@@ -534,6 +577,8 @@ cloud-rdp/
 | 邮箱没收到连接信息 | 进了垃圾箱，或被收件方拦截 | 查垃圾箱；把发件邮箱加进白名单。也可从公共桌面 `_CloudRDP_*.txt` 直接取密码 |
 | 整机还原显示 `PARTIAL` | 个别目录/注册表键还原失败（日志有明细） | 看日志 `[restore]` 行定位；多为该目录不存在或权限问题 |
 | 登录后个人配置没回来 | 登录还原任务失败或未触发 | 查「任务计划程序」里的 `CloudRDP-RestoreUser`；日志在首次登录时不可见，可手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
+| 改了账号名后桌面/文档空了 | 快照里的用户名与当前账号不一致（用户名被烤进了快照路径） | 看第 8 步日志里的 `SNAPSHOT_USERMIGRATE`：`OK` 表示已自动迁移；`SKIPPED` 且用户名确实变过 → 检查 `rdpuser-migrate.ps1` 是否随仓库一起更新；`FAILED` → 日志里有具体原因 |
+| `SNAPSHOT_USERMIGRATE=SKIPPED` | 快照用户名已等于当前账号（正常，幂等跳过） | 无需处理。只有「用户名变了却没迁移」才需要排查 |
 | 关机前的改动丢了 | Job 被**硬杀**（超时/取消太快），收尾步骤没跑完 | 保活期每 60 分钟会自动抓一次快照，最多丢 1 小时内改动 |
 | 快照没上传 | `files.maxTotalMB` 被设成了有限值且已超 | 现在默认 `0 = 不限`；日志会告警并跳过后续目录 |
 | 预检报「`AI文件库` 不存在」 | 139 里还没建这个文件夹（脚本刻意不自动创建） | 在 139 网页根目录下建好「AI文件库」后重跑；或改用「根 ID 法」（见 §4.⑥） |
@@ -601,9 +646,8 @@ git push -u origin main
 | Secret | 用途 | 是否必需 |
 |--------|------|----------|
 | `TAILSCALE_AUTHKEY` | Tailscale 组网 | ✅ 必需 |
-| `RDP_PASSWORD` | RDP 登录密码（日志自动打码） | ✅ 必需 |
 | `ALIST_139_AUTHORIZATION` | 139 云盘授权（约 15 天过期） | ✅ 必需 |
-| `MAIL_TO` / `MAIL_USER` / `MAIL_PASS` / `MAIL_SMTP_HOST` | 开机后把连接信息发到邮箱 | 可选（强烈建议，见第三节） |
+| `MAIL_TO` / `MAIL_USER` / `MAIL_PASS` / `MAIL_SMTP_HOST` | 开机后把连接信息发到邮箱 | 可选（见第三节） |
 | `GH_BILLING_TOKEN` | 查官方 Billing API 拿账号级额度（需 `user` scope） | 可选（缺省回退本仓库估算） |
 
-> ⚠️ **绝不要把密码写回 workflow** —— 公开仓库的 git 历史无法撤回，一旦提交就永久泄漏。
+> RDP 账号密码**不在这里配** —— 它们写死在 workflow 顶部 `env:`，并且会在日志里明文打印（见第三节）。

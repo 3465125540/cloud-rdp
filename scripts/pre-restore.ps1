@@ -24,7 +24,7 @@ param(
     [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
-    [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
+    [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "a" }),
     [string]$DataDir    = $(if ($env:CLOUDRDP_DATA_DIR) { $env:CLOUDRDP_DATA_DIR } else { "D:\a\cloud-rdp" }),
     [string]$PortableDir= $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR } else { "D:\a\cloud-rdp\_portable" }),
     [switch]$Pull,
@@ -145,6 +145,28 @@ catch {
 }
 
 if ($mf.rdpUser) { $RdpUser = $mf.rdpUser }
+
+# ---- 用户名变更迁移（幂等）----
+# 快照按绝对路径镜像（files/C/Users/<name>/...），而上一行会用快照里的用户名覆盖当前用户名。
+# 所以一旦账号改过名，不迁移就会把文件还原到旧 profile —— 以新账号登录后看不到桌面/文档
+# = 静默数据丢失。必须在这里做（早于 2a 校验与 4 准备目录），否则会先建出旧名脏目录。
+$curUser = if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { $RdpUser }
+if ($RdpUser -ne $curUser) {
+    $mig = Join-Path $PSScriptRoot 'rdpuser-migrate.ps1'
+    if (Test-Path -LiteralPath $mig) {
+        try {
+            & $mig -Stage $Stage -OldName $RdpUser -NewName $curUser
+            # 迁移已落盘 —— 重新加载 manifest 并把用户名切到当前账号
+            $mf = Get-Content -LiteralPath (Join-Path $Stage 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            $RdpUser = $curUser
+            Say "用户名已迁移为 $RdpUser（快照目录与 manifest 均已对齐）"
+        } catch {
+            Warn "用户名迁移失败：$_ —— 按旧名 $RdpUser 继续，个人数据可能不还原"
+        }
+    } else {
+        Warn "未找到 rdpuser-migrate.ps1，跳过用户名迁移（快照用户名 $RdpUser ≠ 当前 $curUser）"
+    }
+}
 
 # 记录「上次备份过的程序」-> 关机时继续带上（跨运行持久：镜像里没有它们，但必须留住）
 try {

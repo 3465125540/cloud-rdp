@@ -39,7 +39,7 @@ param(
     [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
-    [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
+    [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "a" }),
     [switch]$Push,
     [switch]$Quick
 )
@@ -79,7 +79,7 @@ function Expand-SnapPath {
     return $r
 }
 
-# C:\Users\NvdAdmin\Desktop -> C\Users\NvdAdmin\Desktop
+# C:\Users\a\Desktop -> C\Users\a\Desktop
 function Get-MirrorRel {
     param([string]$Abs)
     $a = $Abs.TrimEnd('\')
@@ -88,7 +88,7 @@ function Get-MirrorRel {
     return $a
 }
 
-# C\Users\NvdAdmin\Desktop -> C:\Users\NvdAdmin\Desktop
+# C\Users\a\Desktop -> C:\Users\a\Desktop
 function Get-AbsFromMirror {
     param([string]$Rel)
     $parts = $Rel -split '[\\/]'
@@ -121,8 +121,8 @@ function Get-TreeSize {
 }
 
 # ---------------------------------------------------------------- 用户 HKCU 导出
-# 关键难点：runner 以 runneradmin 身份运行，而 RDP 用户是 NvdAdmin，
-# 二者 HKCU 不同。需要直接读 NvdAdmin 的 NTUSER.DAT。
+# 关键难点：runner 以 runneradmin 身份运行，而 RDP 用户是 a，
+# 二者 HKCU 不同。需要直接读用户 a 的 NTUSER.DAT。
 # 导出后把 HKEY_USERS\<SID或临时名> 归一化成 HKEY_USERS\__RDPUSER__，
 # 避免换机后 SID 变化导致还原时写错位置。
 

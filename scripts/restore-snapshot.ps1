@@ -4,8 +4,8 @@
 
 .DESCRIPTION
   为什么分两个作用域？—— 这是 Windows 跨机还原的核心难点：
-    · runner 进程以 runneradmin 身份运行，而 RDP 用户是 NvdAdmin；
-    · NvdAdmin 的 HKCU 注册表与用户配置文件（Desktop/Documents…）在
+    · runner 进程以 runneradmin 身份运行，而 RDP 用户是 a；
+    · 用户 a 的 HKCU 注册表与用户配置文件（Desktop/Documents…）在
       该用户首次登录前并不存在，以 runneradmin 身份写入会被 Windows
       当成「异常 profile」而在登录时重建，导致还原失效。
 
@@ -13,7 +13,7 @@
     -Scope machine  开机时以 runneradmin 执行：拉取快照、还原机器级文件、
                     导入机器注册表、恢复系统设置（时区/电源）、还原公共桌面，
                     并注册一个「首次登录时触发」的计划任务。
-    -Scope user     用户首次登录时以 NvdAdmin 身份执行：还原个人目录文件、
+    -Scope user     用户首次登录时以用户 a 身份执行：还原个人目录文件、
                     导入 HKCU 注册表、还原个人快捷方式与壁纸，然后自注销任务。
 
 .PARAMETER Scope   machine | user
@@ -29,7 +29,7 @@ param(
     [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
-    [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "NvdAdmin" }),
+    [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "a" }),
     [switch]$Pull,
     [switch]$NoTask
 )

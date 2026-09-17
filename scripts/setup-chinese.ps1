@@ -4,18 +4,18 @@
 
 .DESCRIPTION
   为什么需要：GitHub runner 的 Windows Server 镜像默认 en-US，
-  RDP 用户 NvdAdmin 首次登录是纯英文界面，且没有中文输入法。
+  RDP 用户 a 首次登录是纯英文界面，且没有中文输入法。
 
   两层设置：
     A. 机器级（HKLM）—— 安装 zh-Hans-CN 语言包 + 系统 locale / 显示语言覆盖。
        注册表立即写入；locale 类设置要重启才完全生效（对一次性 VM 意义有限，
        但用户登录后的大部分 UI 由 HKCU 决定，见 B）。
-    B. 用户级（NvdAdmin 的 HKCU）—— 直接写「语言列表 + 微软拼音 + 键盘布局」。
+    B. 用户级（用户 a 的 HKCU）—— 直接写「语言列表 + 微软拼音 + 键盘布局」。
        必须在用户登录前写好，登录后才会带中文输入法。
 
   用户级为什么直接写注册表，而不是 Set-WinUserLanguageList？
     该 cmdlet 只作用于「当前用户」，而本脚本以 runneradmin 身份运行。
-    因此先 reg load NvdAdmin 的 NTUSER.DAT 到 HKU\_LangCfg，再按 Windows
+    因此先 reg load 用户 a 的 NTUSER.DAT 到 HKU\_LangCfg，再按 Windows
     真实结构写入（结构照抄一台中文 Windows 的
     HKCU\Control Panel\International\User Profile）。
     随后再尝试用 Start-Process -Credential 在该用户会话里跑一次
@@ -26,7 +26,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RdpUser         = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { 'NvdAdmin' }),
+    [string]$RdpUser         = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { 'a' }),
     [string]$PrimaryLocale   = 'zh-Hans-CN',
     [string]$SecondaryLocale = 'en-US',
     [string]$ConfigPath      = '',
@@ -162,7 +162,7 @@ if (-not $DryRun) {
     Say '[DryRun] 将设置系统 locale / 显示语言 / 默认输入法'
 }
 
-# ---------------------------------------------------------------- 3. 用户级：写 NvdAdmin 的 HKCU
+# ---------------------------------------------------------------- 3. 用户级：写用户 a 的 HKCU
 # 关键：必须在用户登录前写好，否则登录后没有中文输入法。
 function Write-ChineseUserHive {
     param([string]$Hive, [string]$Locale, [string]$SecLocale, [string]$Tip)

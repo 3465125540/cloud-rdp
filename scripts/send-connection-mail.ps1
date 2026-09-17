@@ -29,7 +29,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not $Ip) { $Ip = '(未取到，见 Tailscale 后台 github-rdp-server*)' }
-if (-not $User) { $User = 'NvdAdmin' }
+if (-not $User) { $User = 'a' }
 if (-not $Pass) { $Pass = '(未取到，见公共桌面 _CloudRDP_*.txt)' }
 
 $lines = @(
