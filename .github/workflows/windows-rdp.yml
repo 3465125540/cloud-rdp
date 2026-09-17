@@ -24,6 +24,10 @@ on:
         description: '开机设置简体中文 + 微软拼音输入法：on/off'
         required: false
         default: 'on'
+      relay_minutes:
+        description: '接力总时长（分钟）：单 job 上限 6 小时，填 2880 可借接力续到 48 小时。0 = 不接力'
+        required: false
+        default: '0'
   schedule:
     # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
     - cron: '30 0 * * *'
@@ -34,6 +38,12 @@ on:
 concurrency:
   group: cloud-rdp
   cancel-in-progress: false
+
+# actions: write —— 保活接力（relay-next.ps1）需要用 GITHUB_TOKEN 触发下一个 run。
+# 不接力时这个权限也不会造成额外暴露。
+permissions:
+  contents: read
+  actions: write
 
 # 账号密码直接写死（按需求：日志里明文打印，方便直接取用）
 # ⚠️ 本仓库是公开的 —— 这两个值会永久留在 git 历史与公开日志里，这是刻意的取舍：
@@ -64,6 +74,8 @@ env:
   INPUT_MIGRATE_139: "${{ inputs.migrate_139 }}"
   INPUT_SLIM: "${{ inputs.slim_image }}"
   INPUT_CHINESE: "${{ inputs.chinese }}"
+  # 接力：>0 表示本轮跑满后自动触发下一个 run，直到累计够这么多分钟（单 job 上限 6 小时，靠接力续命）
+  INPUT_RELAY_MINUTES: "${{ inputs.relay_minutes }}"
 
 jobs:
   build:
@@ -416,30 +428,33 @@ jobs:
             ) | Out-File -LiteralPath $readyMark -Encoding UTF8
             if (Test-Path -LiteralPath $upMarker) { Remove-Item -LiteralPath $upMarker -Force -ErrorAction SilentlyContinue }
           } catch { Write-Host "更新桌面标记文件失败: $_" }
-      - name: 14. 保活（定时场跑到窗口结束；手动场默认 350 分钟）
+      - name: 14. 保活（跑到 job 硬上限；收尾在最后 15 分钟后台跑，不中断远程连接）
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_RELAY_TOKEN: ${{ secrets.GH_RELAY_TOKEN }}
         run: |
           $now = (Get-Date).ToUniversalTime()
+          $kaStart = $now
 
-          # ---------- 硬上限收敛：job 总时限 360 分钟，必须给第 15 步收尾留足预算 ----------
-          # 为什么需要：setup 阶段约 55 分钟，若保活再跑满 350 分钟 = 405 分钟 > 360 分钟，
-          # job 会被 GitHub 强杀 → 第 15 步的「收尾全量快照」跑不完 → 关机前最后一次备份丢失。
-          # 收尾本身可能很久（全量抓取 + 推 139），保守留 30 分钟。
+          # ---------- 硬上限：GitHub-hosted runner 单 job = 6 小时（360 分钟），平台限制无法突破 ----------
+          # 所以「48 小时」只能靠接力：本轮跑满 → relay-next.ps1 触发下一个 run → 新机器从 139 快照恢复。
           $JOB_LIMIT_MIN = 360
-          $TAIL_RESERVE  = 30
-          $usedMin = 0
+          $HARD_MARGIN   = 8      # 给第 15 步与 post 步骤留余量，避免卡着 360 被强杀
+          $TAIL_RESERVE  = 15     # 收尾在这段时间里【后台】跑 —— 不占可用窗口、不中断 RDP
+
           $jsf = Join-Path $env:CLOUDRDP_SYS_DIR '_state\job-start.txt'
+          $jobStart = $null
           if (Test-Path -LiteralPath $jsf) {
-              try {
-                  $js = [datetime]::Parse((Get-Content -LiteralPath $jsf -Raw).Trim()).ToUniversalTime()
-                  $usedMin = [int][math]::Floor(($now - $js).TotalMinutes)
-              } catch { }
+              try { $jobStart = [datetime]::Parse((Get-Content -LiteralPath $jsf -Raw).Trim()).ToUniversalTime() } catch { }
           }
-          $maxKeepalive = $JOB_LIMIT_MIN - $TAIL_RESERVE - $usedMin
-          # setup 本身若已吃掉大部分时限（例如语言包下载极慢），保活直接降到 0 ——
-          # 宁可没有保活窗口，也要保证第 15 步的收尾全量快照能跑完。
+          if (-not $jobStart) { $jobStart = $now }
+
+          $hardStop     = $jobStart.AddMinutes($JOB_LIMIT_MIN - $HARD_MARGIN)
+          $usedMin      = [int][math]::Floor(($now - $jobStart).TotalMinutes)
+          $maxKeepalive = [int][math]::Floor(($hardStop - $now).TotalMinutes)
           if ($maxKeepalive -lt 0) { $maxKeepalive = 0 }
-          Write-Host "[keepalive] 已用 $usedMin 分钟（含 setup），本次最多可保活 $maxKeepalive 分钟"
+          Write-Host "[keepalive] job 已用 $usedMin 分钟（含 setup），硬上限 $JOB_LIMIT_MIN 分钟 → 本次最多保活 $maxKeepalive 分钟"
 
           if ($env:IS_MANUAL -eq "true") {
               $mins = 350
@@ -448,7 +463,7 @@ jobs:
                   if ([int]::TryParse($env:INPUT_DURATION, [ref]$parsed) -and $parsed -gt 0) { $mins = $parsed }
               }
               if ($mins -gt $maxKeepalive) {
-                  Write-Host "[keepalive] 请求 $mins 分钟 > 上限 $maxKeepalive 分钟 → 收敛为 $maxKeepalive（否则 job 会被 6 小时上限强杀，收尾快照丢失）"
+                  Write-Host "[keepalive] 请求 $mins 分钟 > 上限 $maxKeepalive 分钟 → 收敛（否则被 6 小时上限强杀，收尾快照丢失）"
                   $mins = $maxKeepalive
               }
               $stop = $now.AddMinutes($mins)
@@ -463,25 +478,80 @@ jobs:
               $winMin = [int][math]::Floor(($stop - $now).TotalMinutes)
               if ($winMin -gt $maxKeepalive) {
                   $stop = $now.AddMinutes($maxKeepalive)
-                  Write-Host "[keepalive] 窗口还剩 $winMin 分钟 > 上限 $maxKeepalive 分钟 → 收敛，避免被 6 小时上限强杀"
+                  Write-Host "[keepalive] 窗口还剩 $winMin 分钟 > 上限 $maxKeepalive 分钟 → 收敛"
               }
               Write-Host "[keepalive] 定时触发：跑到 $($stop.ToString('HH:mm')) UTC 自动停止"
           }
+
+          # 收尾在「保活结束前 TAIL_RESERVE 分钟」后台启动：
+          # 主循环继续 sleep → 远程连接全程可用 → 收尾在后台并行完成。
+          $tailAt = $stop.AddMinutes(-$TAIL_RESERVE)
+          Write-Host "[keepalive] 收尾将于 $($tailAt.ToString('HH:mm')) UTC 在后台启动（远程连接不中断）"
+
           $n = 0
+          $finalizeStarted = $false
           while ((Get-Date).ToUniversalTime() -lt $stop) {
               Start-Sleep -Seconds 60
               $n++
-              $left = [int](($stop - (Get-Date).ToUniversalTime()).TotalMinutes)
+              $t    = (Get-Date).ToUniversalTime()
+              $left = [int](($stop - $t).TotalMinutes)
               Write-Host "[$n] server running... 剩余 $left 分钟"
               if ($n % 10 -eq 0) { & .\scripts\sync-up.ps1 }              # 每 10 分钟：用户数据
-              if ($n % 30 -eq 0) { & .\scripts\disk-guard.ps1 -Enforce }  # 每 30 分钟：C 盘守卫（清超限增量）
-              if ($n % 60 -eq 0) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 每 60 分钟：整机快照（快速模式）
+              if ($n % 30 -eq 0) { & .\scripts\disk-guard.ps1 -Enforce }  # 每 30 分钟：C 盘守卫
+              if ($n % 60 -eq 0) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 每 60 分钟：快速快照
+
+              if (-not $finalizeStarted -and $t -ge $tailAt) {
+                  Write-Host "[keepalive] 到点：后台启动收尾（C盘清理 + 全量同步 + 整机快照）"
+                  & .\scripts\finalize-background.ps1 -Background
+                  $finalizeStarted = $true
+              }
           }
-          Write-Host "[keepalive] 已到窗口结束时间，开始收尾"
-      - name: 15. 收尾：C 盘清理 + 全量同步数据 + 抓取整机快照
+          # 兜底：保活时长被压到小于 TAIL_RESERVE 时循环里没触发过，这里补一次
+          if (-not $finalizeStarted) {
+              Write-Host "[keepalive] 补启动后台收尾"
+              & .\scripts\finalize-background.ps1 -Background
+              $finalizeStarted = $true
+          }
+          Write-Host "[keepalive] 保活窗口结束"
+
+          # ---------- 接力：凑够 relay_minutes（单 job 只 6 小时，48 小时必须接力）----------
+          $relayTotal = 0
+          if (-not [string]::IsNullOrWhiteSpace($env:INPUT_RELAY_MINUTES)) {
+              $p = 0
+              if ([int]::TryParse($env:INPUT_RELAY_MINUTES, [ref]$p) -and $p -gt 0) { $relayTotal = $p }
+          }
+          if ($relayTotal -gt 0) {
+              $elapsed = [int][math]::Floor(((Get-Date).ToUniversalTime() - $kaStart).TotalMinutes)
+              & .\scripts\relay-next.ps1 -TotalMinutes $relayTotal -ElapsedMinutes $elapsed
+          } else {
+              Write-Host "[keepalive] 未要求接力（relay_minutes=0），本轮结束后机器销毁"
+          }
+      - name: 15. 等待后台收尾（兜底：未启动则前台补跑）
         if: always()
         shell: pwsh
         run: |
-          & .\scripts\disk-guard.ps1 -Enforce
-          & .\scripts\sync-up.ps1
-          & .\scripts\backup-snapshot.ps1 -Push
+          # 收尾已在第 14 步末尾【后台】启动，这里只等它跑完 —— 正常情况下flag 早就存在，直接返回。
+          $logDir   = Join-Path $env:CLOUDRDP_SYS_DIR '_logs'
+          $flag     = Join-Path $logDir 'finalize-done.flag'
+          $status   = Join-Path $logDir 'finalize-status.json'
+          $deadline = (Get-Date).ToUniversalTime().AddMinutes(4)
+
+          while (-not (Test-Path -LiteralPath $flag) -and ((Get-Date).ToUniversalTime() -lt $deadline)) {
+              Start-Sleep -Seconds 10
+          }
+
+          if (Test-Path -LiteralPath $flag) {
+              if (Test-Path -LiteralPath $status) {
+                  try {
+                      $s = (Get-Content -LiteralPath $status -Raw) | ConvertFrom-Json
+                      Write-Host "[finalize] 后台收尾完成：state=$($s.state)  error=$($s.error)"
+                  } catch { Write-Host "[finalize] 后台收尾完成（状态文件解析失败）" }
+              } else {
+                  Write-Host "[finalize] 后台收尾完成"
+              }
+          } else {
+              Write-Host "[finalize] 后台收尾超时或未启动 → 前台补跑一次"
+              & .\scripts\disk-guard.ps1 -Enforce
+              & .\scripts\sync-up.ps1
+              & .\scripts\backup-snapshot.ps1 -Push
+          }
