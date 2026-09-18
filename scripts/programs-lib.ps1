@@ -1071,6 +1071,8 @@ function Get-RemappedUserPath {
 
 # 还原之后调用：校验每个快捷方式的目标；能唯一定位到已还原的程序就改写指向；
 # 修不好的移入「_失效快捷方式」文件夹（非破坏、可找回）。幂等：park 目录内的不再搬。
+# ⚠️ 只有在「有程序清单」且「后台重装已结束」时才真的搬 —— 否则只记 BROKEN、留在桌面
+#    （park 目录不参与备份，过早 park 会让快捷方式永久消失）。详见函数内 park 安全性判定。
 function Repair-Shortcuts {
     param(
         [string[]]$Dirs               = @(),
@@ -1081,10 +1083,14 @@ function Repair-Shortcuts {
         [string[]]$AdditionalDirs     = @(),
         # 显式指定「旧用户名=新用户名」；留空 = 自动把任意 C:\Users\<别人>\ 改写成当前用户目录
         [string]$UserProfileRemap     = '',
-        [string]$LogPath              = ''
+        [string]$LogPath              = '',
+        # 快照暂存根（用于判定「后台 winget 重装是否已结束」）；留空则取 $env:CLOUDRDP_SNAPSHOT_STAGE
+        [string]$Stage                = '',
+        # 后台重装状态文件；留空则取 <Stage>\_logs\apps-status.json
+        [string]$ReinstallStatusPath  = ''
     )
 
-    $checked = 0; $ok = 0; $repaired = 0; $parked = 0; $skipped = 0
+    $checked = 0; $ok = 0; $repaired = 0; $parked = 0; $skipped = 0; $parkDeferred = 0
     $lines = New-Object System.Collections.Generic.List[string]
 
     # 用户目录改写规则：显式指定优先，否则自动用「当前用户目录」兜底。
@@ -1106,6 +1112,48 @@ function Repair-Shortcuts {
             $pj = Get-Content -LiteralPath $ProgramsManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $programs = @($pj.programs)
         } catch { $programs = @() }
+    }
+
+    # ---------------------------------------------------------------- park 安全性判定
+    # ⚠️ 真机踩过（会**永久丢数据**）：park = 把快捷方式从桌面移进「_失效快捷方式」，
+    #    而该目录**不参与备份**（backup-snapshot.ps1 特意排除它，避免死链被反复备份回去）。
+    #    于是「程序还没还原」的那一轮一旦 park，快捷方式就从下一轮快照里彻底消失 ——
+    #    机器销毁后不可恢复（实测 LightC.lnk 就这样丢过）。
+    # 因此只在**有依据**时才 park：
+    #   ① programs.json 有内容（说明程序清单确实还原过；空/缺失 = 目标缺失很可能只是「还没还原」）
+    #   ② 后台 winget 重装已结束（apps-status.json 的 state=done）—— 否则目标可能马上就出现
+    # 不满足时只记 BROKEN，把快捷方式**留在桌面**，等下一轮程序还原后再修。
+    $parkSafe = [bool]$ParkBroken
+    $parkDeferReason = ''
+    if ($parkSafe -and ($programs.Count -eq 0)) {
+        $parkSafe = $false
+        $parkDeferReason = '程序清单为空/缺失（目标缺失可能只是「程序还没还原」）'
+    }
+    if ($parkSafe) {
+        $stageRoot = $Stage
+        if ([string]::IsNullOrWhiteSpace($stageRoot)) { $stageRoot = [string]$env:CLOUDRDP_SNAPSHOT_STAGE }
+        $exportFile = ''
+        $statusFile = $ReinstallStatusPath
+        if (-not [string]::IsNullOrWhiteSpace($stageRoot)) {
+            if ([string]::IsNullOrWhiteSpace($exportFile)) { $exportFile = Join-Path $stageRoot 'apps\winget-export.json' }
+            if ([string]::IsNullOrWhiteSpace($statusFile)) { $statusFile = Join-Path $stageRoot '_logs\apps-status.json' }
+        }
+        # 有重装清单 = 步骤 10 会装东西 → 目标可能稍后出现
+        $reinstallEnabled = (-not [string]::IsNullOrWhiteSpace($exportFile)) -and (Test-Path -LiteralPath $exportFile)
+        if ($reinstallEnabled) {
+            $rsState = ''
+            if (-not [string]::IsNullOrWhiteSpace($statusFile) -and (Test-Path -LiteralPath $statusFile)) {
+                try { $rsState = [string](Get-Content -LiteralPath $statusFile -Raw -Encoding UTF8 | ConvertFrom-Json).state } catch { $rsState = '' }
+            }
+            if ($rsState -ne 'done') {
+                $parkSafe = $false
+                $parkDeferReason = ("后台 winget 重装未结束（state=" + $(if ($rsState) { $rsState } else { '未开始' }) + "）")
+            }
+        }
+    }
+    if (-not $parkSafe -and $ParkBroken) {
+        $lines.Add("PARKDEFER 暂不移入「$ParkFolder」：$parkDeferReason")
+        $parkDeferred++
     }
 
     $com = $null
@@ -1136,7 +1184,7 @@ function Repair-Shortcuts {
                     }
                 } catch { }
                 if (-not $broken) { $ok++; continue }
-                if ($ParkBroken) {
+                if ($parkSafe) {
                     try {
                         New-Item -ItemType Directory -Force -Path $parkDir | Out-Null
                         $dest = Join-Path $parkDir $l.Name
@@ -1187,7 +1235,7 @@ function Repair-Shortcuts {
             }
 
             # 修不好 → park
-            if ($ParkBroken) {
+            if ($parkSafe) {
                 try {
                     New-Item -ItemType Directory -Force -Path $parkDir | Out-Null
                     $dest = Join-Path $parkDir $l.Name
@@ -1205,10 +1253,10 @@ function Repair-Shortcuts {
         try {
             $dir = Split-Path -Path $LogPath -Parent
             if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-            $head = ("[{0}] 快捷方式校验：检查 {1} / 正常 {2} / 修复 {3} / 移入失效 {4} / 跳过 {5}" -f (Get-Date).ToString('s'), $checked, $ok, $repaired, $parked, $skipped)
+            $head = ("[{0}] 快捷方式校验：检查 {1} / 正常 {2} / 修复 {3} / 移入失效 {4} / 暂缓 {5} / 跳过 {6}" -f (Get-Date).ToString('s'), $checked, $ok, $repaired, $parked, $parkDeferred, $skipped)
             ([object[]]@($head) + [object[]]$lines.ToArray()) | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
         } catch { }
     }
 
-    return @{ checked = $checked; ok = $ok; repaired = $repaired; parked = $parked; skipped = $skipped }
+    return @{ checked = $checked; ok = $ok; repaired = $repaired; parked = $parked; parkDeferred = $parkDeferred; skipped = $skipped }
 }

@@ -852,9 +852,13 @@ Say ("  快捷方式：{0} 个" -f $scCount)
 # ---------------------------------------------------------------- 6. 供还原用的脚本副本
 
 # 注意：必须把**共享库**一起带过去 —— 登录任务跑的是 $Stage\_tools\restore-snapshot.ps1，
-# 它要 dot-source programs-lib / portable-lib / userhive-lib；漏带会导致用户级还原静默降级。
+# 它要 dot-source programs-lib / portable-lib / userhive-lib / regimport-lib / lockcopy-lib /
+# app-quiesce-lib；漏带会导致用户级还原静默降级（比如还原前不关占用程序、robocopy 失败后
+# 不会用共享读写补写 —— 这两条正是 .workbuddy-ai / Edge 还原失败的兜底）。
+# restore-snapshot.ps1 里还有一层「缺失就从 $PSScriptRoot 补拷」的自愈，但快照应当自带全。
 foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json",
-                 "programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1")) {
+                 "programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1",
+                 "regimport-lib.ps1", "lockcopy-lib.ps1", "app-quiesce-lib.ps1")) {
     $src = Join-Path $PSScriptRoot $f
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $Stage "_tools\$f") -Force -ErrorAction SilentlyContinue

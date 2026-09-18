@@ -603,15 +603,18 @@ function Invoke-MachineRestore {
                 $scRes = Repair-Shortcuts -Dirs $scDirsToCheck.ToArray() `
                             -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
                             -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir, $ProgramsRoot) `
+                            -Stage $Stage `
                             -ParkFolder $scParkFolder -ParkBroken:$scParkBroken
-                Say ("  快捷方式校验（公共桌面）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
-                     $scRes.checked, $scRes.ok, $scRes.repaired, $scRes.parked, $scRes.skipped)
+                Say ("  快捷方式校验（公共桌面）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 暂缓 {4} / 跳过 {5}" -f `
+                     $scRes.checked, $scRes.ok, $scRes.repaired, $scRes.parked, $scRes.parkDeferred, $scRes.skipped)
                 Set-GhEnv ("SNAPSHOT_SC_CHECKED="  + $scRes.checked)
                 Set-GhEnv ("SNAPSHOT_SC_REPAIRED=" + $scRes.repaired)
                 Set-GhEnv ("SNAPSHOT_SC_PARKED="   + $scRes.parked)
+                Set-GhEnv ("SNAPSHOT_SC_PARKDEFER=" + $scRes.parkDeferred)
                 Set-GhEnv ("SHORTCUTS_CHECKED="    + $scRes.checked)
                 Set-GhEnv ("SHORTCUTS_REPAIRED="   + $scRes.repaired)
                 Set-GhEnv ("SHORTCUTS_PARKED="     + $scRes.parked)
+                Set-GhEnv ("SHORTCUTS_PARKDEFER="  + $scRes.parkDeferred)
             } catch { Warn "  快捷方式校验失败（可忽略）：$_" }
         } else { Warn "  未加载 programs-lib.ps1，跳过快捷方式校验" }
     } else { Say "  快捷方式校验已关闭（shortcuts.validateOnRestore=false）" }
@@ -822,13 +825,15 @@ function Invoke-UserRestore {
                 $scResU = Repair-Shortcuts -Dirs $scDirsU.ToArray() `
                             -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
                             -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir, $ProgramsRoot) `
+                            -Stage $Stage `
                             -ParkFolder $scParkFolderU -ParkBroken:$scParkBrokenU `
                             -LogPath (Join-Path $SysDir "_state\user-restore.log")
-                Say ("  快捷方式校验（个人）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
-                     $scResU.checked, $scResU.ok, $scResU.repaired, $scResU.parked, $scResU.skipped)
+                Say ("  快捷方式校验（个人）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 暂缓 {4} / 跳过 {5}" -f `
+                     $scResU.checked, $scResU.ok, $scResU.repaired, $scResU.parked, $scResU.parkDeferred, $scResU.skipped)
                 Set-GhEnv ("SHORTCUTS_CHECKED="  + $scResU.checked)
                 Set-GhEnv ("SHORTCUTS_REPAIRED=" + $scResU.repaired)
                 Set-GhEnv ("SHORTCUTS_PARKED="   + $scResU.parked)
+                Set-GhEnv ("SHORTCUTS_PARKDEFER=" + $scResU.parkDeferred)
             } catch { Warn "  快捷方式校验失败（可忽略）：$_" }
         }
     }

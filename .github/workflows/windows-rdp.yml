@@ -366,6 +366,10 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($scP) -and $scP -ne "0") {
             Write-Host "  失效快捷方式 : $scP 个已移入「_失效快捷方式」（目标程序没能还原）" -ForegroundColor Yellow
           }
+          $scD = $env:SHORTCUTS_PARKDEFER
+          if (-not [string]::IsNullOrWhiteSpace($scD) -and $scD -ne "0") {
+            Write-Host "  快捷方式暂缓 : $scD 个死链暂不移入（程序清单为空或后台重装未结束，留在桌面等下一轮）" -ForegroundColor DarkGray
+          }
           # ---- 邮箱投递结果 ----
           $mr = $env:MAIL_RESULT
           if (-not [string]::IsNullOrWhiteSpace($mr)) {
