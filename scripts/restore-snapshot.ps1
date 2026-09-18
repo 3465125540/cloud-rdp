@@ -59,6 +59,14 @@ $script:HasUserHiveLib = $false
 if (Test-Path -LiteralPath $userHiveLib) { . $userHiveLib; $script:HasUserHiveLib = $true }
 else { Write-Warning "[restore] 未找到 userhive-lib.ps1，用户 hive 已加载时的兜底不可用" }
 
+# 注册表导入容错库：reg.exe import 是 best-effort —— Windows 保护键（默认程序关联 UserChoice）
+# 与被系统进程占用的键（Feeds/Search）永远写不进去，exit=1 但 99% 的键其实已写入。
+# 旧代码把「部分成功」当「整文件失败」→ 误报「个人配置还原失败」。
+$regImportLib = Join-Path $PSScriptRoot "regimport-lib.ps1"
+$script:HasRegImportLib = $false
+if (Test-Path -LiteralPath $regImportLib) { . $regImportLib; $script:HasRegImportLib = $true }
+else { Write-Warning "[restore] 未找到 regimport-lib.ps1，注册表导入容错不可用" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -192,9 +200,23 @@ function Invoke-MachineRestore {
         $regDir = Join-Path $Stage "registry\machine"
         if (Test-Path -LiteralPath $regDir) {
             foreach ($f in @(Get-ChildItem -LiteralPath $regDir -Filter *.reg -File -ErrorAction SilentlyContinue)) {
-                & reg.exe import "$($f.FullName)" 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) { Say "  导入注册表 $($f.Name)" }
-                else { Warn "注册表导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
+                if ($script:HasRegImportLib) {
+                    $ri = Invoke-RegImportTolerant -RegFile $f.FullName
+                    if ($ri.ok) {
+                        Say "  导入注册表 $($f.Name)"
+                    } elseif ($ri.partial) {
+                        # 部分成功 = 数据基本已还原：Windows 保护键（UserChoice 等）
+                        # 与被系统占用的键（Feeds/Search）写不进去属正常，不计失败
+                        Warn ("  注册表部分导入 {0}：{1}/{2} 块失败（系统保护/占用键，属正常）—— {3}" -f `
+                              $f.Name, $ri.failedN, $ri.blocks, (Format-RegFailedKeys $ri.failedKeys))
+                    } else {
+                        Warn "注册表导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)")
+                    }
+                } else {
+                    & reg.exe import "$($f.FullName)" 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) { Say "  导入注册表 $($f.Name)" }
+                    else { Warn "注册表导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
+                }
             }
         }
     } else { Say "  注册表还原已关闭（restore.registry=false）" }
@@ -345,15 +367,26 @@ function Invoke-MachineRestore {
                     }
 
                     if ($hiveRoot -and $hiveRegRoot) {
-                        $nU = 0; $nUFail = 0
+                        $nU = 0; $nUFail = 0; $nUPartial = 0
+                        $partialKeys = New-Object System.Collections.Generic.List[string]
                         foreach ($f in @(Get-ChildItem -LiteralPath $regDirU -Filter *.reg -File -ErrorAction SilentlyContinue)) {
                             try {
                                 $txt = Get-Content -LiteralPath $f.FullName -Raw -Encoding Unicode
                                 $txt = $txt.Replace(("HKEY_USERS\" + $UserHiveToken), $hiveRegRoot)
                                 $tmpR = Join-Path $env:TEMP ("ureg_" + [guid]::NewGuid().ToString('N') + ".reg")
                                 $txt | Out-File -LiteralPath $tmpR -Encoding Unicode -Force
-                                & reg.exe import "$tmpR" 2>&1 | Out-Null
-                                if ($LASTEXITCODE -eq 0) { $nU++ } else { $nUFail++ }
+                                if ($script:HasRegImportLib) {
+                                    $riU = Invoke-RegImportTolerant -RegFile $tmpR
+                                    if ($riU.ok) { $nU++ }
+                                    elseif ($riU.partial) {
+                                        # 部分成功 = 数据基本已还原（保护键/占用键写不进属正常）
+                                        $nUPartial++
+                                        foreach ($k in @($riU.failedKeys)) { $partialKeys.Add($k) }
+                                    } else { $nUFail++ }
+                                } else {
+                                    & reg.exe import "$tmpR" 2>&1 | Out-Null
+                                    if ($LASTEXITCODE -eq 0) { $nU++ } else { $nUFail++ }
+                                }
                                 Remove-Item -LiteralPath $tmpR -Force -ErrorAction SilentlyContinue
                             } catch { $nUFail++ }
                         }
@@ -362,6 +395,11 @@ function Invoke-MachineRestore {
                             & reg.exe unload "HKU\_Restore" 2>&1 | Out-Null
                         }
                         Say ("  个人 HKCU 已导入：{0} 个键文件（{1}）" -f $nU, $(if ($hiveLoaded) { "写入已加载 hive" } else { "临时 load/unload" }))
+                        # 部分成功（系统保护键/占用键写不进）只告警，不算失败
+                        if ($nUPartial -gt 0) {
+                            Warn ("  个人 HKCU 有 {0} 个键文件部分导入（系统保护/占用键，属正常）：{1}" -f `
+                                  $nUPartial, (Format-RegFailedKeys $partialKeys.ToArray()))
+                        }
                         # 不再静默：导入失败必须可见（曾因前缀写错导致整批静默失败）
                         if ($nUFail -gt 0) {
                             Warn ("  个人 HKCU 有 {0} 个键文件导入失败（检查 .reg 前缀是否 HKEY_USERS\ 全名）" -f $nUFail)
@@ -427,6 +465,7 @@ function Invoke-MachineRestore {
             try {
                 $scRes = Repair-Shortcuts -Dirs $scDirsToCheck.ToArray() `
                             -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
+                            -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir) `
                             -ParkFolder $scParkFolder -ParkBroken:$scParkBroken
                 Say ("  快捷方式校验（公共桌面）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
                      $scRes.checked, $scRes.ok, $scRes.repaired, $scRes.parked, $scRes.skipped)
@@ -451,7 +490,7 @@ function Invoke-MachineRestore {
                 Copy-Item -LiteralPath $ConfigPath -Destination $cfgSrc -Force -ErrorAction SilentlyContinue
             }
             # 共享库也要在 _tools 里，否则登录任务跑的 user 作用域会因缺库而静默降级
-            foreach ($lib in @("programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1")) {
+            foreach ($lib in @("programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1", "regimport-lib.ps1")) {
                 $libDst = Join-Path $toolsDir $lib
                 if (-not (Test-Path -LiteralPath $libDst)) {
                     $libSrc = Join-Path $PSScriptRoot $lib
@@ -512,16 +551,24 @@ function Invoke-MachineRestore {
 
 function Import-UserRegFile {
     param([string]$RegFile)
+    $res = [ordered]@{ ok = $false; partial = $false; failed = $true; failedKeys = @(); blocks = 0; failedN = 0 }
     $txt = Get-Content -LiteralPath $RegFile -Raw -Encoding Unicode
-    if (-not $txt) { return $false }
+    if (-not $txt) { return $res }
     # 用户已登录：HKCU 即其 hive，把占位符换成 HKEY_CURRENT_USER 直接导入
     $txt = $txt.Replace(("HKEY_USERS\" + $UserHiveToken), "HKEY_CURRENT_USER")
     $tmp = Join-Path $env:TEMP ("snapreg_" + [guid]::NewGuid().ToString("N") + ".reg")
     $txt | Out-File -LiteralPath $tmp -Encoding Unicode -Force
-    & reg.exe import "$tmp" 2>&1 | Out-Null
-    $ok = ($LASTEXITCODE -eq 0)
+    if ($script:HasRegImportLib) {
+        $ri = Invoke-RegImportTolerant -RegFile $tmp
+        $res.ok = $ri.ok; $res.partial = $ri.partial; $res.failed = $ri.failed
+        $res.failedKeys = $ri.failedKeys; $res.blocks = $ri.blocks; $res.failedN = $ri.failedN
+    } else {
+        & reg.exe import "$tmp" 2>&1 | Out-Null
+        $res.ok = ($LASTEXITCODE -eq 0)
+        $res.failed = (-not $res.ok)
+    }
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    return $ok
+    return $res
 }
 
 function Invoke-UserRestore {
@@ -558,8 +605,17 @@ function Invoke-UserRestore {
         $regDir = Join-Path $Stage "registry\user"
         if (Test-Path -LiteralPath $regDir) {
             foreach ($f in @(Get-ChildItem -LiteralPath $regDir -Filter *.reg -File -ErrorAction SilentlyContinue)) {
-                if (Import-UserRegFile -RegFile $f.FullName) { Say "  导入 HKCU 注册表 $($f.Name)" }
-                else { Warn "HKCU 导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)") }
+                $riu = Import-UserRegFile -RegFile $f.FullName
+                if ($riu.ok) {
+                    Say "  导入 HKCU 注册表 $($f.Name)"
+                } elseif ($riu.partial) {
+                    # 部分成功 = 数据基本已还原：Windows 保护键（默认程序关联 UserChoice）
+                    # 与被系统进程占用的键（Feeds/Search）永远写不进，属正常，不计失败
+                    Warn ("  HKCU 部分导入 {0}：{1}/{2} 块失败（系统保护/占用键，属正常）—— {3}" -f `
+                          $f.Name, $riu.failedN, $riu.blocks, (Format-RegFailedKeys $riu.failedKeys))
+                } else {
+                    Warn "HKCU 导入失败：$($f.Name)"; $problems.Add("reg:$($f.Name)")
+                }
             }
         }
     } else { Say "  HKCU 还原已关闭（restore.registry=false）" }
@@ -618,6 +674,7 @@ function Invoke-UserRestore {
             try {
                 $scResU = Repair-Shortcuts -Dirs $scDirsU.ToArray() `
                             -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
+                            -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir) `
                             -ParkFolder $scParkFolderU -ParkBroken:$scParkBrokenU `
                             -LogPath (Join-Path $SysDir "_state\user-restore.log")
                 Say ("  快捷方式校验（个人）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `

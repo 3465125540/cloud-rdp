@@ -32,6 +32,14 @@
   透出环境变量：
     SLIM_STATUS = OK | PARTIAL | SKIPPED | DRYRUN | FAILED
     SLIM_FREED_GB / SLIM_C_USED_PCT / SLIM_TARGETS_DELETED / SLIM_TARGETS_GUARDED
+    SLIM_UNINSTALL_OK / SLIM_UNINSTALL_FAILED     ← blockedApps 真卸载结果
+    SLIM_PURGED_DIRS / SLIM_PURGED_GB             ← 清空型目标（保留目录本身）结果
+
+  执行顺序（顺序是硬约束）：
+    ① 卸载 blockedApps（真卸载）—— 必须在清空 C:\Windows\Installer **之前**：
+       MSI 卸载依赖缓存里的安装包，缓存先没了卸载就会失败
+    ② 删除 targets 大件
+    ③ 清空 purgeContents（如 C:\Windows\Installer）—— 此时已无人需要 MSI 缓存
 #>
 [CmdletBinding()]
 param(
@@ -158,6 +166,69 @@ function Remove-BigTree {
     return (-not (Test-Path -LiteralPath $Path))
 }
 
+# ---------------------------------------------------------------- 卸载能力（blockedApps）
+# 卸载库：ARP 扫描 / 停服务 / 三级降级卸载（winget → ARP → 目录兜底）
+$uninstallLib = Join-Path $PSScriptRoot "uninstall-apps-lib.ps1"
+$script:HasUninstallLib = $false
+if (Test-Path -LiteralPath $uninstallLib) {
+    . $uninstallLib
+    $script:HasUninstallLib = $true
+}
+
+# ---------------------------------------------------------------- 清空型目标（只清内容、保留目录本身）
+
+# 守卫：允许「受保护目录的内部」（如 C:\Windows\Installer），但必须
+#   ① 绝对路径 ② 不是盘根（C:\）③ 不是硬保护名单里的目录本身
+# 只对配置里显式列出的路径生效、不做任何通配扫描 ——
+# 所以不会把 targets 里误配的宽泛路径变成「可清空目标」。
+# 注：允许 2 层（如 C:\Config.Msi）；真正的安全网是「保护名单」那一条。
+function Test-PurgeAllowed {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    $p = $Path.TrimEnd('\')
+    if ($p -notmatch '^[A-Za-z]:\\') { return $false }
+    if (@($p -split '\\').Count -lt 2) { return $false }
+    $pl = $p.ToLower()
+    foreach ($x in $protect) { if ($pl -eq ([string]$x).ToLower()) { return $false } }
+    return $true
+}
+
+# 清空目录内容、保留目录本身。优先 robocopy 镜像空目录（快、耐长路径、退出码 <8 视为成功），
+# 失败再逐子项兜底。返回 @{ ok; freedBytes; left; rc }
+function Clear-DirContents {
+    param([string]$Path)
+    $res = [ordered]@{ ok = $false; freedBytes = [long]0; left = -1; rc = -1 }
+    if (-not (Test-Path -LiteralPath $Path)) { return $res }
+
+    $empty = Join-Path $env:TEMP ("slimempty_" + [guid]::NewGuid().ToString('N'))
+    try { New-Item -ItemType Directory -Force -Path $empty | Out-Null } catch { }
+
+    $f0 = Get-FreeBytes 'C'
+    try {
+        & robocopy.exe "$empty" "$Path" /MIR /NFL /NDL /NJH /NJS /NC /NS /NP /R:1 /W:1 2>&1 | Out-Null
+        $res.rc = $LASTEXITCODE
+    } catch { $res.rc = -1 }
+    try { Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+
+    # robocopy 退出码 >= 8 = 有失败项 → 逐子项兜底
+    if ($res.rc -ge 8 -or $res.rc -lt 0) {
+        foreach ($c in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+            try {
+                if ($c.PSIsContainer) { Remove-Item -LiteralPath $c.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+                else { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction SilentlyContinue }
+            } catch { }
+        }
+    }
+
+    $f1 = Get-FreeBytes 'C'
+    $freed = $f1 - $f0
+    if ($freed -lt 0) { $freed = 0 }
+    $res.freedBytes = [long]$freed
+    $res.left = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue).Count
+    $res.ok = ($res.left -eq 0)
+    return $res
+}
+
 # ---------------------------------------------------------------- 读配置
 $cfg = $null
 if (Test-Path -LiteralPath $ConfigPath) {
@@ -234,7 +305,63 @@ Say ("目标清单：{0} 项（去重后）" -f $targetList.Count)
 
 if (-not $DryRun) { Stop-Lockers }
 
-# ---------------------------------------------------------------- 逐个删除
+# ---------------------------------------------------------------- ① 真卸载「明确不要」的程序（blockedApps）
+# 为什么排最前：MSI 卸载依赖 C:\Windows\Installer 里缓存的安装包 ——
+# 必须在下游「清空 MSI 缓存」之前完成，否则卸载必然失败。
+# 预算：整体 20 分钟；超预算的剩余项直接交给目录兜底，避免拖死开机。
+$blockedApps = @()
+if ($script:HasUninstallLib) { $blockedApps = @(Get-BlockedAppEntries -ConfigPath $ConfigPath) }
+
+$uninstOk = 0; $uninstFail = 0; $uninstSkip = 0; $uninstDry = 0
+if (-not $script:HasUninstallLib) {
+    Note "未找到 uninstall-apps-lib.ps1，跳过程序卸载"
+} elseif ($blockedApps.Count -eq 0) {
+    Say "卸载清单为空（blockedApps），跳过"
+} else {
+    Say ("卸载清单：{0} 个程序" -f $blockedApps.Count)
+    $arpEntries = @(Get-UninstallEntries)
+    Say ("  ARP 条目：{0} 条（已排除系统组件）" -f $arpEntries.Count)
+    $budgetEnd = (Get-Date).AddMinutes(20)
+
+    foreach ($app in $blockedApps) {
+        if ($DryRun) {
+            $d = Invoke-AppUninstall -Entry $app -ArpEntries $arpEntries -DryRun
+            $uninstDry++
+            Say ("  [DryRun] 将卸载 {0}（{1}）" -f $app.name, $d.detail)
+            foreach ($pth in @($app.paths)) {
+                if (-not [string]::IsNullOrWhiteSpace($pth)) { Say ("  [DryRun] 将清理残留目录 {0}" -f $pth) }
+            }
+            continue
+        }
+        if ((Get-Date) -gt $budgetEnd) {
+            Note ("  预算用尽，跳过卸载：{0}（改由目录兜底）" -f $app.name)
+            $uninstSkip++
+        } else {
+            $r = Invoke-AppUninstall -Entry $app -ArpEntries $arpEntries -TimeoutSec 300
+            if ($r.ok) {
+                $uninstOk++
+                Say ("  已卸载 {0}（方式 {1}）" -f $app.name, $r.method)
+            } else {
+                $uninstFail++
+                Note ("  卸载未成功：{0}（{1}）—— 改由目录兜底" -f $app.name, $r.detail)
+            }
+        }
+        # 无论卸载成功与否，残留目录都清一遍（MSI 卸载常留空壳目录与数据目录）
+        foreach ($pth in @($app.paths)) {
+            if ([string]::IsNullOrWhiteSpace($pth)) { continue }
+            if (-not (Test-Path -LiteralPath $pth)) { continue }
+            if (Test-NeverDelete -Path $pth) { Note "  受保护，拒绝删除：$pth"; continue }
+            if (Remove-BigTree -Path $pth) { Say ("  已清理残留目录 {0}" -f $pth) }
+            else { Note ("  残留目录删除未完成：{0}" -f $pth) }
+        }
+    }
+    Set-GhEnv ("SLIM_UNINSTALL_OK=" + $uninstOk)
+    Set-GhEnv ("SLIM_UNINSTALL_FAILED=" + $uninstFail)
+    if ($DryRun) { Say ("  卸载计划：{0} 个（DryRun，未执行）" -f $uninstDry) }
+    else { Say ("  卸载结果：成功 {0} / 未成功 {1} / 跳过 {2}" -f $uninstOk, $uninstFail, $uninstSkip) }
+}
+
+# ---------------------------------------------------------------- ② 逐个删除大件
 $deleted = 0
 $skipped = 0
 $guarded = 0
@@ -266,6 +393,41 @@ foreach ($t in $targetList) {
     }
 }
 
+# ---------------------------------------------------------------- ③ 清空型目标（只清内容、保留目录本身）
+# 为什么单独一套：C:\Windows\Installer 位于硬保护名单内部（C:\Windows），走 targets 必被拒；
+# 但它只该「清空内容」—— 目录本身必须留着（Windows Installer 服务预期它存在）。
+# 顺序：必须在上面「卸载 blockedApps」之后 —— MSI 卸载依赖缓存里的安装包。
+$purgeList = @(Get-Cfg $slimCfg 'purgeContents' @())
+$purgeDone = 0; $purgeSkip = 0; $purgeFail = 0; $purgeFreed = [long]0
+if ($purgeList.Count -gt 0) {
+    Say ("清空型目标：{0} 项" -f $purgeList.Count)
+    foreach ($it in $purgeList) {
+        if ($null -eq $it) { continue }
+        if (-not [bool](Get-Cfg $it 'enabled' $true)) { continue }
+        $pp = ([string](Get-Cfg $it 'path' '')).TrimEnd('\')
+        if (-not (Test-PurgeAllowed -Path $pp)) {
+            Note ("  清空型目标被守卫拒绝（需绝对路径 + 层级>=3 + 非保护目录本身）：{0}" -f $pp)
+            $purgeSkip++
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $pp)) { $purgeSkip++; continue }
+        if ($DryRun) { Say ("  [DryRun] 将清空 {0} 的内容（保留目录本身）" -f $pp); continue }
+
+        $rr = Clear-DirContents -Path $pp
+        $purgeFreed += [long]$rr.freedBytes
+        if ($rr.ok) {
+            $purgeDone++
+            Say ("  已清空 {0} 的内容（释放 {1:N1} GB）" -f $pp, ($rr.freedBytes / 1GB))
+        } else {
+            $purgeFail++
+            Note ("  清空未完成：{0}（剩余 {1} 项，可能被占用）" -f $pp, $rr.left)
+        }
+    }
+    Set-GhEnv ("SLIM_PURGED_DIRS=" + $purgeDone)
+    Set-GhEnv ("SLIM_PURGED_GB=" + [math]::Round($purgeFreed / 1GB, 1))
+    Say ("  清空结果：成功 {0} / 跳过 {1} / 未完成 {2}" -f $purgeDone, $purgeSkip, $purgeFail)
+}
+
 # ---------------------------------------------------------------- 附加优化
 if (-not $DryRun) {
     if ([bool](Get-Cfg $slimCfg 'disableHibernation' $true)) {
@@ -294,10 +456,12 @@ if ($freedTotal -lt 0) { $freedTotal = 0 }
 $status = "PARTIAL"
 if ($DryRun) { $status = "DRYRUN" }
 elseif ($usedAfter -ge 0 -and $usedAfter -le $TargetPercent) { $status = "OK" }
-elseif ($deleted -eq 0) { $status = "SKIPPED" }
+elseif ($deleted -eq 0 -and $uninstOk -eq 0 -and $purgeDone -eq 0) { $status = "SKIPPED" }
 
 Say ("瘦身结果：C 盘已用 {0}% -> {1}%（释放 {2:N1} GB）| 删除 {3} / 跳过 {4} / 受保护 {5} / 失败 {6}" -f `
     $usedBefore, $usedAfter, ($freedTotal / 1GB), $deleted, $skipped, $guarded, $failed)
+Say ("  卸载 {0}（未成功 {1} / 跳过 {2}）| 清空型目标 {3} 项（释放 {4:N1} GB / 未完成 {5}）" -f `
+    $uninstOk, $uninstFail, $uninstSkip, $purgeDone, ($purgeFreed / 1GB), $purgeFail)
 if ($status -eq "PARTIAL") {
     Note ("瘦身后 C 盘仍为 {0}%（目标 {1}%）—— 可能还有未列入清单的大件；把路径加到 slim.targets 即可" -f $usedAfter, $TargetPercent)
 }

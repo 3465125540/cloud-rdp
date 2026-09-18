@@ -61,6 +61,12 @@ $programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
 if (Test-Path -LiteralPath $programsLib) { . $programsLib }
 else { Write-Warning "[snapshot] 未找到 programs-lib.ps1，安装型程序复刻不可用" }
 
+# 屏蔽清单（blockedApps）：备份时把「明确不要的程序」从 winget 导出里剔除，
+# 让快照本身就是干净的（第 10 步重装侧还有一道过滤，双保险）。
+$uninstallLib = Join-Path $PSScriptRoot "uninstall-apps-lib.ps1"
+$script:HasBlockedLib = $false
+if (Test-Path -LiteralPath $uninstallLib) { . $uninstallLib; $script:HasBlockedLib = $true }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -371,8 +377,29 @@ if (-not $Quick) {
                 Say "  winget 清单已导出"
                 try {
                     $we = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
-                    $ids = @()
-                    foreach ($src in @($we.Sources)) { foreach ($p in @($src.Packages)) { if ($p.PackageIdentifier) { $ids += [string]$p.PackageIdentifier } } }
+                    $blockedApps = @()
+                    if ($script:HasBlockedLib) { $blockedApps = @(Get-BlockedAppEntries -ConfigPath $ConfigPath) }
+                    $ids = @(); $removed = @()
+                    foreach ($src in @($we.Sources)) {
+                        $kept = @()
+                        foreach ($p in @($src.Packages)) {
+                            $pid2 = [string]$p.PackageIdentifier
+                            if ($blockedApps.Count -gt 0 -and
+                                (Test-BlockedAppPackage -PackageIdentifier $pid2 -PackageName ([string]$p.PackageName) -Entries $blockedApps)) {
+                                $removed += $pid2
+                                continue
+                            }
+                            if ($pid2) { $ids += $pid2 }
+                            $kept += $p
+                        }
+                        $src.Packages = $kept
+                    }
+                    if ($removed.Count -gt 0) {
+                        # 让快照本身就干净：第 10 步的重装清单读的就是这个文件
+                        $we | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $out -Encoding UTF8
+                        Say ("  已按 blockedApps 从清单剔除 {0} 个包：{1}" -f `
+                             @($removed | Select-Object -Unique).Count, (($removed | Select-Object -Unique) -join ', '))
+                    }
                     $wingetCount = @($ids | Select-Object -Unique).Count
                     Say ("  winget 包数：{0}" -f $wingetCount)
                 } catch { Warn "winget 清单解析失败（可忽略）" }
@@ -487,17 +514,35 @@ else {
         $portablePaths = @()
         foreach ($pp in $portableCaptured) { $portablePaths += [string]$pp.originalPath }
         $programsExcludePaths = @(Get-Cfg $programsCfg 'excludePaths' @())
+        # blockedApps 的 paths 永远并入排除（单一事实源，避免配置两处漂移）
+        if ($script:HasBlockedLib) {
+            foreach ($ba in @(Get-BlockedAppEntries -ConfigPath $ConfigPath)) {
+                foreach ($bp in @($ba.paths)) {
+                    if (-not [string]::IsNullOrWhiteSpace($bp)) { $programsExcludePaths += [string]$bp }
+                }
+            }
+        }
+        $programsExcludePaths = @($programsExcludePaths | Select-Object -Unique)
         $excludeAll = [object[]](@($portablePaths) + @($programsExcludePaths))
 
         $imgBlock = @(Get-Cfg $programsCfg 'imageBlockPaths' @())
         if (@($imgBlock).Count -eq 0) { $imgBlock = @(Get-ProgramImageBlockPaths) }
         $sysRoots = @(Get-ProgramSystemRoots)
 
+        # blockedApps 的 match 也并入黑名单（防止把「明确不要的程序」当用户程序抓走）
+        $progBlocklist = @(Get-Cfg $programsCfg 'blocklist' @())
+        if ($script:HasBlockedLib) {
+            foreach ($ba in @(Get-BlockedAppEntries -ConfigPath $ConfigPath)) {
+                if (-not [string]::IsNullOrWhiteSpace($ba.match)) { $progBlocklist += [string]$ba.match }
+            }
+        }
+        $progBlocklist = @($progBlocklist | Select-Object -Unique)
+
         $sel = Get-ProgramsToBackup -All $allApps `
             -BaselineRegPaths $baseRegs -AlwaysIncludeRegPaths $prevRegs -AlwaysIncludeLocations $prevLocs `
             -ExcludePaths $excludeAll `
             -SystemRoots $sysRoots -ImageBlockPaths $imgBlock `
-            -Blocklist @(Get-Cfg $programsCfg 'blocklist' @()) `
+            -Blocklist $progBlocklist `
             -MaxMBPerApp ([int](Get-Cfg $programsCfg 'maxMBPerApp' 1024)) `
             -MaxTotalMB  ([int](Get-Cfg $programsCfg 'maxTotalMB' 2048)) `
             -DeriveInstallLocation ([bool](Get-Cfg $programsCfg 'deriveInstallLocation' $true))

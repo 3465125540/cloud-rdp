@@ -898,6 +898,8 @@ function Find-RestoredFile {
     param(
         [string]  $FileName,
         [object[]]$ProgramEntries = @(),
+        # 额外搜索根（数据目录 / 可移动程序暂存根）：programs.json 没登记的便携程序也能找到
+        [string[]]$AdditionalDirs = @(),
         [int]     $MaxSearch      = 3
     )
     if ([string]::IsNullOrWhiteSpace($FileName)) { return $null }
@@ -911,7 +913,44 @@ function Find-RestoredFile {
             if ($hits.Count -ge $MaxSearch) { break }
         }
     }
+    # programs.json 没覆盖到（便携程序只落数据目录）→ 再扫额外目录
+    if ($hits.Count -eq 0) {
+        foreach ($ad in $AdditionalDirs) {
+            if ([string]::IsNullOrWhiteSpace($ad) -or -not (Test-Path -LiteralPath $ad)) { continue }
+            $f = @(Get-ChildItem -LiteralPath $ad -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($f.Count -gt 0) {
+                $hits.Add($f[0].FullName)
+                if ($hits.Count -ge $MaxSearch) { break }
+            }
+        }
+    }
     if ($hits.Count -eq 1) { return $hits[0] }
+    return $null
+}
+
+# 把路径里的「别的用户名」改写成当前用户目录，命中（改写后的路径存在）才返回，否则 $null。
+# 纯函数、无副作用、可单测。解决：快照里的 lnk 把当时的用户名烤死在二进制里。
+#   C:\Users\aigc\AppData\Local\LightC\LightC.exe  →  C:\Users\a\AppData\Local\LightC\LightC.exe
+function Get-RemappedUserPath {
+    param(
+        [string]$Path,
+        [string]$NewUserName = '',
+        [string]$OldUserName = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ([string]::IsNullOrWhiteSpace($NewUserName)) { $NewUserName = Split-Path -Path $env:USERPROFILE -Leaf }
+    if ([string]::IsNullOrWhiteSpace($NewUserName)) { return $null }
+
+    $m = [regex]::Match($Path, '(?i)^([A-Za-z]:\\Users\\)([^\\]+)(\\.*|$)')
+    if (-not $m.Success) { return $null }
+
+    $old = $m.Groups[2].Value
+    if ($old -ieq $NewUserName) { return $null }                       # 已经是当前用户
+    if (-not [string]::IsNullOrWhiteSpace($OldUserName) -and ($old -ine $OldUserName)) { return $null }
+
+    $cand = $m.Groups[1].Value + $NewUserName + $m.Groups[3].Value
+    if ((Test-Path -LiteralPath $Path) -and -not (Test-Path -LiteralPath $cand)) { return $null }
+    if (Test-Path -LiteralPath $cand) { return $cand }
     return $null
 }
 
@@ -925,11 +964,27 @@ function Repair-Shortcuts {
         [string]$ProgramsManifestPath = '',
         [string]$ParkFolder           = '_失效快捷方式',
         [switch]$ParkBroken,
+        # 额外搜索根（数据目录 / 可移动程序暂存根），透传给 Find-RestoredFile
+        [string[]]$AdditionalDirs     = @(),
+        # 显式指定「旧用户名=新用户名」；留空 = 自动把任意 C:\Users\<别人>\ 改写成当前用户目录
+        [string]$UserProfileRemap     = '',
         [string]$LogPath              = ''
     )
 
     $checked = 0; $ok = 0; $repaired = 0; $parked = 0; $skipped = 0
     $lines = New-Object System.Collections.Generic.List[string]
+
+    # 用户目录改写规则：显式指定优先，否则自动用「当前用户目录」兜底。
+    # 背景：快照里的 lnk 目标路径把**当时的用户名**烤死在二进制里（如 C:\Users\aigc\...），
+    # 换机器/换用户名后必然指向不存在的路径 —— 这类死链可以直接按「同名用户目录」救回来。
+    $remapOld = ''; $remapNew = ''
+    if (-not [string]::IsNullOrWhiteSpace($UserProfileRemap)) {
+        $parts = $UserProfileRemap -split '=', 2
+        if ($parts.Count -eq 2) { $remapOld = $parts[0].Trim(); $remapNew = $parts[1].Trim() }
+    }
+    if ([string]::IsNullOrWhiteSpace($remapNew)) {
+        $remapNew = Split-Path -Path $env:USERPROFILE -Leaf   # 当前用户名
+    }
 
     # 已还原程序条目（用于修复时的唯一定位）
     $programs = @()
@@ -981,16 +1036,31 @@ function Repair-Shortcuts {
             }
 
             # ---------- .lnk ----------
-            if (-not $com) { $skipped++; continue }
+            if (-not $com) { $skipped++; $lines.Add("SKIP      $($l.Name)（WScript.Shell 不可用，整批跳过）"); continue }
             $sc = $null
-            try { $sc = $com.CreateShortcut($l.FullName) } catch { $skipped++; continue }
+            try { $sc = $com.CreateShortcut($l.FullName) } catch { $skipped++; $lines.Add("SKIP      $($l.Name)（CreateShortcut 异常：$($_.Exception.Message)）"); continue }
             $target = [string]$sc.TargetPath
-            if ([string]::IsNullOrWhiteSpace($target)) { $skipped++; continue }
+            if ([string]::IsNullOrWhiteSpace($target)) { $skipped++; $lines.Add("SKIP      $($l.Name)（无目标路径，特殊快捷方式）"); continue }
             if (Test-Path -LiteralPath $target) { $ok++; continue }
 
-            # 尝试修复：按文件名在已还原程序里唯一定位
+            # 修复 ①：目标里的「别的用户名」改写成当前用户目录（快照把旧用户名烤死在 lnk 里）
+            $remapped = Get-RemappedUserPath -Path $target -NewUserName $remapNew -OldUserName $remapOld
+            if ($remapped) {
+                try {
+                    $sc.TargetPath = $remapped
+                    $wdNow = [string]$sc.WorkingDirectory
+                    $wdNew = Get-RemappedUserPath -Path $wdNow -NewUserName $remapNew -OldUserName $remapOld
+                    if ($wdNew) { $sc.WorkingDirectory = $wdNew }
+                    $sc.Save()
+                    $repaired++
+                    $lines.Add("REPAIRED  $($l.Name): $target  ->  $remapped（用户目录名改写）")
+                    continue
+                } catch { }
+            }
+
+            # 修复 ②：按文件名在已还原程序里唯一定位（含数据目录 / 便携程序暂存根的兜底）
             $leaf = Split-Path -Path $target -Leaf
-            $hit  = Find-RestoredFile -FileName $leaf -ProgramEntries $programs
+            $hit  = Find-RestoredFile -FileName $leaf -ProgramEntries $programs -AdditionalDirs $AdditionalDirs
             if ($hit) {
                 try {
                     $sc.TargetPath = $hit

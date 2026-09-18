@@ -59,6 +59,13 @@ function Get-Cfg($obj, $name, $fallback) {
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+# 屏蔽清单（blockedApps）：把「明确不要的程序」从重装清单里剔除 ——
+# 否则瘦身时刚卸载掉的程序，会在这一步被 winget 原样装回来（白干一场）。
+$uninstallLib = Join-Path $PSScriptRoot "uninstall-apps-lib.ps1"
+$script:HasBlockedLib = $false
+if (Test-Path -LiteralPath $uninstallLib) { . $uninstallLib; $script:HasBlockedLib = $true }
+else { Warn "未找到 uninstall-apps-lib.ps1，无法按 blockedApps 过滤重装清单" }
+
 # ---------------------------------------------------------------- 开关判定
 $cfg = $null
 if (Test-Path -LiteralPath $ConfigPath) {
@@ -92,11 +99,26 @@ if (-not (Test-Path -LiteralPath $exportPath)) {
 $ids = New-Object System.Collections.Generic.List[string]
 try {
     $export = Get-Content -LiteralPath $exportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $blocked = @()
+    if ($script:HasBlockedLib) { $blocked = @(Get-BlockedAppEntries -ConfigPath $ConfigPath) }
+    $skippedBlocked = New-Object System.Collections.Generic.List[string]
     foreach ($src in @($export.Sources)) {
         foreach ($p in @($src.Packages)) {
             $id = [string]$p.PackageIdentifier
-            if (-not [string]::IsNullOrWhiteSpace($id) -and -not $ids.Contains($id)) { $ids.Add($id) }
+            if ([string]::IsNullOrWhiteSpace($id)) { continue }
+            # blockedApps 里的包永不重装（瘦身时已卸载，装回来等于白干）
+            if ($blocked.Count -gt 0 -and
+                (Test-BlockedAppPackage -PackageIdentifier $id -PackageName ([string]$p.PackageName) -Entries $blocked)) {
+                if (-not $skippedBlocked.Contains($id)) { $skippedBlocked.Add($id) }
+                continue
+            }
+            if (-not $ids.Contains($id)) { $ids.Add($id) }
         }
+    }
+    if ($skippedBlocked.Count -gt 0) {
+        $skipTxt = ($skippedBlocked -join ', ')
+        Say ("按 blockedApps 跳过 {0} 个包：{1}" -f $skippedBlocked.Count, $skipTxt)
+        Log ("blockedApps 跳过：" + $skipTxt)
     }
 } catch {
     Warn "清单解析失败：$_"

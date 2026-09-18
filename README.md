@@ -323,6 +323,44 @@
   当前含 `C:\Program Files\Unity Hub`。用于清理「用户明确不想要」的程序；仍受硬保护名单约束
 - fail-soft：删不掉只告警，**永不返回非 0**
 
+**①-a 真卸载清单 `blockedApps`（第 1 步内，顺序在「清空 MSI 缓存」之前）**
+
+有些程序光删目录不够 —— 还会留下 ARP 卸载项、Windows 服务、`ProgramData` 数据目录，
+下次开机照样占空间。所以改成**真卸载**（三级降级，每级都有超时保护）：
+
+| 级别 | 手段 |
+|---|---|
+| ① | `winget uninstall --id <id> -e --silent --disable-interactivity` |
+| ② | ARP 入口：`QuietUninstallString` → `msiexec /x {产品码} /qn /norestart` → Inno `unins000.exe /VERYSILENT …` |
+| ③ | 目录兜底：`Remove-BigTree` 清 `paths[]`（含卸载残留与数据目录） |
+
+- 当前清单（`snapshot-config.json` → `blockedApps.entries`）：**Rtools 4.5、Azure Cosmos DB Emulator、
+  MongoDB Server / Shell、Strawberry Perl、OpenSSL、Microsoft Azure Service Fabric、Unity Hub、MySQL Server**
+- 安全约束：`SystemComponent=1` 的 ARP 条目**一律跳过**；只处理配置里显式列出的条目；不匹配则不动
+- 卸载前先停该程序的服务/进程（`services` / `processes`）；整体 20 分钟预算，超预算的剩余项交给目录兜底
+- **顺序硬约束**：卸载必须排在「清空 `C:\Windows\Installer`」**之前** —— MSI 卸载依赖缓存里的安装包
+- **防回潮（三处，缺一不可）**：① `reinstall-apps.ps1` 从重装清单剔除；② `backup-snapshot.ps1`
+  把它从 `winget-export.json` 里删掉（让快照本身就干净）；③ 其 `paths` 并入 `programs.excludePaths`
+  （永不备份 / 永不还原）+ `match` 并入 `programs.blocklist`
+- 透出 `SLIM_UNINSTALL_OK` / `SLIM_UNINSTALL_FAILED`
+
+**①-b 清空型目标 `slim.purgeContents`（只清内容、保留目录本身）**
+
+`C:\Windows\Installer`（MSI 缓存）实测 **6.7 GB**，但它位于硬保护名单内部（`C:\Windows`），
+走 `targets` 必被拒 —— 所以单开一条通道：
+
+| 目标 | 说明 |
+|---|---|
+| `C:\Windows\Installer` | MSI 缓存；**清空内容、保留目录本身**（Installer 服务预期它存在） |
+| `C:\Config.Msi` | MSI 安装事务残留目录（多数时候为空） |
+
+- 独立守卫 `Test-PurgeAllowed`：**绝对路径 + 非盘根 + 不得是硬保护名单里的目录本身**；
+  只清配置里显式列出的项，不做通配扫描；**从不删目录本身**
+- 实现：`robocopy <空目录> <目标> /MIR`（退出码 <8 视为成功），失败再逐子项兜底
+- 代价：本机 MSI 程序的**卸载/修复**会失效（一次性机器可接受）；需要时把该项 `enabled` 改 `false`
+- 仅在**瘦身实际执行**时生效（`mode=off` 或 `auto` 且未超阈值则整段跳过）
+- 透出 `SLIM_PURGED_DIRS` / `SLIM_PURGED_GB`
+
 **② 增量守卫（`scripts/disk-guard.ps1`，第 0c / 10b / 保活每 30 分钟 / 收尾）** —— 瘦身后继续守住「我们产生的增量」：
 
 ```
@@ -543,7 +581,9 @@ cloud-rdp/
     ├── portable-lib.ps1                # 可移动程序：识别 / 搬运 / 按原路径还原
     ├── programs-lib.ps1                # 安装型程序：目录级备份 / Uninstall 注册表 / junction 还原 / 关联数据匹配 / HKCR 命中
     ├── disk-guard.ps1                  # C 盘守卫：基线 / 增量限额 / 安全清理 / 状态透出
-    ├── slim-image.ps1                  # 【新】开机瘦身：删镜像自带大件（VS / Android SDK / 工具缓存），约释放 70 GB
+    ├── slim-image.ps1                  # 【新】开机瘦身：真卸载 blockedApps + 删镜像大件 + 清空 MSI 缓存（约 70 GB+）
+    ├── uninstall-apps-lib.ps1          # 【新】卸载库：ARP 扫描 / 停服务 / 三级降级卸载（winget → ARP → 目录兜底）
+    ├── regimport-lib.ps1               # 【新】注册表导入容错：识别「部分成功」，只告警不计失败
     ├── setup-chinese.ps1               # 【新】中文环境：装语言包 + 系统 locale + 写 a 的 HKCU（微软拼音）
     ├── rdpuser-migrate.ps1             # 【新】用户名变更迁移：快照目录名 + manifest 字面路径 + .reg 内容（幂等、可反向）
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
@@ -562,7 +602,7 @@ cloud-rdp/
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
 | **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机 |
-| **1** | **开机瘦身** | `slim-image.ps1`：删镜像自带大件，约释放 70 GB（`auto`/`always`/`off`） |
+| **1** | **开机瘦身** | `slim-image.ps1`：① 真卸载 `blockedApps`（9 个程序）→ ② 删镜像大件（约 70 GB）→ ③ 清空 `C:\Windows\Installer`（约 6.7 GB）。`auto`/`always`/`off` |
 | **2** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
 | 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
 | **7** | **从 139 拉取数据** | `sync-down.ps1`（实测 ≈19 分钟；139 约 0.45 MB/s） |
@@ -629,8 +669,12 @@ cloud-rdp/
 | `preCommands` 里的命令没生效 | 命令失败被 fail-soft 忽略（不阻断还原） | 看日志 `[pre-restore]   [n] 失败`；命令里建议用绝对路径 |
 | 登录后还是英文界面 | 语言包没装成功（`CHINESE_LANGPACK=FAILED`），或快照里的英文 HKCU 覆盖了设置 | 看第 9 步日志；确认 `chinese.enabled=true` 且该步在「8. 预还原」**之后**执行 |
 | 中文输入法打不出字 | 用户 hive 写入失败（`CHINESE_USERHIVE` 非 `OK`） | 看日志 `[chinese]` 行；登录任务会兜底。也可登录后到「设置 → 时间和语言」手动添加中文 |
-| Unity Hub 又出现了 | 旧快照里含它 | 已在 `programs.excludePaths`（不备份/不还原）+ `slim.alwaysDelete`（开机删）双重排除；若仍出现，检查 139 上 `_snapshot/programs` 是否残留 |
+| Unity Hub 又出现了 | 旧快照里含它 | 已在 `blockedApps`（开机**真卸载** + 从 winget 重装清单剔除）+ `programs.excludePaths`（不备份/不还原）三处排除；若仍出现，检查 139 上 `_snapshot/programs` 是否残留 |
+| 想再卸掉某个镜像自带程序 | —— | 往 `snapshot-config.json` 的 `blockedApps.entries` 加一条（`name` / `match` 正则 / `wingetId` / `paths` / 可选 `services`），开机第 1 步会真卸载并清残留目录 |
+| 卸载后又被装回来了 | `winget-export.json` 里还有它 | 已做三重过滤（重装侧剔除 + 备份时从清单删 + `excludePaths`）；若你手动改过配置，确认 `blockedApps.entries` 里的 `wingetId` 拼写正确 |
+| 报「个人配置还原失败：`reg:HKCU-Software.reg`」 | **误报已修**。`reg import` 是 best-effort：`HKCU\Software` 里少数键**永远写不进去**（默认程序关联 `UserChoice` 有防劫持 ACL；`Feeds`/`Search` 被系统进程占用），旧代码把「99.8% 成功」当成了整文件失败 | 现在会自动拆块定位：只告警并列出失败键（属正常），不再计入 `problems`。日志形如 `HKCU 部分导入 HKCU-Software.reg：9/3934 块失败（系统保护/占用键，属正常）` |
 | 桌面图标报「目标驱动器或网络连接不可用」 | 程序本体没被备份（该程序 Uninstall 键无 `InstallLocation`）→ 快捷方式成死链 | 见 ⑪：`shortcuts.captureTargets=true` + `programs.deriveInstallLocation=true` 会自动补抓；还原后校验会尝试修复，修不好的移入 `_失效快捷方式` |
+| 死链指向的是**别人家的用户名**（如 `C:\Users\aigc\...`） | 快照里的 `.lnk` 把当时的用户名烤死在二进制里，换账号后必然失效 | **已修**：`Repair-Shortcuts` 会先把任意 `C:\Users\<别人>\` 改写成当前用户目录；再不行就按文件名去数据目录/便携程序根兜底定位（如 `D:\a\cloud-rdp\GameViewer\GameViewer.exe`） |
 | 桌面多出 `_失效快捷方式` 文件夹 | 校验发现死链、且无法唯一定位到已还原的程序 | 正常（非破坏保留）。装回程序后把图标拖回桌面即可；该文件夹不会被再次备份 |
 | 快捷方式补抓把大目录也抓了 | 该 `.lnk` 指向一个大目录（如某游戏） | 调小 `shortcuts.captureMaxMBPerTarget` / `captureMaxTotalMB`（超限会记名告警，不静默） |
 | 不想让 `.workbuddy-ai` 被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy-ai` 那行（改完提交即可） |

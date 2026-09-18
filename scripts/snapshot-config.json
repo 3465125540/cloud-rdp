@@ -196,7 +196,17 @@
     "maxMBPerApp": 0,
     "maxTotalMB": 0,
     "_comment_excludePaths": "永不备份、永不还原的程序目录（按前缀匹配）。例：用户明确不想要的程序。",
-    "excludePaths": [ "C:\\Program Files\\Unity Hub" ],
+    "excludePaths": [
+      "C:\\rtools45",
+      "C:\\Program Files\\Azure Cosmos DB Emulator",
+      "C:\\Program Files\\MongoDB",
+      "C:\\Strawberry",
+      "C:\\Program Files\\OpenSSL",
+      "C:\\Program Files\\Microsoft SDKs\\Service Fabric",
+      "C:\\Program Files\\Microsoft Service Fabric",
+      "C:\\Program Files\\Unity Hub",
+      "C:\\Program Files\\MySQL"
+    ],
     "_comment_dataGlobs": "程序关联数据的显式补充/覆盖：dirs 里写 %VAR% 形式路径。留空则只按程序名/发布商自动匹配",
     "dataGlobs": [],
     "_comment_imageBlockPaths": "留空=使用脚本内置的 runner 镜像路径黑名单（VS / Android SDK / hostedtoolcache / AzureCLI …）",
@@ -209,7 +219,16 @@
       "WebView2",
       "Windows Software Development Kit",
       "Microsoft Visual",
-      "Unity Hub"
+      "Unity Hub",
+      "Rtools\\s*4",
+      "Cosmos DB Emulator",
+      "^MongoDB \\d",
+      "^MongoDB Shell",
+      "Strawberry Perl",
+      "^OpenSSL",
+      "Service Fabric",
+      "^Unity Hub",
+      "^MySQL (Server|Installer)"
     ]
   },
 
@@ -231,6 +250,101 @@
     "enforceEveryMinutes": 30
   },
 
+    "blockedApps": {
+      "_comment": "明确不要的程序（唯一事实源）：① 开机瘦身时真卸载（winget → ARP → 目录兜底）；② 从 winget 重装清单里剔除（防回潮）；③ 目录永不备份/永不还原。match 是 ARP DisplayName 的正则；wingetId 供 winget uninstall 用。",
+      "enabled": true,
+      "entries": [
+        {
+          "name": "Rtools 4.5",
+          "match": "Rtools\\s*4",
+          "wingetId": "RProject.Rtools",
+          "paths": [
+            "C:\\rtools45"
+          ]
+        },
+        {
+          "name": "Azure Cosmos DB Emulator",
+          "match": "Cosmos DB Emulator",
+          "wingetId": "Microsoft.Azure.CosmosEmulator",
+          "paths": [
+            "C:\\Program Files\\Azure Cosmos DB Emulator"
+          ]
+        },
+        {
+          "name": "MongoDB Server",
+          "match": "^MongoDB \\d",
+          "wingetId": "MongoDB.Server",
+          "paths": [
+            "C:\\Program Files\\MongoDB"
+          ],
+          "services": [
+            "MongoDB"
+          ],
+          "processes": [
+            "mongod"
+          ]
+        },
+        {
+          "name": "MongoDB Shell",
+          "match": "^MongoDB Shell",
+          "wingetId": "MongoDB.Shell",
+          "paths": []
+        },
+        {
+          "name": "Strawberry Perl",
+          "match": "Strawberry Perl",
+          "wingetId": "StrawberryPerl.StrawberryPerl",
+          "paths": [
+            "C:\\Strawberry"
+          ]
+        },
+        {
+          "name": "OpenSSL",
+          "match": "^OpenSSL",
+          "wingetId": "ShiningLight.OpenSSL.Dev",
+          "paths": [
+            "C:\\Program Files\\OpenSSL"
+          ]
+        },
+        {
+          "name": "Microsoft Azure Service Fabric",
+          "match": "Service Fabric",
+          "wingetId": "Microsoft.ServiceFabricSDK",
+          "paths": [
+            "C:\\Program Files\\Microsoft SDKs\\Service Fabric",
+            "C:\\Program Files\\Microsoft Service Fabric"
+          ],
+          "services": [
+            "FabricHostSvc",
+            "FabricInstallerSvc"
+          ]
+        },
+        {
+          "name": "Unity Hub",
+          "match": "^Unity Hub",
+          "wingetId": "Unity.UnityHub",
+          "paths": [
+            "C:\\Program Files\\Unity Hub"
+          ]
+        },
+        {
+          "name": "MySQL Server",
+          "match": "^MySQL (Server|Installer)",
+          "wingetId": "Oracle.MySQL",
+          "paths": [
+            "C:\\Program Files\\MySQL"
+          ],
+          "services": [
+            "MySQL80",
+            "MySQL"
+          ],
+          "processes": [
+            "mysqld"
+          ]
+        }
+      ]
+    },
+
   "slim": {
     "_comment": "开机瘦身：删除 runner 镜像自带、本项目用不到的大件（VS / Android SDK / 工具缓存等），把 C 盘占用压到 targetPercent 以下。实测约释放 70 GB。",
     "_comment_mode": "auto=仅当 C 盘占用 > targetPercent 时才瘦身（默认）；always=每次开机都瘦身；off=不瘦身。手动触发时可用 workflow_dispatch 输入 slim_image 覆盖",
@@ -244,6 +358,19 @@
     "keepPaths": [],
     "_comment_alwaysDelete": "无条件删除清单：不受 enabled/mode/targetPercent 影响，每次开机都执行。用于清理「用户装的但明确不想要」的程序（如 Unity Hub）。仍受硬保护名单约束。",
     "alwaysDelete": [ "C:\\Program Files\\Unity Hub" ],
+    "_comment_purgeContents": "清空型目标：只清空目录内容、保留目录本身（用于不能整删的系统目录，如 C:\\Windows\\Installer）。仅在瘦身实际执行时生效（mode=off 或 auto 未超阈值则跳过）。独立守卫=绝对路径+非盘根+不得是硬保护名单里的目录本身。",
+    "purgeContents": [
+      {
+        "path": "C:\\Windows\\Installer",
+        "enabled": true,
+        "note": "MSI 缓存，实测 6.7GB。清空后本机 MSI 程序的卸载/修复会失效（一次性机器可接受；需要时置 false）"
+      },
+      {
+        "path": "C:\\Config.Msi",
+        "enabled": true,
+        "note": "MSI 安装事务残留目录（多数时候为空）"
+      }
+    ],
     "targets": [
       { "path": "C:\\Program Files\\Microsoft Visual Studio", "enabled": true, "note": "VS2022 Enterprise，约 30-35 GB（最大头）" },
       { "path": "C:\\Program Files (x86)\\Microsoft Visual Studio", "enabled": true, "note": "VS 的 32 位组件 / Installer" },
