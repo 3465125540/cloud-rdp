@@ -14,7 +14,8 @@
     RDP_USER      用户名
     RDP_PASSWORD  密码
   其余 MAIL_* 由 send-mail.ps1 自己读。
-  退出码：未配置邮箱 -> 0（跳过）；发送失败 -> 1（调用方 continue-on-error 兜住）。
+  退出码：始终 0 —— 连接信息已在日志明文打印（可直接取用），邮件失败不算错误；
+          真正的配置问题（认证失败等）仍会写 MAIL_RESULT=FAIL:*，由第 13 步汇总展示。
   诊断日志：默认 D:\cloudrdp-sys\_state\mail.log（用 -LogPath 覆盖）。
 #>
 
@@ -62,6 +63,25 @@ $body = ($lines -join "`r`n")
 $mailScript = Join-Path $PSScriptRoot 'send-mail.ps1'
 if (-not (Test-Path -LiteralPath $mailScript)) { throw "找不到 $mailScript" }
 
+# 发送前先把连接信息明文打印到日志 —— 无论邮件成败，这里都能直接取用。
+# 这是用户明确要求：账号密码写死在 workflow、明文打印、方便直接取用，邮件只是补充。
+Write-Host ""
+Write-Host "==========================================" -ForegroundColor Green
+Write-Host "  CloudRDP 连接信息（日志可直接取用）" -ForegroundColor Cyan
+Write-Host "  Tailscale IP : $Ip" -ForegroundColor Yellow
+Write-Host "  用户名       : $User" -ForegroundColor Yellow
+Write-Host "  密码         : $Pass" -ForegroundColor Yellow
+Write-Host "==========================================" -ForegroundColor Green
+Write-Host ""
+
 Write-Host "[connmail] 准备发送连接信息到邮箱（IP=$Ip），日志：$LogPath"
 & $mailScript -Subject "CloudRDP 连接信息（$Ip）" -BodyText $body -LogPath $LogPath -DryRun:$DryRun
-exit $LASTEXITCODE
+$rc = $LASTEXITCODE
+if ($rc -eq 0) {
+    Write-Host "[connmail] 邮件已发送"
+} else {
+    # 连接信息已在上面明文打印，邮件失败不算错误（139 灰名单 450 很常见，重试仍可能被拒）。
+    # 不再 exit 1 让 step 标红 —— 详细诊断见 mail.log；MAIL_RESULT 仍由 send-mail.ps1 写好。
+    Write-Host "[connmail] 邮件发送失败（返回码 $rc）—— 连接信息已明文打印在上方，可直接取用；诊断见 $LogPath" -ForegroundColor Yellow
+}
+exit 0
