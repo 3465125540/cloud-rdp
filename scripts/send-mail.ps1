@@ -45,6 +45,9 @@ param(
     [string]$Subject,
     [string]$BodyText,
     [int]$TimeoutSec = 45,
+    # 诊断日志：逐步记录 SMTP 对话与失败阶段。0e 步带 continue-on-error，
+    # 失败会被 Actions 静默吞掉 —— 没有这个文件就只能看到「没收到信」。
+    [string]$LogPath = '',
     [switch]$DryRun
 )
 
@@ -77,6 +80,26 @@ if (-not $Subject) {
 }
 if (-not $BodyText) { $BodyText = $env:MAIL_BODY }
 
+# ---------------------------------------------------------------- 0b. 诊断日志
+# 为什么必须有：workflow 的 0e 步带 continue-on-error: true —— 发信失败不会让开机失败，
+# 但也会被静默吞掉。用户看到的现象只有「没收到邮件」。把每一步 SMTP 对话与失败阶段
+# 写进 _state\mail.log，才能事后定位（授权码错 / 端口被墙 / TLS 协商失败 / 收件人被拒）。
+if ([string]::IsNullOrWhiteSpace($LogPath)) { $LogPath = [string]$env:MAIL_LOG_PATH }
+if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+    try { New-Item -ItemType Directory -Force -Path (Split-Path -Path $LogPath -Parent) | Out-Null } catch { }
+}
+$script:Stage = 'init'
+function Write-MLog([string]$m) {
+    Write-Host ("[mail] " + $m)
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        try {
+            ("[{0}] [{1}] {2}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $script:Stage, $m) |
+                Out-File -LiteralPath $LogPath -Append -Encoding utf8
+        } catch { }
+    }
+}
+function Set-MStage([string]$s) { $script:Stage = $s }
+
 # ---------------------------------------------------------------- 1. 缺配置则优雅跳过
 $missing = @()
 if (-not $SmtpHost) { $missing += 'MAIL_SMTP_HOST' }
@@ -85,7 +108,8 @@ if (-not $SmtpPass) { $missing += 'MAIL_PASS' }
 if (-not $MailTo)   { $missing += 'MAIL_TO' }
 if (-not $BodyText) { $missing += 'MAIL_BODY' }
 if ($missing.Count -gt 0) {
-    Write-Host ("[mail] 未配置 " + ($missing -join ', ') + " —— 跳过发信（不算失败）")
+    Write-MLog ("未配置 " + ($missing -join ', ') + " —— 跳过发信（不算失败）")
+    if ($env:GITHUB_ENV) { "MAIL_RESULT=SKIP:missing-" + ($missing -join '+') | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
     exit 0
 }
 
@@ -113,9 +137,14 @@ function Split-Addrs([string]$s) {
 $toList = @(Split-Addrs $MailTo)
 $ccList = @(Split-Addrs $MailCc)
 if ($toList.Count -eq 0) {
-    Write-Host "[mail] MAIL_TO 解析后为空 —— 跳过发信（不算失败）"
+    Write-MLog "MAIL_TO 解析后为空 —— 跳过发信（不算失败）"
+    if ($env:GITHUB_ENV) { "MAIL_RESULT=SKIP:empty-to" | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
     exit 0
 }
+
+# 配置回显（密码只打印长度，绝不落盘明文）
+Write-MLog ("配置：host={0} port={1} security={2} user={3} from={4} to={5} cc={6} passLen={7}" -f `
+    $SmtpHost, $SmtpPort, $Security, $SmtpUser, $MailFrom, ($toList -join ','), ($ccList -join ','), ([string]$SmtpPass).Length)
 
 # ---------------------------------------------------------------- 3. 组装 MIME
 $b64 = ConvertTo-B64 $BodyText
@@ -210,39 +239,50 @@ function Connect-Tls([System.IO.Stream]$raw, [string]$hostName, [int]$timeoutMs,
 $timeoutMs = $TimeoutSec * 1000
 $client = $null; $stream = $null; $reader = $null; $writer = $null
 try {
-    Write-Host "[mail] 连接 $SmtpHost`:$SmtpPort（$Security）..."
+    Set-MStage 'connect'
+    Write-MLog "连接 $SmtpHost`:$SmtpPort（$Security）..."
     $client = [System.Net.Sockets.TcpClient]::new()
     $iar = $client.BeginConnect($SmtpHost, $SmtpPort, $null, $null)
     if (-not $iar.AsyncWaitHandle.WaitOne($timeoutMs, $false)) {
-        throw "连接 $SmtpHost`:$SmtpPort 超时（$TimeoutSec 秒）"
+        throw "连接 $SmtpHost`:$SmtpPort 超时（$TimeoutSec 秒）—— 常见原因：端口被网络策略屏蔽（25/465/587）"
     }
     $client.EndConnect($iar)
     $client.ReceiveTimeout = $timeoutMs
     $client.SendTimeout = $timeoutMs
     $stream = $client.GetStream()
+    Write-MLog 'TCP 已连接'
 
     if ($Security -eq 'ssl') {
+        Set-MStage 'tls'
         $stream = Connect-Tls $stream $SmtpHost $timeoutMs $proto $certColl
+        Write-MLog '隐式 SSL 握手完成'
     }
 
     $reader = New-SmtpReader $stream
     $writer = New-SmtpWriter $stream
 
+    Set-MStage 'greeting'
     Invoke-SmtpCmd $writer $reader $null @(220) 'greeting' | Out-Null
+    Set-MStage 'ehlo'
     $ehlo = Invoke-SmtpCmd $writer $reader ("EHLO " + $env:COMPUTERNAME) @(250) 'EHLO'
+    Write-MLog 'EHLO 完成'
 
     if ($Security -eq 'starttls') {
+        Set-MStage 'starttls'
         Invoke-SmtpCmd $writer $reader 'STARTTLS' @(220) 'STARTTLS' | Out-Null
         $writer.Dispose(); $reader.Dispose()      # leaveOpen=true，不会关掉底层流
         $stream = Connect-Tls $stream $SmtpHost $timeoutMs $proto $certColl
         $reader = New-SmtpReader $stream
         $writer = New-SmtpWriter $stream
         $ehlo = Invoke-SmtpCmd $writer $reader ("EHLO " + $env:COMPUTERNAME) @(250) 'EHLO(2)'
+        Write-MLog 'STARTTLS 升级完成'
     }
 
     # ---- AUTH：优先 LOGIN，失败再退 PLAIN ----
+    Set-MStage 'auth'
     $mechs = ''
     foreach ($l in $ehlo.Lines) { if ($l -match '(?i)AUTH\s+(.+)$') { $mechs = $Matches[1] } }
+    Write-MLog ("服务器支持认证方式：{0}" -f $(if ($mechs) { $mechs } else { '(未宣告，按 LOGIN 试)' }))
     $authed = $false
     if ($mechs -eq '' -or $mechs -match '(?i)LOGIN') {
         try {
@@ -251,27 +291,47 @@ try {
             Invoke-SmtpCmd $writer $reader (ConvertTo-B64 $SmtpPass) @(235) 'AUTH pass' | Out-Null
             $authed = $true
         } catch {
-            Write-Host "[mail] AUTH LOGIN 失败，改用 AUTH PLAIN：$_"
+            Write-MLog ("AUTH LOGIN 失败，改用 AUTH PLAIN：{0}" -f $_.Exception.Message)
         }
     }
     if (-not $authed) {
         $plain = ConvertTo-B64 ("`0" + $SmtpUser + "`0" + $SmtpPass)
         Invoke-SmtpCmd $writer $reader ('AUTH PLAIN ' + $plain) @(235) 'AUTH PLAIN' | Out-Null
     }
+    Write-MLog ("认证通过：{0}" -f $SmtpUser)
 
+    Set-MStage 'mail-from'
     Invoke-SmtpCmd $writer $reader ('MAIL FROM:<' + $MailFrom + '>') @(250) 'MAIL FROM' | Out-Null
+    Set-MStage 'rcpt-to'
     foreach ($a in $toList) { Invoke-SmtpCmd $writer $reader ('RCPT TO:<' + $a + '>') @(250, 251) 'RCPT TO' | Out-Null }
     foreach ($a in $ccList) { Invoke-SmtpCmd $writer $reader ('RCPT TO:<' + $a + '>') @(250, 251) 'RCPT TO(cc)' | Out-Null }
+    Write-MLog ("收件人已接受：{0}" -f (($toList + $ccList) -join ', '))
+
+    Set-MStage 'data'
     Invoke-SmtpCmd $writer $reader 'DATA' @(354) 'DATA' | Out-Null
     $writer.Write($payload + "`r`n.`r`n")
     $writer.Flush()
     Invoke-SmtpCmd $writer $reader $null @(250) 'DATA end' | Out-Null
+    Set-MStage 'quit'
     try { Invoke-SmtpCmd $writer $reader 'QUIT' @(221) 'QUIT' | Out-Null } catch { }
 
-    Write-Host "[mail] 已发送：$($toList -join ', ')"
+    Set-MStage 'done'
+    Write-MLog ("已发送：{0}" -f ($toList -join ', '))
+    if ($env:GITHUB_ENV) { "MAIL_RESULT=OK" | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
     exit 0
 } catch {
-    Write-Host "[mail] 发送失败：$_" -ForegroundColor Red
+    $msg = $_.Exception.Message
+    Write-MLog ("FAILED 阶段={0} 错误={1}" -f $script:Stage, $msg)
+    # 常见错因直给提示，免得还要人去猜
+    if ($msg -match '(?i)5\.7\.|535|534|authentication|认证|AUTH') {
+        Write-MLog '  → 认证失败：多半是「授权码」不对，或邮箱后台没开启 SMTP/客户端授权码'
+    } elseif ($msg -match '(?i)timeout|超时') {
+        Write-MLog '  → 超时：端口可能被网络策略屏蔽（试 465/587；QQ/163/139 默认 465）'
+    } elseif ($msg -match '(?i)ssl|tls|证书|certificate') {
+        Write-MLog '  → TLS 协商失败：确认端口与加密方式匹配（465=隐式 SSL，587=STARTTLS）'
+    }
+    Write-Host ("[mail] 发送失败：$msg") -ForegroundColor Red
+    if ($env:GITHUB_ENV) { "MAIL_RESULT=FAIL:$($script:Stage)" | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
     exit 1
 } finally {
     foreach ($x in @($writer, $reader, $stream, $client)) {

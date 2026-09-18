@@ -601,17 +601,18 @@ cloud-rdp/
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
-| **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机 |
-| **1** | **开机瘦身** | `slim-image.ps1`：① 真卸载 `blockedApps`（9 个程序）→ ② 删镜像大件（约 70 GB）→ ③ 清空 `C:\Windows\Installer`（约 6.7 GB）。`auto`/`always`/`off` |
+| **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机。诊断日志 `D:\cloudrdp-sys\_state\mail.log`，结果透出 `MAIL_RESULT` |
+| **0f** | **设置中文 + 微软拼音（提前到瘦身之前）** | `setup-chinese.ps1`：`Install-Language` 实测每次 **30~43 分钟**，所以放最前面 + **5 分钟封顶、超时转后台**（`LANGPACK=TIMEOUT_BACKGROUND`）。它能在后面瘦身/拉数据/还原的 ~40 分钟里悄悄装完。步级 `timeout-minutes: 6` + `continue-on-error` 双保险 |
+| **1** | **开机瘦身** | `slim-image.ps1`：① 真卸载 `blockedApps`（9 个程序）→ ② 删镜像大件（约 70 GB）→ ③ 清空 `C:\Windows\Installer`（约 6.7 GB）→ ④ **残留清理**（删残留 ARP 卸载项 + 残留空壳目录）。`auto`/`always`/`off` |
 | **2** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
 | 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
 | **7** | **从 139 拉取数据** | `sync-down.ps1`（实测 ≈19 分钟；139 约 0.45 MB/s） |
 | **8** | **预还原** | `pre-restore.ps1 -Pull`（拉取 → **用户名变更迁移** → 记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
-| **9** | **设置中文 + 微软拼音** | `setup-chinese.ps1`：装语言包 + 写 a 的 HKCU（**必须在还原之后**，见 ⑩） |
+| **8b** | **补写用户语言键** | `setup-chinese.ps1 -UserHiveOnly`：第 8 步会导入 `registry\user\HKCU-Software.reg`，把 0f 写的语言键覆盖掉 —— 这里再补一次（幂等、秒级） |
 | **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
 | **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
-| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行 + 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
+| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 .workbuddy-ai 取证** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
 | 14 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照。时长收敛到 `360 − 已用 − 8(余量)`。**最后 15 分钟在后台启动收尾**，主循环继续跑 → 远程连接全程不中断 |
 | 15 | 等待后台收尾 | `if: always()`：等 finalize 后台作业完成（最多 4 分钟）；未启动才前台补跑。收尾 = C 盘清理 + 全量同步 + 整机快照 |
 
@@ -679,9 +680,14 @@ cloud-rdp/
 | 快捷方式补抓把大目录也抓了 | 该 `.lnk` 指向一个大目录（如某游戏） | 调小 `shortcuts.captureMaxMBPerTarget` / `captureMaxTotalMB`（超限会记名告警，不静默） |
 | 不想让 `.workbuddy-ai` 被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy-ai` 那行（改完提交即可） |
 | 刚开机连进去发现桌面是空的 / 数据没同步完 | 你连得太早 —— `0d` 打印连接信息时，后台的数据同步与还原还没跑完 | 正常。等日志出现 `ENV READY`（第 13 步）再登录；或看公共桌面 `_CloudRDP_SETTING_UP.txt` → `_CloudRDP_READY.txt` |
-| 早连后中文输入法打不出中文 | `9. 设置中文` 还没跑完；旧逻辑在你已登录时会因 `reg load` 失败而整段跳过 | **已修**：检测到已登录就直接写 `HKU\<SID>`（不 load/unload），并立即触发用户级还原任务。若仍不行，`Win+Space` 切换或注销重登一次 |
+| 早连后中文输入法打不出中文 | `0f. 设置中文` 的语言包还在后台装（30~43 分钟），或已登录时旧逻辑会因 `reg load` 失败而整段跳过 | **已修**：检测到已登录就直接写 `HKU\<SID>`（不 load/unload）；语言包 **5 分钟封顶转后台**，看 `LANGPACK=TIMEOUT_BACKGROUND` 即知。装完 `Win+Space` 切换或注销重登一次 |
 | 公共桌面出现 `_CloudRDP_SETTING_UP.txt` / `_CloudRDP_READY.txt` | 提示初始化进度的标记文件（人在 RDP 里看不到 Actions 日志） | 正常，可随时删。已加进 `files.excludeFilePatterns`，不会被快照备份/还原 |
 | 早连后程序图标还是死链 | 快捷方式校验（`8. 预还原` 里的 4e 段）跑完之后才修好 | 等 `ENV READY`；或手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
+| **桌面只恢复了图标、点开报「找不到目标」**（用户级安装的程序） | **根因**：备份/基线扫描跑在 `runneradmin` 身份下，`HKCU:` 是它的 hive，**看不到用户 a 的卸载项** → 「程序体在 `%LOCALAPPDATA%\<厂商>`、卸载项在用户 HKCU」这一整类程序从没被备份 | **已修**：备份与基线两侧都用 `Get-InstalledProgramsIncludingUser`（自动挂载/读用户 hive，SID 归一化为 `HKU\__RDPUSER__`）。同时 **`programs` 现在先于 `files` 推送** —— 以前 `files` 吃掉 `--max-duration`，`programs/` 永远传不上去 |
+| 卸载了程序但「应用和功能」里还在（如 Unity Hub） | 卸载器只删文件、没删自己的 ARP 卸载键（Unity Hub 的卸载器叫 `Uninstall Unity Hub.exe`，旧正则没给它补 `/S` → 挂起到超时） | **已修**：放宽静默参数匹配 + 新增 `④ 残留清理`（删残留 ARP 键 + 残留空壳目录），透出 `SLIM_ARP_CLEANED` / `SLIM_DIRS_LEFTOVER` |
+| Edge 历史记录缺一段 / 快照报 `robocopy=9` | 抓取时 Edge 在运行，SQLite(WAL) 被持有；`LOCK`/`LOG` 这类 LevelDB 运行时文件也被独占 | **已修**：`excludeFilePatterns` 排除 `LOCK/LOG/LOG.old`（无还原价值）；**全量快照前自动关闭 Edge / WorkBuddy**（`files.quiesce`，快速快照不动）；还原时 robocopy 失败会用**共享读写**补写（`lockcopy-lib.ps1`）；还原后透出 `EDGE_RESTORE` |
+| `.workbuddy-ai` 里的 `cache` / `Temp` 没被备份 | `excludeDirNames` 按目录名全局排除，把用户数据目录里的缓存也滤掉了 | **已修**：`files.noExcludeDirs` 豁免清单（`%RDPUSERPROFILE%\.workbuddy-ai`）—— 该目录只禁用「目录名排除」，仍应用文件级排除 |
+| 邮件没收到 | 0e 步带 `continue-on-error`，失败被静默吞掉 | 看 `D:\cloudrdp-sys\_state\mail.log`（逐步 SMTP 对话 + 失败阶段 + 常见错因提示）与 `MAIL_RESULT`。最常见：139/QQ 邮箱未开启「客户端授权码」、或端口被屏蔽（试 465/587） |
 
 ---
 

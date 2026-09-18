@@ -34,6 +34,8 @@
     SLIM_FREED_GB / SLIM_C_USED_PCT / SLIM_TARGETS_DELETED / SLIM_TARGETS_GUARDED
     SLIM_UNINSTALL_OK / SLIM_UNINSTALL_FAILED     ← blockedApps 真卸载结果
     SLIM_PURGED_DIRS / SLIM_PURGED_GB             ← 清空型目标（保留目录本身）结果
+    SLIM_ARP_CLEANED / SLIM_ARP_FAILED            ← 残留 ARP 卸载项清理（「未卸载成功」的真凶）
+    SLIM_DIRS_CLEARED / SLIM_DIRS_LEFTOVER        ← 残留空壳目录清理
 
   执行顺序（顺序是硬约束）：
     ① 卸载 blockedApps（真卸载）—— 必须在清空 C:\Windows\Installer **之前**：
@@ -428,6 +430,46 @@ if ($purgeList.Count -gt 0) {
     Say ("  清空结果：成功 {0} / 跳过 {1} / 未完成 {2}" -f $purgeDone, $purgeSkip, $purgeFail)
 }
 
+# ---------------------------------------------------------------- ④ 残留清理（卸载器不管的部分）
+# 为什么需要（真机实测 server-18）：8 个目标程序的目录都删干净了，但
+#   HKLM\...\Uninstall\Unity Technologies - Hub 还在 —— 程序在「应用和功能」里
+#   依旧显示已安装，用户看到的就是「未卸载成功」；另有 2 个空壳目录残留。
+# 顺序：必须在 ①（真卸载）之后 —— 先让卸载器自己删，删不掉的我们再补。
+$arpCleaned = 0; $arpFailed = 0; $dirsCleared = 0; $dirsLeft = 0
+if ($script:HasUninstallLib -and @($blockedApps).Count -gt 0) {
+    if (-not $DryRun) {
+        $wingetPath = ''
+        if (Get-Command Test-WingetAvailable -ErrorAction SilentlyContinue) { $wingetPath = [string](Test-WingetAvailable) }
+        Say ("  winget：" + $(if ($wingetPath) { $wingetPath } else { '不可用（卸载只能靠 ARP / 目录兜底）' }))
+    }
+    Say ("残留清理：{0} 个程序的 ARP 卸载项 + 残留目录" -f @($blockedApps).Count)
+    foreach ($app in $blockedApps) {
+        if ($DryRun) { Note ("  [DryRun] 将清理 {0} 的残留卸载项与残留目录" -f $app.name); continue }
+        try {
+            $ra = Remove-BlockedAppArpKeys -Entry $app -ArpEntries $arpEntries -Log { param($m) Say ("    " + $m) }
+            if (@($ra.removed).Count -gt 0) { $arpCleaned += @($ra.removed).Count }
+            if (@($ra.failed).Count -gt 0) {
+                $arpFailed += @($ra.failed).Count
+                foreach ($f in @($ra.failed)) { Note ("    ARP 键删除失败：{0}" -f $f) }
+            }
+            $rd = Remove-BlockedAppLeftoverDirs -Entry $app -Log { param($m) Say ("    " + $m) }
+            if (@($rd.removed).Count  -gt 0) { $dirsCleared += @($rd.removed).Count }
+            if (@($rd.leftover).Count -gt 0) {
+                $dirsLeft += @($rd.leftover).Count
+                foreach ($f in @($rd.leftover)) { Note ("    残留目录仍存在：{0}" -f $f) }
+            }
+        } catch { Note ("  残留清理异常（{0}）：{1}" -f $app.name, $_.Exception.Message) }
+    }
+    Set-GhEnv ("SLIM_ARP_CLEANED="   + $arpCleaned)
+    Set-GhEnv ("SLIM_ARP_FAILED="    + $arpFailed)
+    Set-GhEnv ("SLIM_DIRS_CLEARED="  + $dirsCleared)
+    Set-GhEnv ("SLIM_DIRS_LEFTOVER=" + $dirsLeft)
+    Say ("  残留清理结果：ARP 键清除 {0}（失败 {1}）/ 残留目录清除 {2}（仍剩 {3}）" -f `
+         $arpCleaned, $arpFailed, $dirsCleared, $dirsLeft)
+} else {
+    Say "残留清理：跳过（未加载卸载库，或 blockedApps 清单为空）"
+}
+
 # ---------------------------------------------------------------- 附加优化
 if (-not $DryRun) {
     if ([bool](Get-Cfg $slimCfg 'disableHibernation' $true)) {
@@ -456,7 +498,7 @@ if ($freedTotal -lt 0) { $freedTotal = 0 }
 $status = "PARTIAL"
 if ($DryRun) { $status = "DRYRUN" }
 elseif ($usedAfter -ge 0 -and $usedAfter -le $TargetPercent) { $status = "OK" }
-elseif ($deleted -eq 0 -and $uninstOk -eq 0 -and $purgeDone -eq 0) { $status = "SKIPPED" }
+elseif ($deleted -eq 0 -and $uninstOk -eq 0 -and $purgeDone -eq 0 -and $arpCleaned -eq 0) { $status = "SKIPPED" }
 
 Say ("瘦身结果：C 盘已用 {0}% -> {1}%（释放 {2:N1} GB）| 删除 {3} / 跳过 {4} / 受保护 {5} / 失败 {6}" -f `
     $usedBefore, $usedAfter, ($freedTotal / 1GB), $deleted, $skipped, $guarded, $failed)

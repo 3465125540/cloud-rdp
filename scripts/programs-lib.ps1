@@ -142,13 +142,49 @@ function Get-ProgramImageBlockPaths {
     )
 }
 
-# 枚举三处 Uninstall 注册表，返回程序条目
+# 枚举 Uninstall 注册表，返回程序条目
+#
+# ⚠️ 为什么要 -ExtraHiveRoots（真机实测的坑）：
+#   备份/基线扫描跑在 runneradmin 身份下，`HKCU:` 是 **runneradmin 的 hive**，
+#   看不到 RDP 用户（a）的卸载项。于是「用户级安装」这一类程序
+#   （程序体在 %LOCALAPPDATA%\<厂商>、卸载项在用户 HKCU）整类漏抓 ——
+#   还原后桌面只剩图标、点开报「找不到目标」。
+#   调用方先用 userhive-lib.ps1 的 Mount-RdpUserHive 拿到根（HKU\<SID> 或 HKU\__CRDP_USR），
+#   再传进来即可。
 function Get-InstalledPrograms {
+    param(
+        [string[]]$ExtraHiveRoots = @()
+    )
+
+    # 用户 hive 的 SID/加载名一律归一化，保证「基线」与「备份」两侧可比：
+    #   已登录时根是 HKU\S-1-5-21-...，未登录时是我们 reg load 的 HKU\__CRDP_USR，
+    #   换台机器 SID 还会变 —— 不归一化则增量门永远对不上。
+    $UserHiveToken = 'HKU\__RDPUSER__'
+
     $hives = @(
         @{ parent = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall';             scope = 'machine' },
         @{ parent = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'; scope = 'machine' },
         @{ parent = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall';             scope = 'user' }
     )
+    $extraRoots = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($ExtraHiveRoots)) {
+        if ([string]::IsNullOrWhiteSpace($r)) { continue }
+        $rr = ([string]$r).TrimEnd('\')
+        if (-not $rr) { continue }
+
+        # 两种写法都要吃得下：
+        #   'HKU\__CRDP_USR'            —— reg.exe / Mount-RdpUserHive 的写法
+        #   'HKCU\Software\__crdp_src'  —— PowerShell 注册表提供程序要求 HKCU:\... 才能 Test-Path
+        $rrPs = $rr
+        if ($rrPs -match '^[A-Za-z][A-Za-z0-9_]*$') { $rrPs = $rrPs + ':' }
+        elseif ($rrPs -notmatch '^[A-Za-z][A-Za-z0-9_]*:') { $rrPs = $rrPs -replace '^([A-Za-z][A-Za-z0-9_]*)\\', '$1:\' }
+        $rrReg = $rrPs -replace ':', ''      # HKCU\Software\... —— 与 Convert-ProgramRegPath 的输出同形
+
+        $extraRoots.Add($rrReg)
+        $hives += @{ parent = ($rrPs + '\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall');             scope = 'user' }
+        $hives += @{ parent = ($rrPs + '\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'); scope = 'user' }
+    }
+
     $list = New-Object System.Collections.Generic.List[object]
 
     foreach ($h in $hives) {
@@ -161,8 +197,20 @@ function Get-InstalledPrograms {
             $est = 0
             if ($props.EstimatedSize) { try { $est = [int]$props.EstimatedSize } catch { $est = 0 } }
 
+            # regPathReal = 真实路径（给 reg.exe export 用）
+            # regPath     = 归一化路径（给基线 / 清单 / 跨机比对用）
+            $regPathReal = Convert-ProgramRegPath -PSPath $k.PSPath
+            $regPath     = $regPathReal
+            foreach ($rr in $extraRoots) {
+                if ($regPathReal -like ($rr + '\*')) {
+                    $regPath = $UserHiveToken + $regPathReal.Substring($rr.Length)
+                    break
+                }
+            }
+
             $list.Add([pscustomobject]@{
-                regPath          = (Convert-ProgramRegPath -PSPath $k.PSPath)
+                regPath          = $regPath
+                regPathReal      = $regPathReal
                 keyName          = [string]$k.PSChildName
                 scope            = [string]$h.scope
                 displayName      = [string]$props.DisplayName
@@ -182,6 +230,53 @@ function Get-InstalledPrograms {
     return $list.ToArray()
 }
 
+# 扫描已装程序，**包含 RDP 用户的用户级安装**（自动挂载 / 卸载用户 hive）
+#
+# 为什么单独包一层：备份与基线两处都要用，且都必须「同源」——
+# 否则基线里没有用户级条目、备份里却有，增量门会把它们当新装反复抓；
+# 反过来则会永远漏抓。所以两边都调这个函数。
+#
+# ⚠️ 用户已登录时不 load/unload（会崩会话）；未登录时才 reg load，用后必须 unload。
+function Get-InstalledProgramsIncludingUser {
+    param(
+        [string]$RdpUser,
+        [scriptblock]$Log = $null
+    )
+
+    # 需要 userhive-lib.ps1 提供 Mount/Dismount；没加载就自己 dot-source 进来
+    if (-not (Get-Command Mount-RdpUserHive -ErrorAction SilentlyContinue)) {
+        $uhLib = Join-Path $PSScriptRoot 'userhive-lib.ps1'
+        if (Test-Path -LiteralPath $uhLib) { . $uhLib }
+    }
+
+    $extra = @()
+    $mount = $null
+    if (-not [string]::IsNullOrWhiteSpace($RdpUser) -and (Get-Command Mount-RdpUserHive -ErrorAction SilentlyContinue)) {
+        try {
+            $mount = Mount-RdpUserHive -RdpUser $RdpUser
+            if ($mount.ok) {
+                $extra = @($mount.root)
+                if ($Log) { try { & $Log ('用户 hive：' + $mount.note) } catch { } }
+            } else {
+                if ($Log) { try { & $Log ('用户 hive 不可用，用户级程序本次不参与：' + $mount.note) } catch { } }
+            }
+        } catch {
+            if ($Log) { try { & $Log ('挂载用户 hive 异常：' + $_.Exception.Message) } catch { } }
+        }
+    }
+
+    $result = @()
+    try {
+        $result = @(Get-InstalledPrograms -ExtraHiveRoots $extra)
+    } catch {
+        $result = @()
+    }
+
+    if ($mount -and (Get-Command Dismount-RdpUserHive -ErrorAction SilentlyContinue)) {
+        try { Dismount-RdpUserHive -Mount $mount } catch { }
+    }
+    return $result
+}
 # 目录是否可作为「程序安装目录」（存在 + 不在系统/镜像路径内）
 function Test-ProgramDirUsable {
     param(
@@ -411,8 +506,25 @@ function Backup-Programs {
             $regLeaf = $safe + ".reg"
             $regFile = Join-Path $RegDir $regLeaf
             $regOk = $false
-            if (-not [string]::IsNullOrWhiteSpace([string]$a.regPath)) {
-                & reg.exe export "$($a.regPath)" "$regFile" /y 2>&1 | Out-Null
+            $regPathNorm = [string]$a.regPath
+            $regPathReal = [string]$a.regPathReal
+            if ([string]::IsNullOrWhiteSpace($regPathReal)) { $regPathReal = $regPathNorm }
+
+            # 用户级程序的卸载键【不单独导出】：
+            #   ① 它已经在 registry\user\HKCU-Software.reg（HKCU\Software 全量导出）里了，重复导出会互相打架；
+            #   ② 从 HKU\<SID> 导出的 .reg 正文带真实 SID，换台机器那个 SID 不存在 → 导入必然失败。
+            #   还原侧靠 HKCU-Software.reg 那条既有通道把它带回来（user 作用域导入）。
+            $isUserHive = ($regPathNorm -like 'HKU\__RDPUSER__*') -or
+                          ($regPathNorm -like 'HKCU\*') -or
+                          (([string]$a.scope) -eq 'user')
+            if ($isUserHive) {
+                if (-not [string]::IsNullOrWhiteSpace($regPathNorm)) {
+                    # 视为「已由 HKCU-Software.reg 覆盖」，不算 problem
+                    $regOk = $false
+                    $regLeaf = ''
+                }
+            } elseif (-not [string]::IsNullOrWhiteSpace($regPathReal)) {
+                & reg.exe export "$regPathReal" "$regFile" /y 2>&1 | Out-Null
                 $regOk = ($LASTEXITCODE -eq 0)
                 # 只有「本来有 regPath 却导出失败」才算 problem。
                 # 快捷方式线索补抓的条目本来就没有 Uninstall 键（regPath 为空），不算失败。
@@ -429,8 +541,9 @@ function Backup-Programs {
                 storedPath       = $dst
                 bytes            = (Get-ProgramTreeBytes -Path $dst)
                 scope            = [string]$a.scope
-                regPath          = [string]$a.regPath
+                regPath          = $regPathNorm
                 regFile          = $(if ($regOk) { $regLeaf } else { '' })
+                regInUserHive    = $isUserHive
                 windowsInstaller = $a.windowsInstaller
                 source           = [string]$a.reason
                 capturedUtc      = (Get-Date).ToUniversalTime().ToString('o')

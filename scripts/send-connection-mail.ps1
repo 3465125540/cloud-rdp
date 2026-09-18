@@ -3,8 +3,8 @@
   把本次开机的 RDP 连接信息（Tailscale IP / 账号 / 密码）发到用户邮箱。
 
 .DESCRIPTION
-  仓库已转公开，RDP 密码不能再写死在 workflow 里（会永久留在公网 git 历史）。
-  现在密码走 Secret，Actions 日志里会被自动打码成 ***，所以改由邮件投递。
+  仓库是公开的，RDP 账号密码按用户要求写死在 workflow（明文打印、方便直接取用），
+  同时主动发一封邮件到用户邮箱，省得每次去翻 Actions 日志。
   正文刻意写在脚本里而不是 YAML 的 here-string —— YAML 块标量的缩进规则
   会把顶格的 here-string 正文判成语法错误。
 
@@ -12,9 +12,10 @@
   读取环境变量：
     TS_IP         Tailscale IP（由 workflow 第 0c 步写入）
     RDP_USER      用户名
-    RDP_PASSWORD  密码（来自 Secret，勿打印到日志）
+    RDP_PASSWORD  密码
   其余 MAIL_* 由 send-mail.ps1 自己读。
   退出码：未配置邮箱 -> 0（跳过）；发送失败 -> 1（调用方 continue-on-error 兜住）。
+  诊断日志：默认 D:\cloudrdp-sys\_state\mail.log（用 -LogPath 覆盖）。
 #>
 
 [CmdletBinding()]
@@ -23,10 +24,17 @@ param(
     [string]$User = $env:RDP_USER,
     [string]$Pass = $env:RDP_PASSWORD,
     [string]$Elapsed = '',
+    # 诊断日志：0e 步带 continue-on-error，失败会被静默吞掉 —— 落盘才查得到原因
+    [string]$LogPath = '',
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($LogPath)) {
+    $sysDir = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
+    $LogPath = Join-Path (Join-Path $sysDir '_state') 'mail.log'
+}
 
 if (-not $Ip) { $Ip = '(未取到，见 Tailscale 后台 github-rdp-server*)' }
 if (-not $User) { $User = 'a' }
@@ -54,6 +62,6 @@ $body = ($lines -join "`r`n")
 $mailScript = Join-Path $PSScriptRoot 'send-mail.ps1'
 if (-not (Test-Path -LiteralPath $mailScript)) { throw "找不到 $mailScript" }
 
-Write-Host "[connmail] 准备发送连接信息到邮箱（IP=$Ip）"
-& $mailScript -Subject "CloudRDP 连接信息（$Ip）" -BodyText $body -DryRun:$DryRun
+Write-Host "[connmail] 准备发送连接信息到邮箱（IP=$Ip），日志：$LogPath"
+& $mailScript -Subject "CloudRDP 连接信息（$Ip）" -BodyText $body -LogPath $LogPath -DryRun:$DryRun
 exit $LASTEXITCODE

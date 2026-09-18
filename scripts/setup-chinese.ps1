@@ -32,6 +32,14 @@ param(
     [string]$ConfigPath      = '',
     [switch]$SkipLanguagePack,
     [switch]$SkipUserHive,
+    # 只补写「用户 HKCU 语言键」（秒级）。用于「预还原之后」再补一次 ——
+    # 因为预还原会导入 registry\user\HKCU-Software.reg，把早段写的语言键覆盖掉。
+    [switch]$UserHiveOnly,
+    # 子进程模式：只装语言包，装完写 langpack-done.txt 后退出。
+    # 由父进程用 Start-Process 拉起，超时则父进程放行、它继续在后台装。
+    [switch]$InstallPackOnly,
+    # 同步等待语言包的上限（秒）。超时转后台，不阻塞开机。
+    [int]$LangPackWaitSec    = 300,
     [switch]$DryRun
 )
 
@@ -84,6 +92,9 @@ $chCfg   = Get-Cfg $cfg 'chinese' $null
 $enabled = [bool](Get-Cfg $chCfg 'enabled' $true)
 $wantLp  = [bool](Get-Cfg $chCfg 'installLanguagePack' $true)
 if ($SkipLanguagePack) { $wantLp = $false }
+# -UserHiveOnly：只补写用户 HKCU 语言键（预还原之后那次），不装包、不动机器级 locale
+$wantSys = $true
+if ($UserHiveOnly) { $wantLp = $false; $wantSys = $false }
 $loc = [string](Get-Cfg $chCfg 'primaryLocale'   $PrimaryLocale)
 $sec = [string](Get-Cfg $chCfg 'secondaryLocale' $SecondaryLocale)
 
@@ -104,7 +115,49 @@ if (-not $enabled) {
 
 $problems = New-Object System.Collections.Generic.List[string]
 
-# ---------------------------------------------------------------- 1. 安装语言包
+# ---------------------------------------------------------------- 状态文件（语言包进度）
+$SysDir   = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
+$stateDir = Join-Path $SysDir '_state'
+$lpDone   = Join-Path $stateDir 'langpack-done.txt'
+$lpLog    = Join-Path $stateDir 'langpack.log'
+try { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null } catch { }
+
+# ---------------------------------------------------------------- 子进程模式：只装语言包
+# 由父进程 Start-Process 拉起。装完（无论成败）写 langpack-done.txt，
+# 父进程靠这个标记判断「是否已在限时内装好」。
+if ($InstallPackOnly) {
+    $res = 'FAILED'
+    try {
+        if (Get-Command Install-Language -ErrorAction SilentlyContinue) {
+            Install-Language -Language $loc -ErrorAction Stop
+            $res = 'OK'
+        } else {
+            throw 'Install-Language 不可用'
+        }
+    } catch {
+        ("[{0}] Install-Language 失败：{1}" -f (Get-Date).ToString('s'), $_.Exception.Message) |
+            Out-File -LiteralPath $lpLog -Append -Encoding utf8
+        try {
+            Add-WindowsCapability -Online -Name ("Language.Basic~~~{0}~0.0.1.0" -f $loc) -ErrorAction Stop | Out-Null
+            $res = 'OK-CAPABILITY'
+        } catch {
+            ("[{0}] Add-WindowsCapability 也失败：{1}" -f (Get-Date).ToString('s'), $_.Exception.Message) |
+                Out-File -LiteralPath $lpLog -Append -Encoding utf8
+            $res = 'FAILED'
+        }
+    }
+    ("[{0}] 语言包安装结束：{1}" -f (Get-Date).ToString('s'), $res) |
+        Out-File -LiteralPath $lpLog -Append -Encoding utf8
+    try { $res | Out-File -LiteralPath $lpDone -Encoding ascii -Force } catch { }
+    Write-Host ("[chinese] 后台语言包安装结束：$res")
+    exit 0
+}
+
+# ---------------------------------------------------------------- 1. 安装语言包（限时；超时转后台）
+# 为什么限时：真机实测 Install-Language 每次要 30~43 分钟（联网下载 FoD 语言包），
+# 而它在整个开机流程里只是「锦上添花」。所以最多同步等 LangPackWaitSec（默认 300 秒），
+# 超时就把安装交给后台子进程继续跑，开机流程立刻放行下一步。
+# 这也是「把中文步骤提到最前」的配套：越早启动，后台越有时间在开机完成前装完。
 $lpState = 'SKIPPED'
 if ($wantLp) {
     $installed = $false
@@ -112,38 +165,67 @@ if ($wantLp) {
         $langs = @(Get-InstalledLanguage -ErrorAction SilentlyContinue | ForEach-Object { $_.LanguageId })
         if ($langs -contains $loc) { $installed = $true }
     } catch { }
+
     if ($installed) {
         $lpState = 'PRESENT'
         Say "语言包已存在：$loc"
     } elseif ($DryRun) {
         $lpState = 'DRYRUN'
-        Say "[DryRun] 将安装语言包 $loc"
+        Say ("[DryRun] 将安装语言包 {0}（最多同步等 {1} 秒，超时转后台）" -f $loc, $LangPackWaitSec)
     } else {
-        try {
-            Say "安装语言包 $loc（联网下载，约 1-3 分钟）..."
-            if (Get-Command Install-Language -ErrorAction SilentlyContinue) {
-                Install-Language -Language $loc -ErrorAction Stop
-                $lpState = 'OK'
-            } else {
-                throw 'Install-Language 不可用'
-            }
-        } catch {
-            Warn "Install-Language 失败：$_"
-            try {
-                Add-WindowsCapability -Online -Name "Language.Basic~~~$loc~0.0.1.0" -ErrorAction Stop | Out-Null
-                $lpState = 'OK-CAPABILITY'
-            } catch {
-                Warn "Add-WindowsCapability 也失败：$_"
+        # 先清掉上一轮遗留的完成标记，避免误判
+        try { Remove-Item -LiteralPath $lpDone -Force -ErrorAction SilentlyContinue } catch { }
+
+        $exe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+        if (-not $exe) { $exe = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source }
+        if (-not $exe) {
+            $lpState = 'FAILED'
+            $problems.Add('langpack')
+            Warn '找不到 pwsh/powershell，无法启动语言包安装'
+        } else {
+            $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -InstallPackOnly -PrimaryLocale "{1}" -RdpUser "{2}"' -f `
+                      $PSCommandPath, $loc, $RdpUser
+            Say ("安装语言包 {0}（联网下载；最多同步等 {1} 秒，超时转后台继续）..." -f $loc, $LangPackWaitSec)
+
+            $child = $null
+            try { $child = Start-Process -FilePath $exe -ArgumentList $argStr -WindowStyle Hidden -PassThru } catch { }
+
+            if (-not $child) {
                 $lpState = 'FAILED'
                 $problems.Add('langpack')
+                Warn '语言包后台进程启动失败'
+            } else {
+                $waited = 0
+                while ($waited -lt $LangPackWaitSec) {
+                    if (Test-Path -LiteralPath $lpDone) { break }
+                    try { if ($child.HasExited) { break } } catch { }
+                    Start-Sleep -Seconds 5
+                    $waited += 5
+                }
+
+                if (Test-Path -LiteralPath $lpDone) {
+                    $lpState = (Get-Content -LiteralPath $lpDone -Raw -Encoding ascii).Trim()
+                    if ([string]::IsNullOrWhiteSpace($lpState)) { $lpState = 'OK' }
+                    if ($lpState -eq 'FAILED') { $problems.Add('langpack') }
+                    Say ("语言包安装完成：{0}（同步等了 {1} 秒）" -f $lpState, $waited)
+                } elseif ($child.HasExited) {
+                    $lpState = 'FAILED'
+                    $problems.Add('langpack')
+                    Warn '语言包后台进程已退出但没有写出完成标记（可能失败）'
+                } else {
+                    $lpState = 'TIMEOUT_BACKGROUND'
+                    Say ("语言包安装超过 {0} 秒 —— 已转后台继续（不阻塞开机；装完后重新登录即生效）" -f $LangPackWaitSec)
+                }
             }
         }
     }
 }
+Set-GhEnv ("LANGPACK=" + $lpState)
+Set-GhEnv ("CHINESE_LANGPACK=" + $lpState)
 
 # ---------------------------------------------------------------- 2. 机器级：系统 locale / 显示语言
 $sysState = 'SKIPPED'
-if (-not $DryRun) {
+if ($wantSys -and -not $DryRun) {
     try {
         Set-WinSystemLocale -SystemLocale 'zh-CN' -ErrorAction Stop
         Say '系统 locale -> zh-CN（注册表已写入；完全生效需重启）'
@@ -302,7 +384,10 @@ if (-not $DryRun -and $enhanceGate -and -not [string]::IsNullOrWhiteSpace($env:R
 }
 
 # ---------------------------------------------------------------- 5. 透出状态
-$status = if ($problems.Count -eq 0) { 'OK' } elseif ($lpState -eq 'FAILED' -and $hiveState -ne 'OK') { 'FAILED' } else { 'PARTIAL' }
+# TIMEOUT_BACKGROUND = 语言包已转后台继续装（本次开机内可能还没装完）→ 算 PARTIAL 而不是 OK
+$status = if ($problems.Count -eq 0 -and $lpState -ne 'TIMEOUT_BACKGROUND') { 'OK' }
+          elseif ($lpState -eq 'FAILED' -and $hiveState -ne 'OK') { 'FAILED' }
+          else { 'PARTIAL' }
 Set-GhEnv "CHINESE_STATUS=$status"
 Set-GhEnv "CHINESE_LANGPACK=$lpState"
 Set-GhEnv "CHINESE_SYSTEMLOCALE=$sysState"

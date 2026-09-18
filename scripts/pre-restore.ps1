@@ -78,7 +78,17 @@ $stateDir = Join-Path $SysDir "_state"
 try { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null } catch { }
 try {
     if (Get-Command Get-InstalledPrograms -ErrorAction SilentlyContinue) {
-        $allApps = @(Get-InstalledPrograms)
+        # ⚠️ 必须用「含用户 hive」的版本：本脚本跑在 runneradmin 身份下，
+        #    裸 Get-InstalledPrograms 的 HKCU: 是 runneradmin 的，看不到 RDP 用户的
+        #    用户级安装（程序体在 %LOCALAPPDATA%\<厂商>）。基线里少了它们，
+        #    备份侧就会把「历史备份过的用户级程序」当新装反复抓（或反过来永远漏抓）。
+        #    两侧同源是增量门成立的前提。
+        $allApps = @()
+        if (Get-Command Get-InstalledProgramsIncludingUser -ErrorAction SilentlyContinue) {
+            $allApps = @(Get-InstalledProgramsIncludingUser -RdpUser $RdpUser -Log { param($m) Say ("  " + $m) })
+        } else {
+            $allApps = @(Get-InstalledPrograms)
+        }
         $regs = [object[]]($allApps | ForEach-Object { $_.regPath } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         ([pscustomobject]@{
             recordedUtc = (Get-Date).ToUniversalTime().ToString('o')

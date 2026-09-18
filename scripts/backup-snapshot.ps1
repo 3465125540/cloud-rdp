@@ -67,6 +67,13 @@ $uninstallLib = Join-Path $PSScriptRoot "uninstall-apps-lib.ps1"
 $script:HasBlockedLib = $false
 if (Test-Path -LiteralPath $uninstallLib) { . $uninstallLib; $script:HasBlockedLib = $true }
 
+# 快照一致性共享库：抓取前优雅关闭占用程序（Edge / WorkBuddy），
+# 否则 SQLite(WAL) / LevelDB 被持有 → robocopy 部分失败（实测码 9）+ 数据不一致。
+$quiesceLib = Join-Path $PSScriptRoot "app-quiesce-lib.ps1"
+$script:HasQuiesceLib = $false
+if (Test-Path -LiteralPath $quiesceLib) { . $quiesceLib; $script:HasQuiesceLib = $true }
+else { Write-Warning "[snapshot] 未找到 app-quiesce-lib.ps1，快照前不会关闭占用程序" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -308,6 +315,35 @@ $exDirs  = @(Get-Cfg $cfg.files 'excludeDirNames' @())
 $exFiles = @(Get-Cfg $cfg.files 'excludeFilePatterns' @())
 $dirs    = @(Get-Cfg $cfg.files 'dirs' @())
 
+# 豁免排除清单：这些目录「完整抓」—— 只禁用 excludeDirNames（目录名排除），
+# 仍应用 excludeFilePatterns（像 LOCK/LOG 这种运行时独占文件留着只会让 robocopy 报错，
+# 且无还原价值）。例：%RDPUSERPROFILE%\.workbuddy-ai 里的 cache/Temp 也要抓。
+$noExRaw = @(Get-Cfg $cfg.files 'noExcludeDirs' @())
+$noExDirs = New-Object System.Collections.Generic.List[string]
+foreach ($r in $noExRaw) {
+    if ([string]::IsNullOrWhiteSpace([string]$r)) { continue }
+    $noExDirs.Add((Expand-SnapPath -Path ([string]$r) -RdpUser $RdpUser).TrimEnd('\').ToLower())
+}
+if ($noExDirs.Count -gt 0) { Say ("豁免排除（完整抓取）：{0}" -f ($noExDirs -join ' ; ')) }
+
+# ---------- 快照一致性：抓取前关闭占用程序 ----------
+# 只在「全量快照」做（保活期每 60 分钟的 -Quick 不动，免得打断用户正在用的会话）。
+# 为什么必须做：Edge 的 SQLite(WAL) 与 .workbuddy-ai 的 workbuddy.db 在程序运行时被持有，
+# robocopy 会返回码 9（有文件没复制成），且 History 与 History-wal 会在不同瞬间被复制 → 还原后历史缺失。
+$quiesceState = 'none'
+if (-not $Quick -and $script:HasQuiesceLib) {
+    $specs = @(Get-QuiesceSpecs -ConfigPath $ConfigPath)
+    if ($specs.Count -gt 0) {
+        Say ("快照一致性：先关闭占用程序（{0}）" -f (($specs | ForEach-Object { $_.name }) -join ', '))
+        $q = Stop-AppForSnapshot -Specs $specs -Log { param($m) Say ("  " + $m) }
+        $quiesceState = $q.detail
+        Say ("  关闭结果：{0}（耗时 {1}s）" -f $q.detail, $q.elapsedSec)
+    }
+} elseif ($Quick) {
+    $quiesceState = 'skipped-quick'
+}
+Set-GhEnv ("SNAP_QUIESCE=" + $quiesceState)
+
 $totalBytes = [long]0
 $totalFiles = 0
 $skippedDirs = New-Object System.Collections.Generic.List[string]
@@ -326,10 +362,27 @@ foreach ($raw in $dirs) {
         continue
     }
 
-    $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeDirs $exDirs -ExcludeFiles $exFiles
-    if ($code -ge 8) { Warn "robocopy 失败（码 $code）：$src"; $problems.Add("file:$src") }
+    $full = $noExDirs.Contains($src.TrimEnd('\').ToLower())
+    if ($full) {
+        Say ("  [完整抓取] {0}（不排除任何子目录）" -f $src)
+        $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeFiles $exFiles
+    } else {
+        $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeDirs $exDirs -ExcludeFiles $exFiles
+    }
 
     $got = Get-TreeSize -Path $dst
+    if ($code -ge 8) {
+        Warn ("robocopy 失败（码 {0}）：{1}  —— 源 {2} 个文件 / 已抓 {3} 个（差 {4}）" -f `
+              $code, $src, $size.Files, $got.Files, ($size.Files - $got.Files))
+        $problems.Add("file:$src")
+    }
+    # 完整抓取目录没有目录级排除，源与暂存的文件数必须一致 —— 不一致说明有文件没复制成功
+    if ($full -and $got.Files -lt $size.Files) {
+        Warn ("[完整抓取] 文件数不足：{0} 源 {1} / 暂存 {2}（差 {3}）—— 大概率被占用" -f `
+              $src, $size.Files, $got.Files, ($size.Files - $got.Files))
+        $problems.Add("filecount:$src")
+    }
+
     $totalBytes += $got.Bytes
     $totalFiles += $got.Files
     $fileEntries.Add([pscustomobject]@{
@@ -459,11 +512,13 @@ else {
         $portableCaptured = @($res.captured)
         foreach ($pb in @($res.problems)) { $problems.Add($pb) }
         Say ("  可移动程序已搬运：{0} 个（模式 {1}）-> {2}" -f $portableCaptured.Count, $pMode, $PortableDir)
-
-        # 三处元数据保持一致：数据目录内 / 快照内 / manifest
-        try { Write-PortableManifest -Apps $portableCaptured -Path (Join-Path $PortableDir "_manifest.json") } catch { Warn "写便携清单(数据目录)失败：$_" }
-        try { Write-PortableManifest -Apps $portableCaptured -Path (Join-Path $Stage "apps\portable.json") } catch { Warn "写便携清单(快照)失败：$_" }
     }
+
+    # ⚠️ 即使 0 个也要写 portable.json：文件缺失无法区分「没跑」与「跑了但空」，
+    #    而 pre-restore / 快捷方式补抓的「跨运行持久」判定依赖它的存在。
+    try { New-Item -ItemType Directory -Force -Path (Join-Path $Stage "apps") | Out-Null } catch { }
+    try { Write-PortableManifest -Apps $portableCaptured -Path (Join-Path $PortableDir "_manifest.json") } catch { Warn "写便携清单(数据目录)失败：$_" }
+    try { Write-PortableManifest -Apps $portableCaptured -Path (Join-Path $Stage "apps\portable.json") } catch { Warn "写便携清单(快照)失败：$_" }
 }
 
 # ---------------------------------------------------------------- 3c. 安装型程序（识别 + 备份）
@@ -507,7 +562,17 @@ else {
         Warn "  缺少开机基线（program-baseline.json）—— 为安全起见本次跳过安装型程序备份"
     }
     else {
-        $allApps = @(Get-InstalledPrograms)
+        # ⚠️ 必须用「含用户 hive」的版本：本脚本跑在 runneradmin 身份下，
+        #    裸 Get-InstalledPrograms 的 HKCU: 是 runneradmin 的，看不到 RDP 用户的
+        #    用户级安装（程序体在 %LOCALAPPDATA%\<厂商>、卸载项在用户 HKCU）。
+        #    漏抓的后果：还原后桌面只剩图标、点开报「找不到目标」。
+        #    与 pre-restore.ps1 的基线扫描同源，增量门才成立。
+        $allApps = @()
+        if (Get-Command Get-InstalledProgramsIncludingUser -ErrorAction SilentlyContinue) {
+            $allApps = @(Get-InstalledProgramsIncludingUser -RdpUser $RdpUser -Log { param($m) Say ("  " + $m) })
+        } else {
+            $allApps = @(Get-InstalledPrograms)
+        }
         Say ("  已装程序总数：{0}（镜像基线 {1} / 历史备份 {2}）" -f $allApps.Count, @($baseRegs).Count, @($prevRegs).Count)
 
         # 不备份的目录：已被 portable 处理过的 + 配置里显式排除的（后者此前漏了，补齐）
@@ -615,9 +680,18 @@ else {
             $b = Backup-Programs -Apps $selArr -Stage $Stage -ProgramsRoot $programsRoot
             $programsCaptured = @($b.captured)
             foreach ($pb in @($b.problems)) { $problems.Add($pb) }
-            try { Write-ProgramsManifest -Apps $programsCaptured -Path (Join-Path $Stage "programs\programs.json") } catch { Warn "写程序清单失败：$_" }
             Say ("  安装型程序已备份：{0} 个" -f $programsCaptured.Count)
+        } else {
+            Warn "  安装型程序待备份：0 个 —— 若你确实装过程序，说明识别链路有问题（见下方各过滤阶段的日志）"
         }
+
+        # ⚠️ 即使 0 个也要写 programs.json：文件缺失无法区分「没跑」与「跑了但空」，
+        #    而 pre-restore 读 manifest.apps.programs 判断「上次备份过哪些」——
+        #    缺失会让跨运行的持久判定彻底断链（历史上就因此让程序本体永远抓不到）。
+        try {
+            Write-ProgramsManifest -Apps $programsCaptured -Path (Join-Path $Stage "programs\programs.json")
+        } catch { Warn "写程序清单失败：$_" }
+        Set-GhEnv ("SNAPSHOT_PROGRAMS_CAPTURED=" + @($programsCaptured).Count)
 
         Set-GhEnv ("SNAPSHOT_SHORTCUTS_CAPTURED=" + $scStats.candidates)
         Set-GhEnv ("SNAPSHOT_SHORTCUTS_SKIPPED="  + $scStats.skipped)
@@ -953,8 +1027,14 @@ if ($Push) {
     $rcCommon = @('--transfers','4','--checkers','8','--timeout','0','--contimeout','0',
                   '--retries','3','--low-level-retries','5','--stats-one-line','-v') + $maxDurArg
 
-    # ① 大目录（files / programs）：用 copy —— 只增不删、可断点续传，被中断也不会删远端
-    foreach ($big in @('files', 'programs')) {
+    # ① 大目录：用 copy —— 只增不删、可断点续传，被中断也不会删远端
+    #
+    # ⚠️ programs 必须排在 files 前面（真机踩过）：files 是大头（.workbuddy-ai 约 400MB +
+    #    Edge 约 100MB，按 139 的 0.45MB/s ≈ 20 分钟），一旦 --max-duration 到点，
+    #    排在后面的 programs 永远轮不到 → 远端永远没有 programs.json →
+    #    下次开机没程序可还原 → 桌面只剩图标、点开报「找不到目标」。
+    #    programs 体积小得多，但它是「程序本体能不能回来」的关键，优先保它。
+    foreach ($big in @('programs', 'files')) {
         $bigPath = Join-Path $Stage $big
         if (-not (Test-Path -LiteralPath $bigPath)) { continue }
         Say ("  推送大目录 {0}（copy，可续传）..." -f $big)
@@ -970,6 +1050,25 @@ if ($Push) {
         Say "推送完成"
         Set-GhEnv "SNAPSHOT_PUSH=OK"
 
+        # ---------- 关键文件回读校验 ----------
+        # 为什么单独查这几个：文件总数校验看不出「哪个」缺了。
+        # 真机踩过的坑就是 programs/ 整棵目录没上传（被 --max-duration 饿死），
+        # 而总文件数依然「看起来正常」—— 直到下次开机发现程序没还原。
+        $critical = @('manifest.json', 'programs/programs.json', 'apps/portable.json',
+                      'apps/installed-apps.json', 'apps/winget-export.json')
+        $missing  = New-Object System.Collections.Generic.List[string]
+        foreach ($cf in $critical) {
+            $found = (& $RcloneExe lsf (($Remote.TrimEnd('/')) + '/' + $cf) --timeout 0 --contimeout 0 2>$null | Out-String).Trim()
+            if ([string]::IsNullOrWhiteSpace($found)) { $missing.Add($cf) }
+        }
+        if ($missing.Count -eq 0) {
+            Say "  关键文件校验通过（manifest / programs / portable / apps 均已在远端）"
+        } else {
+            Warn ("  关键文件缺失（远端）：{0}" -f ($missing -join ', '))
+            Set-GhEnv "SNAPSHOT_VERIFY=PARTIAL"
+            foreach ($m in $missing) { $problems.Add("remote-missing:$m") }
+        }
+
         # 回读远端做校验：本地文件数/字节 vs 远端，给出「确实落盘」的日志证据
         try {
             $szJson = (& $RcloneExe size $Remote --json --timeout 0 --contimeout 0 2>$null | Out-String)
@@ -982,6 +1081,9 @@ if ($Push) {
                 if ($rCount -lt $totalFiles) {
                     Warn ("远端文件数少于本地（{0} < {1}）—— 可能有文件未上传成功" -f $rCount, $totalFiles)
                     Set-GhEnv "SNAPSHOT_VERIFY=PARTIAL"
+                } elseif ($missing.Count -gt 0) {
+                    # 关键文件缺失已经判过 PARTIAL，这里不要覆盖成 OK
+                    Say "远端总文件数达标，但关键文件仍缺失（见上）"
                 } else {
                     Say "远端校验通过：快照已完整落盘 139"
                     Set-GhEnv "SNAPSHOT_VERIFY=OK"

@@ -61,6 +61,7 @@
       "BrowserMetrics",
       "_失效快捷方式"
     ],
+    "_comment_excludeFilePatterns": "LOCK / LOG / LOG.old 是 Chromium 系浏览器(Edge/Chrome)的 LevelDB 运行时文件，运行时被独占持有：备份时 robocopy 复制失败(rc=9)、还原时覆盖失败(rc>=8) -> 整个 Edge 目录被误判为还原失败。它们无还原价值(浏览器自行重建)，故排除。切勿排除 CURRENT / MANIFEST-* / *.ldb / *.log —— 那是 LevelDB 数据本体。",
     "excludeFilePatterns": [
       "*.tmp",
       "*.temp",
@@ -69,12 +70,26 @@
       "*.swp",
       "*.crdownload",
       "*.part",
-      "_CloudRDP_*.txt"
+      "_CloudRDP_*.txt",
+      "LOCK",
+      "LOG",
+      "LOG.old"
     ],
     "_comment_maxTotalMB": "快照总大小上限（MB）。0 = 不限（本项目按需求设为不限）",
     "maxTotalMB": 0,
     "_comment_tombstones": "显式清理清单：列出的相对路径（相对暂存根，如 files/C/apps/old）会从远端快照删除。用于弥补「大目录用 rclone copy 不删远端」",
-    "tombstones": []
+    "tombstones": [],
+
+    "_comment_quiesce": "抓取/还原前需要临时关闭的程序：保证 SQLite(WAL)/LevelDB 落盘一致，避免 robocopy 部分失败。仅在非 -Quick 的全量快照执行，避免打断正在使用的会话。",
+    "quiesce": [
+      { "name": "msedge",     "gracefulSec": 15, "note": "Edge：History / Bookmarks / Preferences / Web Data 一致" },
+      { "name": "WorkBuddy*", "gracefulSec": 15, "note": "WorkBuddy：.workbuddy-ai 下 workbuddy.db 等 SQLite 一致" }
+    ],
+
+    "_comment_noExcludeDirs": "豁免排除清单：列出的目录只禁用 excludeDirNames（目录名排除），仍应用 excludeFilePatterns。用于「必须完整保留」的用户数据目录 —— 例：.workbuddy-ai 里的 cache/Temp 也要抓。",
+    "noExcludeDirs": [
+      "%RDPUSERPROFILE%\\.workbuddy-ai"
+    ]
   },
 
   "registry": {
@@ -118,7 +133,6 @@
     "captureInQuick": false,
     "scanRoots": [ "C:\\apps", "D:\\apps" ],
     "includePaths": [],
-    "excludePaths": [],
     "maxMBPerApp": 2048,
     "maxTotalMB": 8192,
     "excludePaths": [ "C:\\Program Files\\Unity Hub" ],
@@ -250,7 +264,7 @@
     "enforceEveryMinutes": 30
   },
 
-    "blockedApps": {
+  "blockedApps": {
       "_comment": "明确不要的程序（唯一事实源）：① 开机瘦身时真卸载（winget → ARP → 目录兜底）；② 从 winget 重装清单里剔除（防回潮）；③ 目录永不备份/永不还原。match 是 ARP DisplayName 的正则；wingetId 供 winget uninstall 用。",
       "enabled": true,
       "entries": [

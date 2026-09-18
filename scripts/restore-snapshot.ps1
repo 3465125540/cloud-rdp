@@ -67,11 +67,90 @@ $script:HasRegImportLib = $false
 if (Test-Path -LiteralPath $regImportLib) { . $regImportLib; $script:HasRegImportLib = $true }
 else { Write-Warning "[restore] 未找到 regimport-lib.ps1，注册表导入容错不可用" }
 
+# 快照一致性共享库：还原文件前优雅关闭目标程序（Edge / WorkBuddy）。
+# 为什么需要：程序运行时 SQLite(WAL)/LevelDB 被独占持有 → robocopy 覆盖失败（码 >= 8）
+# → 整个目录被判「还原失败」→ 桌面出现 _CloudRDP_还原失败.txt。
+$quiesceLib = Join-Path $PSScriptRoot "app-quiesce-lib.ps1"
+$script:HasQuiesceLib = $false
+if (Test-Path -LiteralPath $quiesceLib) { . $quiesceLib; $script:HasQuiesceLib = $true }
+else { Write-Warning "[restore] 未找到 app-quiesce-lib.ps1，还原前不会关闭占用程序" }
+
+# 被占用文件的容错复制库：robocopy 失败（码 >= 8）时用共享读写补写
+$lockCopyLib = Join-Path $PSScriptRoot "lockcopy-lib.ps1"
+$script:HasLockCopyLib = $false
+if (Test-Path -LiteralPath $lockCopyLib) { . $lockCopyLib; $script:HasLockCopyLib = $true }
+else { Write-Warning "[restore] 未找到 lockcopy-lib.ps1，robocopy 失败时不会尝试共享读写补写" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
 function Say([string]$m)  { Write-Host "[restore] $m" }
 function Warn([string]$m) { Write-Warning "[restore] $m" }
+
+# ---------------------------------------------------------------- 一致性 / 校验辅助
+
+# 还原文件前关闭占用程序（配置 files.quiesce）。返回一句话描述，供日志与 GITHUB_ENV 用。
+function Invoke-RestoreQuiesce {
+    param([string]$ConfigPath = '')
+    if (-not $script:HasQuiesceLib) { return 'no-lib' }
+    $specs = @(Get-QuiesceSpecs -ConfigPath $ConfigPath)
+    if ($specs.Count -eq 0) { return 'none' }
+    Say ("还原一致性：先关闭占用程序（{0}）" -f (($specs | ForEach-Object { $_.name }) -join ', '))
+    $q = Stop-AppForSnapshot -Specs $specs -Log { param($m) Say ("  " + $m) }
+    return $q.detail
+}
+
+# 还原后取证：用户最在意的两块数据是否真的回来了
+#   Edge 的 配置/历史/收藏夹（Bookmarks / History / Preferences / Web Data / Local State）
+#   .workbuddy-ai 的 SQLite 与设置（workbuddy.db / settings.json）
+# 为什么要有：这两块历史上都被「静默漏掉」过（Edge robocopy 码 9、程序本体从没被还原），
+# 光看「还原了几个目录」是发现不了的。
+function Get-RestoreEvidence {
+    param([string]$RdpUser)
+
+    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = '' }
+    try {
+        $home = Join-Path 'C:\Users' $RdpUser
+        $ud = Join-Path $home 'AppData\Local\Microsoft\Edge\User Data'
+        $need = @('Default\Bookmarks', 'Default\History', 'Default\Preferences', 'Default\Web Data', 'Local State')
+        $ok = 0
+        foreach ($n in $need) {
+            $p = Join-Path $ud $n
+            try { if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p -Force).Length -gt 0) { $ok++ } } catch { }
+        }
+        $out.edge = if ($ok -eq $need.Count) { 'OK' } elseif ($ok -gt 0) { 'PARTIAL' } else { 'MISSING' }
+        $out.edgeDetail = ("{0}/{1}" -f $ok, $need.Count)
+
+        $wa = Join-Path $home '.workbuddy-ai'
+        $need2 = @('workbuddy.db', 'settings.json')
+        $ok2 = 0
+        foreach ($n in $need2) {
+            $p = Join-Path $wa $n
+            try { if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p -Force).Length -gt 0) { $ok2++ } } catch { }
+        }
+        $out.wbai = if ($ok2 -eq $need2.Count) { 'OK' } elseif ($ok2 -gt 0) { 'PARTIAL' } else { 'MISSING' }
+        $out.wbaiDetail = ("{0}/{1}" -f $ok2, $need2.Count)
+    } catch { }
+    return $out
+}
+
+# 把取证结果同时写日志与 GITHUB_ENV
+function Write-RestoreEvidence {
+    param([string]$RdpUser, [string]$LogPath = '')
+    $ev = Get-RestoreEvidence -RdpUser $RdpUser
+    Say ("还原取证：Edge 配置/历史/收藏夹 {0}（{1}）| .workbuddy-ai {2}（{3}）" -f `
+         $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail)
+    Set-GhEnv ("EDGE_RESTORE=" + $ev.edge)
+    Set-GhEnv ("WBAI_RESTORE=" + $ev.wbai)
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        try {
+            ("[{0}] evidence edge={1}({2}) wbai={3}({4})" -f (Get-Date).ToString('o'), `
+             $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail) |
+                Out-File -LiteralPath $LogPath -Append -Encoding utf8
+        } catch { }
+    }
+    return $ev
+}
 
 function Get-Cfg($obj, $name, $fallback) {
     if ($null -eq $obj) { return $fallback }
@@ -120,13 +199,69 @@ function Get-AbsFromMirror {
     return ("{0}:\{1}" -f $parts[0], ($parts[1..($parts.Count - 1)] -join '\'))
 }
 
+# robocopy 失败后的「共享读写」补写（依赖 lockcopy-lib.ps1）
+# 为什么需要：robocopy 以独占方式打开目标（GENERIC_WRITE，无共享位），目标被浏览器 /
+# SQLite / 索引服务占用时必然失败（返回码 >= 8）；而 .NET 的 FileStream 两侧都带
+# FileShare.ReadWrite，可以照写不误。
+# LOCK / LOG / LOG.old 这类「无还原价值」的浏览器运行时文件不算失败（浏览器会自建）。
+function Invoke-SharedCopyRetry {
+    param([string]$Src, [string]$Dst)
+
+    $out = @{ tried = 0; ok = 0; failed = 0; ignored = 0; failures = @() }
+    if (-not (Get-Command Copy-FileShared -ErrorAction SilentlyContinue)) { return $out }
+    if (-not (Test-Path -LiteralPath $Src)) { return $out }
+
+    try {
+        $srcRoot = $Src.TrimEnd('\')
+        $files = @(Get-ChildItem -LiteralPath $srcRoot -Recurse -File -Force -ErrorAction SilentlyContinue)
+        foreach ($f in $files) {
+            $rel = $f.FullName.Substring($srcRoot.Length).TrimStart('\')
+            $target = Join-Path $Dst $rel
+
+            # 只在「目标缺失或大小不一致」时才补写，避免全量重写
+            $need = $true
+            if (Test-Path -LiteralPath $target) {
+                try { if ((Get-Item -LiteralPath $target -Force).Length -eq $f.Length) { $need = $false } } catch { }
+            }
+            if (-not $need) { continue }
+
+            if (Get-Command Test-IgnorableFileName -ErrorAction SilentlyContinue) {
+                if (Test-IgnorableFileName -Path $f.Name) { $out.ignored++; continue }
+            }
+
+            $out.tried++
+            $r = Copy-FileShared -Source $f.FullName -Destination $target
+            if ($r.ok) { $out.ok++ } else {
+                $out.failed++
+                if (@($out.failures).Count -lt 10) { $out.failures += ("{0}（{1}）" -f $rel, $r.reason) }
+            }
+        }
+    } catch { }
+    return $out
+}
+
 function Invoke-RobocopyRestore {
     param([string]$Src, [string]$Dst)
     if (-not (Test-Path -LiteralPath $Src)) { return -1 }
     New-Item -ItemType Directory -Force -Path $Dst | Out-Null
     # 注意：不加 /PURGE —— 只补回快照里的文件，不删除机器上新增的文件
     & robocopy $Src $Dst /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XJ 2>&1 | Out-Null
-    return $LASTEXITCODE
+    $code = $LASTEXITCODE
+
+    # 码 >= 8 = 有文件/目录没复制成 → 用共享读写补一遍，能救回来就不算失败
+    if ($code -ge 8) {
+        $r = Invoke-SharedCopyRetry -Src $Src -Dst $Dst
+        if ($r.tried -eq 0 -and $r.ignored -eq 0) {
+            Warn ("  robocopy 码 {0}：共享读写补写没有可处理项（可能失败的是目录而非文件）" -f $code)
+        } elseif ($r.failed -eq 0) {
+            Say ("  robocopy 码 {0} → 共享读写补写成功（补 {1} 个 / 忽略运行时文件 {2} 个）" -f $code, $r.ok, $r.ignored)
+            return 0
+        } else {
+            Warn ("  robocopy 码 {0}，共享读写补写后仍失败 {1} 个（补成功 {2} / 忽略 {3}）" -f $code, $r.failed, $r.ok, $r.ignored)
+            foreach ($x in @($r.failures)) { Warn ("    仍失败：{0}" -f $x) }
+        }
+    }
+    return $code
 }
 
 # ================================================================ 通用：拉取快照
@@ -181,6 +316,8 @@ function Invoke-MachineRestore {
 
     # ---------- 1. 机器级文件（排除 C:\Users\<RdpUser>\... ，那部分交给登录任务） ----------
     $userPrefix = ("C\Users\" + $RdpUser).ToLower()
+    # 覆盖文件前先关掉占用程序，否则 robocopy 覆盖失败（码 >= 8）→ 整目录被判还原失败
+    Set-GhEnv ("SNAP_QUIESCE=" + (Invoke-RestoreQuiesce -ConfigPath $ConfigPath))
     if ($doFiles) {
         foreach ($e in @($mf.files.entries)) {
             $rel = [string]$e.mirror
@@ -465,13 +602,16 @@ function Invoke-MachineRestore {
             try {
                 $scRes = Repair-Shortcuts -Dirs $scDirsToCheck.ToArray() `
                             -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
-                            -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir) `
+                            -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir, $ProgramsRoot) `
                             -ParkFolder $scParkFolder -ParkBroken:$scParkBroken
                 Say ("  快捷方式校验（公共桌面）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
                      $scRes.checked, $scRes.ok, $scRes.repaired, $scRes.parked, $scRes.skipped)
                 Set-GhEnv ("SNAPSHOT_SC_CHECKED="  + $scRes.checked)
                 Set-GhEnv ("SNAPSHOT_SC_REPAIRED=" + $scRes.repaired)
                 Set-GhEnv ("SNAPSHOT_SC_PARKED="   + $scRes.parked)
+                Set-GhEnv ("SHORTCUTS_CHECKED="    + $scRes.checked)
+                Set-GhEnv ("SHORTCUTS_REPAIRED="   + $scRes.repaired)
+                Set-GhEnv ("SHORTCUTS_PARKED="     + $scRes.parked)
             } catch { Warn "  快捷方式校验失败（可忽略）：$_" }
         } else { Warn "  未加载 programs-lib.ps1，跳过快捷方式校验" }
     } else { Say "  快捷方式校验已关闭（shortcuts.validateOnRestore=false）" }
@@ -490,7 +630,8 @@ function Invoke-MachineRestore {
                 Copy-Item -LiteralPath $ConfigPath -Destination $cfgSrc -Force -ErrorAction SilentlyContinue
             }
             # 共享库也要在 _tools 里，否则登录任务跑的 user 作用域会因缺库而静默降级
-            foreach ($lib in @("programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1", "regimport-lib.ps1")) {
+            foreach ($lib in @("programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1",
+                               "regimport-lib.ps1", "lockcopy-lib.ps1", "app-quiesce-lib.ps1")) {
                 $libDst = Join-Path $toolsDir $lib
                 if (-not (Test-Path -LiteralPath $libDst)) {
                     $libSrc = Join-Path $PSScriptRoot $lib
@@ -545,6 +686,10 @@ function Invoke-MachineRestore {
     Set-GhEnv ("SNAPSHOT_STATUS=" + $status)
     Set-GhEnv ("SNAPSHOT_RESTORED_DIRS=" + $restored)
     if ($problems.Count -gt 0) { Set-GhEnv ("SNAPSHOT_PROBLEMS=" + ($problems -join ',')) }
+
+    # 取证：Edge 配置/历史/收藏夹 + .workbuddy-ai 是否真的回来了
+    # （个人目录由 user 作用域还原，这里只当「早测」；登录任务的日志里有最终结论）
+    Write-RestoreEvidence -RdpUser $RdpUser -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null
 }
 
 # ================================================================ user 作用域
@@ -586,6 +731,8 @@ function Invoke-UserRestore {
 
     # ---------- 1. 个人目录文件 ----------
     $userPrefix = ("C\Users\" + $RdpUser).ToLower()
+    # 个人文件里就有 Edge User Data 与 .workbuddy-ai —— 这两个正是最容易被占用而覆盖失败的目标
+    Invoke-RestoreQuiesce -ConfigPath $ConfigPath | Out-Null
     if ($doFiles) {
         foreach ($e in @($mf.files.entries)) {
             $rel = [string]$e.mirror
@@ -674,11 +821,14 @@ function Invoke-UserRestore {
             try {
                 $scResU = Repair-Shortcuts -Dirs $scDirsU.ToArray() `
                             -ProgramsManifestPath (Join-Path $Stage "programs\programs.json") `
-                            -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir) `
+                            -AdditionalDirs @($env:CLOUDRDP_DATA_DIR, $PortableDir, $ProgramsRoot) `
                             -ParkFolder $scParkFolderU -ParkBroken:$scParkBrokenU `
                             -LogPath (Join-Path $SysDir "_state\user-restore.log")
                 Say ("  快捷方式校验（个人）：检查 {0} / 正常 {1} / 修复 {2} / 移入失效 {3} / 跳过 {4}" -f `
                      $scResU.checked, $scResU.ok, $scResU.repaired, $scResU.parked, $scResU.skipped)
+                Set-GhEnv ("SHORTCUTS_CHECKED="  + $scResU.checked)
+                Set-GhEnv ("SHORTCUTS_REPAIRED=" + $scResU.repaired)
+                Set-GhEnv ("SHORTCUTS_PARKED="   + $scResU.parked)
             } catch { Warn "  快捷方式校验失败（可忽略）：$_" }
         }
     }
@@ -705,6 +855,11 @@ function Invoke-UserRestore {
         ("[{0}] status={1} restored={2} problems={3}" -f (Get-Date).ToString('o'), $status, $restored, (($problems | Select-Object -First 20) -join ',')) |
             Out-File -LiteralPath (Join-Path $logDir "user-restore.log") -Append -Encoding utf8
     } catch { }
+
+    # ---------- 5c. 取证：Edge 配置/历史/收藏夹 + .workbuddy-ai 是否真的回来了 ----------
+    # 这里是权威结论（个人目录就是在 user 作用域还原的）。光看「还原了几个目录」
+    # 发现不了「Edge 历史缺了」「程序本体没回来」这类静默漏项。
+    try { Write-RestoreEvidence -RdpUser $RdpUser -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null } catch { }
 
     # ---------- 6. 只在成功时自注销；失败则保留任务，下次登录自动重试 ----------
     if ($problems.Count -eq 0) {

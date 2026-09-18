@@ -79,3 +79,70 @@ function Get-UserHiveRoot {
     }
     return [pscustomobject]@{ sid = $sid; loaded = $false; root = $null; regRoot = $null }
 }
+
+# 把该用户的 hive 变成「可扫描/可写」的状态，返回统一的根
+#   已加载（用户已登录）→ 直接用 HKU\<SID>，**不 load 也不 unload**
+#   未加载             → reg load HKU\<LoadName> C:\Users\<user>\NTUSER.DAT，用后必须 Dismount
+#
+# 为什么需要（真机实测的坑）：
+#   备份跑在 runneradmin 身份下，`HKCU:` 是 runneradmin 的 hive —— **看不到 RDP 用户的
+#   卸载项**，于是「用户级安装」（程序体在 %LOCALAPPDATA%\<厂商>、卸载项在用户 HKCU）
+#   整类程序都不会被备份。还原后就只剩桌面图标、点开报「找不到目标」。
+#
+# .OUTPUTS
+#   [pscustomobject]@{ ok; root; regRoot; loaded; mountedByUs; sid; note }
+#     root    = 'HKU\<SID>' 或 'HKU\<LoadName>'   —— 给 reg.exe / PowerShell 注册表路径用
+#     regRoot = 'HKEY_USERS\<SID>' 或 'HKEY_USERS\<LoadName>' —— 给 .reg 文件正文用
+function Mount-RdpUserHive {
+    param(
+        [string]$RdpUser,
+        [string]$LoadName = '__CRDP_USR'
+    )
+
+    $sid = Get-RdpUserSid -RdpUser $RdpUser
+    $res = [pscustomobject]@{
+        ok = $false; root = $null; regRoot = $null
+        loaded = $false; mountedByUs = $false; sid = $sid; note = ''
+    }
+    if (-not $sid) { $res.note = '取不到该用户的 SID'; return $res }
+
+    if (Test-UserHiveLoaded -Sid $sid) {
+        $res.ok = $true
+        $res.loaded = $true
+        $res.root = ('HKU\' + $sid)
+        $res.regRoot = ('HKEY_USERS\' + $sid)
+        $res.note = 'hive 已加载（用户已登录）—— 直接读，不 load/unload'
+        return $res
+    }
+
+    $dat = 'C:\Users\' + $RdpUser + '\NTUSER.DAT'
+    if (-not (Test-Path -LiteralPath $dat)) { $res.note = ('找不到 ' + $dat); return $res }
+
+    & reg.exe load ('HKU\' + $LoadName) "$dat" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { $res.note = ('reg load 失败（码 ' + $LASTEXITCODE + '）'); return $res }
+
+    $res.ok = $true
+    $res.loaded = $false
+    $res.mountedByUs = $true
+    $res.root = ('HKU\' + $LoadName)
+    $res.regRoot = ('HKEY_USERS\' + $LoadName)
+    $res.note = ('已 reg load ' + $dat)
+    return $res
+}
+
+# 卸载「我们自己 load 的」hive
+# ⚠️ 用户自己的 hive（mountedByUs=$false）**绝不能 unload** —— 那会让他的会话直接崩掉。
+function Dismount-RdpUserHive {
+    param(
+        $Mount,
+        [string]$LoadName = '__CRDP_USR'
+    )
+    if ($null -eq $Mount) { return }
+    if (-not $Mount.mountedByUs) { return }
+    try {
+        # reg unload 在有未释放句柄时会失败（错误 5）—— 先逼 GC 释放 .NET 侧句柄
+        [gc]::Collect()
+        [gc]::WaitForPendingFinalizers()
+        & reg.exe unload ('HKU\' + $LoadName) 2>&1 | Out-Null
+    } catch { }
+}

@@ -220,11 +220,23 @@ jobs:
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_CC: ${{ secrets.MAIL_CC }}
         run: |
-          # 密码已改走 Secret（仓库是公开的，明文会永久留在 git 历史里）。
-          # 日志里会被 GitHub 自动打码成 ***，所以这里主动把连接信息发到用户邮箱。
+          # 账号密码按用户要求写死在 workflow（明文打印、方便直接取用）。
+          # 同时主动发一封到用户邮箱，省得每次去翻 Actions 日志。
           # 正文写在脚本里（不放 YAML here-string，免得被 YAML 缩进规则坑）。
           # 未配置 MAIL_* 时脚本会打印提示并 exit 0 —— 不会让开机失败。
-          .\scripts\send-connection-mail.ps1
+          # -LogPath：发信失败会被 continue-on-error 静默吞掉，落盘才查得到原因。
+          .\scripts\send-connection-mail.ps1 -LogPath "$env:CLOUDRDP_SYS_DIR\_state\mail.log"
+      # ---------------------------------------------------------------- 提前启动中文环境
+      # 为什么放在瘦身之前：Install-Language 要联网下载 FoD 语言包，实测每次 30~43 分钟，
+      # 是整个开机流程里最慢的一步。提到最前面 + 「5 分钟封顶、超时转后台」之后，
+      # 它能在后面瘦身/拉数据/还原的 ~40 分钟里悄悄装完，而开机流程一步都不多等。
+      # 用户级语言键这里先写一遍；第 8 步「预还原」会导入 HKCU-Software.reg 把它覆盖掉，
+      # 所以第 8b 步还要再补写一次（幂等、秒级）。
+      - name: 0f. 设置中文 + 微软拼音输入法（5 分钟封顶，超时转后台）
+        timeout-minutes: 6            # 硬兜底：脚本自己 5 分钟就放行，这层防卡死
+        continue-on-error: true       # 被超时杀掉也不阻断后续步骤
+        shell: pwsh
+        run: .\scripts\setup-chinese.ps1
       - name: 1. 开机瘦身（删镜像自带大件，约 70 GB）
         shell: pwsh
         run: .\scripts\slim-image.ps1
@@ -254,9 +266,12 @@ jobs:
       - name: 8. 预还原（校验 → 规划 → 准备 → 驱动全量还原）
         shell: pwsh
         run: .\scripts\pre-restore.ps1 -Pull
-      - name: 9. 设置中文 + 微软拼音输入法（登录前生效）
+      # 预还原会导入 registry\user\HKCU-Software.reg（整棵 HKCU\Software），
+      # 把 0f 步写的用户级语言/输入法键覆盖掉 —— 所以这里必须再补写一次（幂等、秒级）。
+      - name: 8b. 补写用户语言键（预还原会覆盖，需再写一次）
+        continue-on-error: true
         shell: pwsh
-        run: .\scripts\setup-chinese.ps1
+        run: .\scripts\setup-chinese.ps1 -UserHiveOnly
       - name: 10. 后台重装软件（异步，不阻塞连接）
         shell: pwsh
         run: .\scripts\reinstall-apps.ps1 -Background
@@ -325,6 +340,40 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($pgN) -and $pgN -ne "0") {
             Write-Host "  安装型程序   : 上次快照含 $pgN 个（实体落 D 盘，原安装路径用 junction 指过来）" -ForegroundColor DarkGray
           }
+          # ---- 中文语言包（0f 步；超时转后台）----
+          $lp = $env:LANGPACK
+          if (-not [string]::IsNullOrWhiteSpace($lp)) {
+            $lpc = "DarkGray"
+            if ($lp -eq "OK" -or $lp -eq "PRESENT" -or $lp -eq "OK-CAPABILITY") { $lpc = "Green" }
+            elseif ($lp -eq "TIMEOUT_BACKGROUND") { $lpc = "Yellow" }
+            elseif ($lp -eq "FAILED") { $lpc = "Red" }
+            $lpNote = ""
+            if ($lp -eq "TIMEOUT_BACKGROUND") { $lpNote = "（已转后台继续装，装完重新登录即生效）" }
+            Write-Host "  中文语言包   : $lp$lpNote" -ForegroundColor $lpc
+          }
+          # ---- 还原取证：用户最在意的两块数据 ----
+          $er = $env:EDGE_RESTORE
+          if (-not [string]::IsNullOrWhiteSpace($er)) {
+            $erc = if ($er -eq "OK") { "Green" } elseif ($er -eq "MISSING") { "Yellow" } else { "DarkGray" }
+            Write-Host "  Edge 数据    : $er   (配置/历史/收藏夹；cookie/密码跨机解不开，靠账号同步)" -ForegroundColor $erc
+          }
+          $wr = $env:WBAI_RESTORE
+          if (-not [string]::IsNullOrWhiteSpace($wr)) {
+            $wrc = if ($wr -eq "OK") { "Green" } elseif ($wr -eq "MISSING") { "Yellow" } else { "DarkGray" }
+            Write-Host "  .workbuddy-ai: $wr   (对话记录/会话数据库)" -ForegroundColor $wrc
+          }
+          $scP = $env:SHORTCUTS_PARKED
+          if (-not [string]::IsNullOrWhiteSpace($scP) -and $scP -ne "0") {
+            Write-Host "  失效快捷方式 : $scP 个已移入「_失效快捷方式」（目标程序没能还原）" -ForegroundColor Yellow
+          }
+          # ---- 邮箱投递结果 ----
+          $mr = $env:MAIL_RESULT
+          if (-not [string]::IsNullOrWhiteSpace($mr)) {
+            $mrc = "DarkGray"
+            if ($mr -eq "OK") { $mrc = "Green" } elseif ($mr -like "FAIL*") { $mrc = "Red" }
+            Write-Host "  连接信息邮件 : $mr   (诊断日志 $sysDir\_state\mail.log)" -ForegroundColor $mrc
+          }
+          Write-Host "  快照一致性   : $env:SNAP_QUIESCE  (全量快照前关闭占用程序，保证 SQLite/LevelDB 落盘一致)" -ForegroundColor DarkGray
           $scC = $env:SNAPSHOT_SHORTCUTS_CAPTURED
           if (-not [string]::IsNullOrWhiteSpace($scC) -and $scC -ne "0") {
             $scM = $env:SNAPSHOT_SHORTCUTS_MB
