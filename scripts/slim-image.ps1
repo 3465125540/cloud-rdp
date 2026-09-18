@@ -134,7 +134,13 @@ function Test-NeverDelete {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
     $p = $Path.TrimEnd('\')
     if ($p -notmatch '^[A-Za-z]:\\') { return $true }                 # 必须绝对路径
-    if (@($p -split '\\').Count -lt 3) { return $true }               # 禁止盘根（C:\、C:\Foo）
+    # 只拦盘根（C:\）—— 不再要求「层级>=3」。
+    # 真机踩过（run 35309039120 日志）：C:\Android、C:\hostedtoolcache、C:\azureCli、
+    # C:\Strawberry、C:\rtools45 全是 2 段路径，被旧规则一律拒删 → 白丢约 25 GB，
+    # 瘦身后 C 盘停在 34%（目标 30%）。这与配置里把它们列为 targets 的意图直接矛盾。
+    # 安全网仍在：下面 $protect 的「就是它 / 在它内部 / 是它的父目录」三重判定会把
+    # C:\Program Files、C:\ProgramData 这类宽泛父目录挡掉（名单里有它们的子目录）。
+    if (@($p -split '\\').Count -lt 2) { return $true }
     $pl = $p.ToLower()
     foreach ($x in $protect) {
         $xl = $x.ToLower()
@@ -368,6 +374,7 @@ $deleted = 0
 $skipped = 0
 $guarded = 0
 $failed  = 0
+$failedPaths = New-Object System.Collections.Generic.List[string]
 
 foreach ($t in $targetList) {
     if (-not (Test-Path -LiteralPath $t)) { $skipped++; continue }
@@ -391,6 +398,7 @@ foreach ($t in $targetList) {
         Say ("  已删除 {0}  （释放 {1:N1} GB）" -f $t, ($freed / 1GB))
     } else {
         $failed++
+        $failedPaths.Add($t)
         Note ("  删除未完成（可能被占用）：{0}" -f $t)
     }
 }
@@ -468,6 +476,36 @@ if ($script:HasUninstallLib -and @($blockedApps).Count -gt 0) {
          $arpCleaned, $arpFailed, $dirsCleared, $dirsLeft)
 } else {
     Say "残留清理：跳过（未加载卸载库，或 blockedApps 清单为空）"
+}
+
+# ---------------------------------------------------------------- ⑤ 失败目标重试（锁可能已释放）
+# 为什么单独一轮：② 里删不掉的目录多半是被占用（服务 / 句柄）。到这里已经过
+# 卸载（①）+ 清空（③）+ 残留清理（④），占用者大多已退出，重试一次往往就成功了。
+# 真机数据（run 35309039120）：② 阶段 3 个失败 —— C:\Program Files\Microsoft SDKs、
+# C:\Program Files (x86)\MSBuild、C:\Program Files\Microsoft SQL Server。
+if (-not $DryRun -and $failedPaths.Count -gt 0) {
+    Stop-Lockers
+    Say ("重试删除：{0} 个上次未完成的目标" -f $failedPaths.Count)
+    $retryOk = 0; $retryFreed = [long]0
+    $still = New-Object System.Collections.Generic.List[string]
+    foreach ($t in @($failedPaths)) {
+        if (-not (Test-Path -LiteralPath $t)) { $retryOk++; continue }
+        if (Test-NeverDelete -Path $t) { continue }
+        $f0 = Get-FreeBytes 'C'
+        $ok = Remove-BigTree -Path $t
+        $f1 = Get-FreeBytes 'C'
+        $freed = $f1 - $f0
+        if ($freed -gt 0) { $retryFreed += $freed }
+        if ($ok) { $retryOk++; Say ("  重试成功 {0}  （释放 {1:N1} GB）" -f $t, ($freed / 1GB)) }
+        else { $still.Add($t) }
+    }
+    $deleted += $retryOk
+    $failed = $still.Count
+    Say ("  重试结果：成功 {0} / 仍失败 {1}" -f $retryOk, $still.Count)
+    foreach ($t in $still) { Note ("  仍删不掉：{0}" -f $t) }
+    Set-GhEnv ("SLIM_RETRY_OK="   + $retryOk)
+    Set-GhEnv ("SLIM_RETRY_LEFT=" + $still.Count)
+    Set-GhEnv ("SLIM_RETRY_GB="   + [math]::Round($retryFreed / 1GB, 1))
 }
 
 # ---------------------------------------------------------------- 附加优化
