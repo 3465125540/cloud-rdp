@@ -29,9 +29,9 @@ on:
         required: false
         default: '0'
   schedule:
-    # 早场：北京 8:30 开机（UTC 00:30）→ 跑到 11:30（UTC 03:30）
+    # 早场：北京 8:30 开机（UTC 00:30）→ 跑满 6 小时
     - cron: '30 0 * * *'
-    # 午场：北京 13:30 开机（UTC 05:30）→ 跑到 17:30（UTC 09:30）
+    # 午场：北京 13:30 开机（UTC 05:30）→ 跑满 6 小时
     - cron: '30 5 * * *'
 
 # 防止重复触发堆积
@@ -522,18 +522,13 @@ jobs:
               $stop = $now.AddMinutes($mins)
               Write-Host "[keepalive] 手动触发：保活 $mins 分钟，预计 $($stop.ToString('HH:mm')) UTC 结束"
           } else {
-              $d  = $now.Date
-              $b1 = $d.AddHours(3).AddMinutes(30)      # 11:30 北京
-              $b2 = $d.AddHours(9).AddMinutes(30)      # 17:30 北京
-              if     ($now -lt $b1) { $stop = $b1 }
-              elseif ($now -lt $b2) { $stop = $b2 }
-              else                  { $stop = $now.AddMinutes(60) }
-              $winMin = [int][math]::Floor(($stop - $now).TotalMinutes)
-              if ($winMin -gt $maxKeepalive) {
-                  $stop = $now.AddMinutes($maxKeepalive)
-                  Write-Host "[keepalive] 窗口还剩 $winMin 分钟 > 上限 $maxKeepalive 分钟 → 收敛"
-              }
-              Write-Host "[keepalive] 定时触发：跑到 $($stop.ToString('HH:mm')) UTC 自动停止"
+              # 定时场：不再按下班点提前收工，直接跑满到 job 硬上限。
+              # 旧逻辑是「早场跑到 11:30 北京、午场跑到 17:30 北京，过了 17:30 只保活 60 分钟」，
+              # 但 cron 触发本身常被 GitHub 延迟 4~5 小时，保活开始时往往已过下班点，
+              # 结果只跑 60 分钟就关机，白白浪费 6 小时额度（实测 run 35435378079 只 2.5h）。
+              # 现在统一跑满 maxKeepalive（= hardStop - now，到硬上限前留 8 分钟收尾）。
+              $stop = $now.AddMinutes($maxKeepalive)
+              Write-Host "[keepalive] 定时触发：跑满 $maxKeepalive 分钟（到硬上限），预计 $($stop.ToString('HH:mm')) UTC 自动停止"
           }
 
           # 收尾在「保活结束前 TAIL_RESERVE 分钟」后台启动：
