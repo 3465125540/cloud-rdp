@@ -155,9 +155,32 @@ jobs:
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "C:\tailscale.msi" -UseBasicParsing
           Start-Process msiexec -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
           Start-Sleep -Seconds 5
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server"
-          Start-Sleep -Seconds 8
-          $ts_ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+
+          # up 是异步的（协商 authkey + 注册控制平面），但退出码能反映「命令是否被接受」。
+          # 失败（authkey 无效/过期/网络不通）时立刻报错，别让后面拿不到 IP 时崩溃得莫名其妙。
+          & $ts up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server" 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+              throw "tailscale up 失败（返回码 $LASTEXITCODE）—— 检查 TAILSCALE_AUTHKEY 是否有效/过期"
+          }
+
+          # 轮询等 IP 就绪：机器要几秒~几十秒才能拿到 100.x IP（state 从 NoState -> Running）。
+          # 之前固定 Start-Sleep 8 秒就 ip -4，赶上注册慢时 ip -4 返回空 → $null.Trim() 直接崩整个 job。
+          $ts_ip = ''
+          $ipDeadline = (Get-Date).ToUniversalTime().AddSeconds(90)
+          while ((Get-Date).ToUniversalTime() -lt $ipDeadline) {
+              Start-Sleep -Seconds 5
+              $raw = (& $ts ip -4 2>$null | Select-Object -First 1)
+              if ($raw) {
+                  $ts_ip = ([string]$raw).Trim()
+                  if ($ts_ip) { break }
+              }
+          }
+          if ([string]::IsNullOrWhiteSpace($ts_ip)) {
+              $st = (& $ts status 2>&1 | Out-String)
+              throw ("90 秒内没拿到 Tailscale IP（state={0}）—— 可能 authkey 失效或网络受限" -f $st.Trim())
+          }
+          Write-Host "[0c] Tailscale IP: $ts_ip"
           "TS_IP=$ts_ip" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
 
           # 「可连」时刻：供 0d 打印拿到 IP 的耗时、13 打印就绪总耗时
