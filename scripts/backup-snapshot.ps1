@@ -74,6 +74,13 @@ $script:HasQuiesceLib = $false
 if (Test-Path -LiteralPath $quiesceLib) { . $quiesceLib; $script:HasQuiesceLib = $true }
 else { Write-Warning "[snapshot] 未找到 app-quiesce-lib.ps1，快照前不会关闭占用程序" }
 
+# 被占用文件的容错复制库：robocopy 因独占（浏览器 LevelDB / workbuddy.db 等）复制失败时，
+# 用双向 FileShare.ReadWrite 补写这些文件 —— quick 快照不 quiesce，正是靠它兜底。
+$lockcopyLib = Join-Path $PSScriptRoot "lockcopy-lib.ps1"
+$script:HasLockcopyLib = $false
+if (Test-Path -LiteralPath $lockcopyLib) { . $lockcopyLib; $script:HasLockcopyLib = $true }
+else { Write-Warning "[snapshot] 未找到 lockcopy-lib.ps1，被占用文件将无法补写" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -120,8 +127,28 @@ function Invoke-Robocopy {
             '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XJ', '/XO')
     if ($ExcludeDirs  -and $ExcludeDirs.Count  -gt 0) { $rc += '/XD'; $rc += $ExcludeDirs }
     if ($ExcludeFiles -and $ExcludeFiles.Count -gt 0) { $rc += '/XF'; $rc += $ExcludeFiles }
-    & robocopy @rc 2>&1 | Out-Null
-    return $LASTEXITCODE
+    $out = @(& robocopy @rc 2>&1)
+    $code = $LASTEXITCODE
+
+    # 被占用文件补写：robocopy 以独占方式打开目标，遇到浏览器 LevelDB / workbuddy.db 等
+    # 被占用的文件会失败（返回码 >=8）。quick 快照不 quiesce，正靠这里用
+    # FileShare.ReadWrite 兜底补写，把「差 N 文件」压到 0（或只剩真正锁死的）。
+    if ($script:HasLockcopyLib -and $code -ge 8) {
+        $failed = @(Get-RobocopyFailedFile -RobocopyOutput $out)
+        $fixed  = 0
+        foreach ($fp in $failed) {
+            $relF = Get-RelPathUnder -Path $fp -Root $Src
+            if ([string]::IsNullOrWhiteSpace($relF)) { continue }
+            $dstF = Join-Path $Dst $relF
+            $r = Copy-FileShared -Source $fp -Destination $dstF
+            if ($r.ok) { $fixed++ }
+        }
+        if ($fixed -gt 0) {
+            Say ("    被占用文件补写：{0}/{1} 个（robocopy 码 {2}）" -f $fixed, $failed.Count, $code)
+        }
+        # 补写后重算码：仍有可能有真正锁死、补写也失败的文件，保留原码让上层继续计数
+    }
+    return $code
 }
 
 function Get-TreeSize {
@@ -420,8 +447,13 @@ $installedApps    = @()
 $portableCaptured = @()
 $wingetCount      = 0
 
-if (-not $Quick) {
-    if ([bool](Get-Cfg $cfg.apps 'wingetExport' $true)) {
+# 已装软件清单【始终生成】，不再受 -Quick 限制。
+# 真机踩过的坑：quick 快照若跳过这里，则 $Stage\apps 下没有 installed-apps.json /
+# winget-export.json，而下面推送时用 rclone sync（远端镜像本地）会把远端这两个文件
+# 也一并删掉 → 远端永远缺软件清单 → 下次开机「装了哪些软件」的信息丢失，
+# 且每次 quick 快照都误报「关键文件缺失」。这两个操作开销小（uninstall 扫描几秒、
+# winget 本地导出几十秒），quick 每 60 分钟一次完全可接受。
+if ([bool](Get-Cfg $cfg.apps 'wingetExport' $true)) {
         $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
         if ($wg) {
             $out = Join-Path $Stage "apps\winget-export.json"
@@ -479,7 +511,6 @@ if (-not $Quick) {
         $installedApps | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $Stage "apps\installed-apps.json") -Encoding UTF8
         Say ("  已装软件扫描：{0} 项" -f $installedApps.Count)
     }
-}
 
 # ---------------------------------------------------------------- 3b. 可移动程序（识别 + 搬运）
 
@@ -493,6 +524,17 @@ if (-not $portableEnabled) {
 }
 elseif (-not $doPortable) {
     Say "  可移动程序：quick 模式跳过（portable.captureInQuick=false）"
+    # ⚠️ 但 quick 快照仍要「带上上一份 portable.json」：下面推送用 rclone sync（远端镜像本地），
+    #    如果 Stage\apps 里没有 portable.json，sync 会把远端上一份 full 快照写好的 portable.json
+    #    也删掉 → 远端永远缺便携清单。这里从数据目录的 _manifest.json 回填（持久，不被清空）。
+    try {
+        $prevManifest = Join-Path $PortableDir "_manifest.json"
+        if (Test-Path -LiteralPath $prevManifest) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $Stage "apps") | Out-Null
+            Copy-Item -LiteralPath $prevManifest -Destination (Join-Path $Stage "apps\portable.json") -Force -ErrorAction Stop
+            Say "  可移动程序清单：沿用上一份 _manifest.json"
+        }
+    } catch { Warn "回填 portable.json 失败（可忽略）：$_" }
 }
 elseif (-not (Get-Command Get-PortableApps -ErrorAction SilentlyContinue)) {
     Warn "未加载 portable-lib.ps1，跳过可移动程序采集"
