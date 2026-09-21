@@ -244,7 +244,9 @@ $timeoutMs = $TimeoutSec * 1000
 #   [rcpt-to] 收件人已接受 → [data] FAILED 期望 250，实际 450：450 ... Mail rejected, please try again
 # 5xx（含认证失败 535）是永久错误，直接失败，不白耗开机时间。
 $maxAttempts = if ($env:MAIL_MAX_ATTEMPTS) { [int]$env:MAIL_MAX_ATTEMPTS } else { 4 }
-$backoffSec  = if ($env:MAIL_BACKOFF_SEC) { @($env:MAIL_BACKOFF_SEC -split ',' | ForEach-Object { [int]$_.Trim() }) } else { @(20, 60, 120, 180) }
+# 灰名单窗口通常是「几分钟」：首次发信 450 后，20s 就重连仍会被服务器掐断 TLS 握手。
+# 所以第一次退避至少 60s，逐级加长，避免在灰名单窗口内做无谓重连。
+$backoffSec  = if ($env:MAIL_BACKOFF_SEC) { @($env:MAIL_BACKOFF_SEC -split ',' | ForEach-Object { [int]$_.Trim() }) } else { @(60, 120, 240, 360) }
 $attempt     = 0
 
 while ($true) {
@@ -343,19 +345,27 @@ while ($true) {
     } catch {
         $msg = $_.Exception.Message
         Write-MLog ("FAILED 阶段={0} 错误={1}" -f $script:Stage, $msg)
-        # 常见错因直给提示，免得还要人去猜
-        if ($msg -match '(?i)5\.7\.|535|534|authentication|认证|AUTH') {
+        # 错误分类：按「失败阶段 + 精确信号」，别用宽泛关键字。
+        # 教训：AuthenticateAsClient 是 TLS 握手方法，它抛错 = 连接被服务器重置/未响应
+        #       （灰名单限流：首次发信 450 后短时间重连被掐断），跟「授权码」无关。
+        #       旧代码用 authentication/AUTH 关键字把它误判成「认证失败」，误导用户。
+        $isAuthFail = ($msg -match '实际\s+53[45]') -or `
+                      ($script:Stage -eq 'auth' -and $msg -match '(?i)auth')
+        $isTlsReset = $msg -match '(?i)AuthenticateAsClient|Unable to read data|failed to respond|connection attempt failed|reset|forcibly'
+        if ($isAuthFail) {
             Write-MLog '  → 认证失败：多半是「授权码」不对，或邮箱后台没开启 SMTP/客户端授权码'
+        } elseif ($isTlsReset) {
+            Write-MLog '  → 连接被服务器重置：灰名单/限流（首次发信 450 后，短时间重连会被掐断），稍后重试即通'
         } elseif ($msg -match '(?i)timeout|超时') {
             Write-MLog '  → 超时：端口可能被网络策略屏蔽（试 465/587；QQ/163/139 默认 465）'
         } elseif ($msg -match '(?i)ssl|tls|证书|certificate') {
             Write-MLog '  → TLS 协商失败：确认端口与加密方式匹配（465=隐式 SSL，587=STARTTLS）'
         }
-        # 值不值得重试：响应码 4xx，或超时 / 对端断连（5xx 与认证失败是永久错误）
+        # 值不值得重试：响应码 4xx，或超时 / 对端断连 / 连接被重置（5xx 与认证失败是永久错误）
         $rc = 0
         if ($msg -match '实际\s+(\d{3})') { $rc = [int]$Matches[1] }
         $transient = (($rc -ge 400) -and ($rc -lt 500)) -or `
-                     ($msg -match '(?i)timeout|超时|EOF|连接被对端关闭|forcibly|broken pipe|reset by peer')
+                     ($msg -match '(?i)timeout|超时|EOF|连接被对端关闭|forcibly|broken pipe|reset by peer|Unable to read data|failed to respond|connection attempt failed')
         if ($transient -and $attempt -lt $maxAttempts) {
             $retry = $true
         } else {
