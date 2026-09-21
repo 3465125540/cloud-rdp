@@ -279,6 +279,7 @@ jobs:
         shell: pwsh
         env:
           ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .\scripts\setup-alist.ps1
       - name: 6. （可选）迁移 139 老路径到 AI文件库
         shell: pwsh

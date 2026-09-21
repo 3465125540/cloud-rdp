@@ -62,17 +62,53 @@ function Wait-Http([string]$Url, [int]$TimeoutSec = 90) {
 New-Item -ItemType Directory -Force -Path $AlistDir | Out-Null
 if (-not (Test-Path $AlistExe)) {
     Write-Host "[AList 1/5] 下载 Windows 版..."
-    $api = "https://api.github.com/repos/AlistGo/alist/releases/latest"
-    try {
-        $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "gh-actions" }
-    } catch {
-        Write-Host "[AList] AlistGo/alist 拉取失败，回退 alist-org/alist"
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/alist-org/alist/releases/latest" -Headers @{ "User-Agent" = "gh-actions" }
-    }
-    $asset = $release.assets | Where-Object { $_.name -match "windows-amd64" -and $_.name -match "\.zip$" } | Select-Object -First 1
-    if (-not $asset) { throw "未找到 AList windows-amd64 发布包" }
+
+    # 下载策略（2026-09-21 真机踩坑）：
+    #   匿名调 api.github.com 只有 60 次/小时/IP 的额度，GitHub runner 的出口 IP 是共享的，
+    #   很容易被打满 → 报 "API rate limit exceeded" 直接挂。
+    #   所以改为「latest 直链优先」：releases/latest/download/<固定资产名> 是 302 重定向，
+    #   不经过 api.github.com，不受 rate limit 约束。资产名 alist-windows-amd64.zip 稳定不变。
+    #   直链失败再退回 API（带 GITHUB_TOKEN 认证，认证限流 5000/h）。
     $zip = Join-Path $AlistDir "alist.zip"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+    $downloaded = $false
+
+    # ① 直链优先（最稳，绕过 API rate limit）。AlistGo 是权威源，alist-org 是镜像，放前面。
+    $directUrls = @(
+        "https://github.com/AlistGo/alist/releases/latest/download/alist-windows-amd64.zip",
+        "https://github.com/alist-org/alist/releases/latest/download/alist-windows-amd64.zip"
+    )
+    foreach ($u in $directUrls) {
+        try {
+            Write-Host "[AList] 直链下载：$u"
+            Invoke-WebRequest -Uri $u -OutFile $zip -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
+            if ((Get-Item -LiteralPath $zip).Length -gt 1MB) { $downloaded = $true; break }
+        } catch {
+            Write-Host "[AList] 直链失败：$($_.Exception.Message)"
+        }
+    }
+
+    # ② 直链都失败，退回 API（认证拿确切资产 URL）
+    if (-not $downloaded) {
+        $headers = @{ "User-Agent" = "gh-actions" }
+        if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+            $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+        }
+        foreach ($repo in @("AlistGo/alist", "alist-org/alist")) {
+            try {
+                Write-Host "[AList] API 拉取 release：$repo"
+                $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers
+                $asset = $release.assets | Where-Object { $_.name -match "windows-amd64" -and $_.name -match "\.zip$" } | Select-Object -First 1
+                if ($asset) {
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+                    if ((Get-Item -LiteralPath $zip).Length -gt 1MB) { $downloaded = $true; break }
+                }
+            } catch {
+                Write-Host "[AList] API 拉取失败（$repo）：$($_.Exception.Message)"
+            }
+        }
+    }
+
+    if (-not $downloaded) { throw "AList 下载失败（直链与 API 均失败）" }
     Expand-Archive -Path $zip -DestinationPath $AlistDir -Force
     if (-not (Test-Path $AlistExe)) { throw "AList 解压失败，未找到 $AlistExe" }
 }
