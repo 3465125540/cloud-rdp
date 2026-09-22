@@ -13,3 +13,10 @@ Thumbs.db
 .env
 *.secret
 rclone.conf
+
+# 智能体工作台：本地配置（含本机路径/凭据指向），不入库
+workbench/config.json
+
+# Python 缓存
+__pycache__/
+*.pyc

@@ -1,0 +1,47 @@
+{
+  "_README": [
+    "工作台配置。本文件不参与版本控制（.gitignore 已排除 config.json），",
+    "因为里面可能有本机路径/凭据指向。改完重启服务生效。",
+    "留空 = 用内置默认值；默认值在 server.py 的 DEFAULT_CONFIG。"
+  ],
+
+  "host": "127.0.0.1",
+  "port": 8787,
+  "auto_refresh_seconds": 30,
+
+  "repo": "3465125540/cloud-rdp",
+  "ref": "main",
+
+  "token_file": "",
+
+  "proxy": "auto",
+  "proxy_probe": "127.0.0.1:7890",
+  "proxy_hosts": [],
+  "first_try_timeout": 15,
+  "http_timeout": 30,
+
+  "pool_config": "scripts/pool-config.json",
+  "state_branch": "pool-state",
+  "state_path": "state/pool-state.json",
+
+  "workflows": {
+    "keepalive": "windows-rdp.yml",
+    "coordinator": "pool-coordinator.yml"
+  },
+  "run_limit": 25,
+  "cache_seconds": 20,
+
+  "tailscale_exe": "C:\\Program Files\\Tailscale\\tailscale.exe",
+  "machine_prefix": "github-rdp-server",
+  "smb_share": "D$",
+  "smb_base": "D:\\cloudrdp-sys",
+  "snapshot_stale_minutes": 90,
+
+  "rdp_user": "a",
+  "rdp_password": "a",
+  "rdp_dir": "",
+  "rdp_width": 1920,
+  "rdp_height": 1080,
+  "rdp_launch": true,
+  "rdp_store_cred": true
+}

@@ -628,11 +628,41 @@ env:
 
 ---
 
+### 8. 智能体工作台（本机仪表盘）
+
+把上面这些运维动作收进**一个跑在本机的网页**，不用再翻 GitHub 或敲命令。
+
+```bat
+workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8787
+python workbench\selftest.py   :: 离线自测（55 项）
+```
+
+| 面板 | 内容 |
+| --- | --- |
+| **GitHub 账号管理** | 账号清单 + Secret 是否就位 + 当前主/备 + 在跑机；一键启用/停用（写回 `pool-config.json`） |
+| **机器运行实况** | Tailscale 在线状态 + 角色（读远端 `_state\pool-role.txt`）+ 快照新鲜度（读 `_snapshot\manifest.json`） |
+| **定时计划运行日志** | `windows-rdp.yml` 与 `pool-coordinator.yml` 的最近 25 次 run（状态/触发方式/用时/SHA/跳日志） |
+| **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`，免手输密码 |
+| **操作台** | 立即巡检协调器 / 干跑 / 派发保活机 / 强制刷新缓存 |
+
+**特点**：纯 Python 标准库零依赖；默认只监听 `127.0.0.1`；GitHub API / Tailscale / SMB 三条链路
+互相独立降级；网络按主机择路（直连优先，失败自动回退代理），`pool-state` 读取还有 raw → GitHub API 双通道兜底。
+
+详见 [`workbench/README.md`](workbench/README.md)。
+
+---
+
 ## 五、目录结构
 
 ```
 cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
+├── workbench/                          # 【新】智能体工作台（本机仪表盘，Python 标准库零依赖）
+│   ├── server.py                       #   后端：HTTP 服务 + 全部 API
+│   ├── selftest.py                     #   离线自测（55 项）
+│   ├── start.cmd                       #   双击启动
+│   ├── config.example.json             #   配置样例（复制成 config.json）
+│   └── static/                         #   前端：index.html / styles.css / app.js
 └── scripts/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
