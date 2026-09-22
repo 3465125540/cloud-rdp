@@ -167,6 +167,18 @@ def main():
         check("T36 未唤起（测试模式）", d.get("launched") is False)
     check("T37 非法 IP → 400", req(base, "/api/rdp", "POST", {"ip": "a b;rm"})[0] == 400)
 
+    # ---------------- 连接信息（「查看信息」按钮） ----------------
+    print("[API conn-info]")
+    code, body, ctype = req(base, "/api/conn-info?ip=100.1.2.3")
+    d = json.loads(body)
+    check("T79 conn-info 200/ok", code == 200 and d.get("ok") is True, body[:200])
+    check("T80 conn-info 回显 IP", d.get("ip") == "100.1.2.3", str(d.get("ip")))
+    check("T81 conn-info 含用户名/密码", d.get("username") == "a" and d.get("password") == "a", body[:200])
+    check("T82 conn-info 缺 ip 不炸", req(base, "/api/conn-info")[0] == 200)
+    check("T83 machine_detail 含运行时长字段",
+          all(k in server.machine_detail("100.1.2.3", False)
+              for k in ("uptime_seconds", "uptime_human", "started_utc")))
+
     # ---------------- 路由健壮性 ----------------
     print("[路由]")
     check("T38 未知 API → 404", req(base, "/api/nope")[0] == 404)

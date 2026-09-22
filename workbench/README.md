@@ -13,7 +13,7 @@
 | 面板 | 数据来源 | 能做什么 |
 | --- | --- | --- |
 | **GitHub 账号管理** | `scripts/pool-config.json` + 仓库 Actions Secrets 列表 + `pool-state` 分支 | 看每个账号的 Secret 是否就位、当前是主还是备、有没有在跑机；**一键启用/停用**账号（直接改 pool-config.json） |
-| **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` + `_snapshot\manifest.json` | 看哪些机器在线、Tailscale IP、角色（主/备/单机）、快照新鲜度、最后在线时间 |
+| **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` / `job-start.txt` + `_snapshot\manifest.json` | 看哪些机器在线、Tailscale IP、角色（主/备/单机）、**已运行时长**、快照新鲜度、最后在线时间；**一键登录** 或 **查看信息**（弹窗显示 Tailscale IP / 用户名 / 密码，可一键复制） |
 | **定时计划运行日志** | GitHub Actions API（`windows-rdp.yml` / `pool-coordinator.yml`） | 两个 workflow 的最近 25 次运行：状态、触发方式（定时/手动）、开始时间、用时、SHA，点「日志」跳 GitHub |
 | **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc` | 点一下直接连上在线机器，免手输密码 |
 
@@ -40,7 +40,7 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **55 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **93 项**，应全绿。不联网、不碰真机、不写你的桌面。
 
 ---
 
@@ -97,7 +97,12 @@ python workbench\selftest.py
 
 > 机器只能经 Tailscale 内网访问，tailnet 才是真正的安全边界，密码只当第二道门 —— 与 `windows-rdp.yml` 里的取舍一致。
 
-界面上有两个按钮：**一键登录**（生成 + 预存凭据 + 唤起）和**仅生成**（只落文件，自己双击）。
+界面上每台在线机器有两个按钮：**一键登录**（生成 + 预存凭据 + 唤起）和**查看信息**
+（弹窗显示 `Tailscale IP :` / `Username     :` / `Password     :`，点任意一行复制该值，也可「复制全部」）。
+状态列还会显示这台机器的**已运行时长**（读远端 `_state\job-start.txt`，`now - job 起点`）。
+
+> 「查看信息」用的 `GET /api/conn-info?ip=...` 会把用户名/密码回给前端 —— 服务默认只监听
+> `127.0.0.1`，仅本机可访问；别把 `host` 改成 `0.0.0.0` 再暴露到公网。
 
 ---
 
@@ -110,12 +115,13 @@ python workbench\selftest.py
 | GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
 | POST | `/api/accounts/add` | `{owner, repo, token_secret, id?, enabled?}` 新增账号（校验后原子写回 pool-config.json，不写 PAT 明文） |
-| GET | `/api/machines` | 机器实况 |
+| GET | `/api/machines` | 机器实况（含 `uptime_seconds` / `uptime_human` / `started_utc`） |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录 |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
 | POST | `/api/dispatch` | `{target:"coordinator"\|"keepalive", inputs:{...}}` 触发 workflow |
 | POST | `/api/rdp` | `{ip, hostname, launch?, store_cred?}` 一键登录 |
 | GET | `/api/rdp/preview?ip=...` | 预览生成的 `.rdp` 文本（不落盘） |
+| GET | `/api/conn-info?ip=...` | 连接信息（Tailscale IP / 用户名 / 密码），供「查看信息」弹窗用 |
 
 ---
 
@@ -124,7 +130,7 @@ python workbench\selftest.py
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（88 项）
+├── selftest.py           # 离线自测（93 项）
 ├── start.cmd             # 双击启动
 ├── config.example.json   # 配置样例（复制成 config.json 使用）
 ├── README.md

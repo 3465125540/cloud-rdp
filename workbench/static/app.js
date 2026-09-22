@@ -145,6 +145,12 @@ function renderMachines() {
     var st = online
       ? badge("在线" + (m.active ? " · 活跃" : ""), "ok")
       : badge("离线", "bad");
+    // 状态栏附加：正在运行的时长（起于远端 _state\job-start.txt）
+    if (online) {
+      st += m.uptime_human
+        ? '<div class="uptime" title="起于 ' + esc(m.started_utc || "?") + '">运行 ' + esc(m.uptime_human) + "</div>"
+        : '<div class="uptime muted" title="读不到 _state\\job-start.txt（需 SMB 可读）">运行 —</div>';
+    }
     var snap = '<span class="muted">—</span>';
     if (m.snapshot && m.snapshot.ok) {
       var sn = m.snapshot;
@@ -159,7 +165,7 @@ function renderMachines() {
       : '<span class="muted">' + esc(m.last_seen_human || "未知") + "</span>";
     var ops = online
       ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">一键登录</button>' +
-        ' <button class="btn btn-mini btn-ghost" data-rdpfile="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">仅生成</button>'
+        ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">查看信息</button>'
       : '<span class="muted">离线</span>';
     return "<tr>" +
       "<td class=\"strong\">" + esc(m.hostname || "-") + "</td>" +
@@ -323,6 +329,61 @@ function initCollapse() {
   });
 }
 
+/* ------------------------------------------------------------ 连接信息弹窗 */
+function openModal(title, html) {
+  $("#modal-title").textContent = title;
+  $("#modal-body").innerHTML = html;
+  $("#modal").hidden = false;
+}
+function closeModal() { $("#modal").hidden = true; }
+
+function copyText(t) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch (e) {}
+  try {
+    var ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    return true;
+  } catch (e) { return false; }
+}
+
+function connRow(label, value) {
+  return '<div class="conn-row"><span class="conn-k">' + esc(label) + "</span>" +
+    '<span class="conn-v mono" data-copy="' + esc(value) + '" title="点击复制">' + esc(value) + "</span></div>";
+}
+
+function showConnInfo(ip, host) {
+  var title = "连接信息" + (host ? " · " + host : "");
+  openModal(title, '<div class="muted">读取中…</div>');
+  api("/api/conn-info?ip=" + encodeURIComponent(ip)).then(function (c) {
+    var html =
+      '<div class="conn-list">' +
+        connRow("Tailscale IP :", c.ip || ip) +
+        connRow("Username     :", c.username || "") +
+        connRow("Password     :", c.password || "") +
+      "</div>" +
+      '<div class="conn-foot">' +
+        '<button class="btn btn-primary btn-mini" data-conn-login="' + esc(ip) +
+          '" data-host="' + esc(host || "") + '">一键登录</button>' +
+        '<button class="btn btn-mini" data-copy-all="1">复制全部</button>' +
+        '<span class="muted">点任意一行可复制该值</span>' +
+      "</div>";
+    openModal(title, html);
+  }).catch(function (e) {
+    openModal(title, '<div class="err-line">' + esc(e.message) + "</div>");
+  });
+}
+
 /* ------------------------------------------------------------ 事件 */
 function bind() {
   $("#btn-refresh").addEventListener("click", function () { load(true); });
@@ -401,10 +462,11 @@ function bind() {
       .then(function () { cb.disabled = false; });
   });
 
-  // 一键登录 / 生成 .rdp
+  // 一键登录 / 查看连接信息
   $("#tbl-machines").addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (!b) return;
+    if (b.dataset.info) { showConnInfo(b.dataset.info, b.dataset.host || ""); return; }
     var ip = b.dataset.rdp || b.dataset.rdpfile;
     var host = b.dataset.host || "";
     var launch = !!b.dataset.rdp;
@@ -454,6 +516,37 @@ function bind() {
       .catch(function (err) { toast("派发失败：" + esc(err.message), "bad"); })
       .then(function () { b.disabled = false; b.innerHTML = old; });
   });
+
+  // 连接信息弹窗：关闭 / 复制 / 弹窗内一键登录
+  $("#modal").addEventListener("click", function (e) {
+    if (e.target.closest("[data-modal-close]")) { closeModal(); return; }
+    var cv = e.target.closest("[data-copy]");
+    if (cv) { copyText(cv.dataset.copy); toast("已复制：" + esc(cv.dataset.copy), "ok"); return; }
+    if (e.target.closest("[data-copy-all]")) {
+      var lines = [];
+      Array.prototype.forEach.call(this.querySelectorAll(".conn-row"), function (r) {
+        lines.push(r.querySelector(".conn-k").textContent + " " + r.querySelector(".conn-v").textContent);
+      });
+      copyText(lines.join("\n"));
+      toast("已复制连接信息", "ok");
+      return;
+    }
+    var lb = e.target.closest("[data-conn-login]");
+    if (lb) {
+      lb.disabled = true;
+      api("/api/rdp", { method: "POST", body: JSON.stringify({
+        ip: lb.dataset.connLogin, hostname: lb.dataset.host || "", launch: true }) })
+        .then(function (res) {
+          var msg = "已唤起远程桌面：<br><span class='mono'>" + esc(res.path) + "</span>";
+          if (res.cred_stored) msg += "<br><span class='muted'>凭据已预存（免手输密码）</span>";
+          toast(msg, "ok");
+          closeModal();
+        })
+        .catch(function (err) { toast("登录失败：" + esc(err.message), "bad"); })
+        .then(function () { lb.disabled = false; });
+    }
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
 
   // 卡片「缩略」按钮（日志板块等）
   initCollapse();

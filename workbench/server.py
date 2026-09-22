@@ -533,8 +533,9 @@ def read_remote_text(ip, rel):
 
 
 def machine_detail(ip, online):
-    """读单台机器的池角色 + 快照新鲜度。任何一项读不到就留空，不抛。"""
-    detail = {"role": "", "role_source": "", "snapshot": None, "error": ""}
+    """读单台机器的池角色 + 快照新鲜度 + 运行时长。任何一项读不到就留空，不抛。"""
+    detail = {"role": "", "role_source": "", "snapshot": None, "error": "",
+              "started_utc": "", "uptime_seconds": None, "uptime_human": ""}
     if OFFLINE or not ip or not online:
         return detail
     try:
@@ -567,6 +568,20 @@ def machine_detail(ip, online):
         }
     except Exception:
         detail["snapshot"] = {"ok": False}
+    # 运行时长：workflow 第 0a 步写入的 _state\job-start.txt（ISO-8601 UTC）→ now - 起点
+    try:
+        raw = (read_remote_text(ip, "_state/job-start.txt") or "").strip()
+        dt = parse_iso(raw)
+        if dt:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            up = (datetime.now(timezone.utc) - dt).total_seconds()
+            if up >= 0:
+                detail["started_utc"] = raw
+                detail["uptime_seconds"] = int(up)
+                detail["uptime_human"] = human_duration(up)
+    except Exception:
+        pass
     return detail
 
 
@@ -1372,6 +1387,20 @@ def api_rdp_preview(h, params):
     h._send(200, build_rdp_text(ip, user), "text/plain; charset=utf-8")
 
 
+def api_conn_info(h, params):
+    """连接信息（Tailscale IP / 用户名 / 密码）。仅供本机仪表盘「查看信息」用。"""
+    ip = (params.get("ip") or [""])[0]
+    h._json(200, {
+        "ok": True,
+        "ip": ip,
+        "username": str(CONFIG.get("rdp_user") or "a"),
+        "password": str(CONFIG.get("rdp_password") or "a"),
+        "store_cred": bool(CONFIG.get("rdp_store_cred", True)),
+        "rdp_width": int(CONFIG.get("rdp_width") or 1920),
+        "rdp_height": int(CONFIG.get("rdp_height") or 1080),
+    })
+
+
 ROUTES = {
     ("GET", "/api/health"): api_health,
     ("GET", "/api/overview"): api_overview,
@@ -1384,6 +1413,7 @@ ROUTES = {
     ("POST", "/api/dispatch"): api_dispatch,
     ("POST", "/api/rdp"): api_rdp,
     ("GET", "/api/rdp/preview"): api_rdp_preview,
+    ("GET", "/api/conn-info"): api_conn_info,
 }
 
 
