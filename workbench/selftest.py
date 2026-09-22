@@ -107,8 +107,11 @@ def main():
     if d.get("ok"):
         accs = d.get("accounts") or []
         check("T18 accounts 列表字段完整",
-              all(all(k in a for k in ("id", "owner", "enabled", "token_secret", "alive", "role"))
+              all(all(k in a for k in ("id", "owner", "enabled", "token_secret", "alive", "role",
+                                       "token_state", "alive_count", "last_run", "source"))
                   for a in accs))
+        check("T18b accounts 带监测元信息",
+              all(k in d for k in ("monitor_available", "state_updated", "state_age_human", "state_via")))
         check("T19 accounts 至少 1 个（真实 pool-config）", len(accs) >= 1, "n=%d" % len(accs))
     else:
         check("T18 accounts 降级有 error", bool(d.get("error")))
@@ -167,6 +170,10 @@ def main():
     print("[路由]")
     check("T38 未知 API → 404", req(base, "/api/nope")[0] == 404)
     check("T39 静态路径 POST → 405", req(base, "/", "POST", {})[0] == 405)
+    # 回归：预览面板/浏览器探活会先发 HEAD，曾经返回 501 被误判成「服务不可用」
+    check("T39a HEAD / → 200（探活）", req(base, "/", "HEAD")[0] == 200)
+    check("T39b HEAD /api/health → 200（探活）", req(base, "/api/health", "HEAD")[0] == 200)
+    check("T39c HEAD /styles.css → 200（探活）", req(base, "/styles.css", "HEAD")[0] == 200)
 
     # ---------------- 纯函数 ----------------
     print("[纯函数]")
@@ -228,6 +235,106 @@ def main():
         server.OFFLINE = real_offline
         server.http_json = real_http
         server.gh_api = real_gh
+        server.clear_cache()
+
+    # ---------------- 纯函数：时间解析 / 监测数据整形 ----------------
+    print("[监测数据整形]")
+    dt = server.parse_iso("2026-09-22T03:31:03.7302008Z")   # PowerShell ToString('o') 的 7 位小数
+    check("T50 parse_iso 认 7 位小数（PS 'o' 格式）",
+          dt is not None and dt.hour == 3 and dt.minute == 31 and dt.second == 3, str(dt))
+    check("T51 human_age 能算 7 位小数时间", server.human_age("2026-09-22T03:31:03.7302008Z") != "")
+
+    reps = server.pool_account_reports({"accounts": [{"owner": "o1", "token_state": "ok"}]})
+    check("T52 pool_account_reports 解析 list", reps.get("o1", {}).get("token_state") == "ok")
+    check("T53 pool_account_reports 容错单条 dict",
+          "o2" in server.pool_account_reports({"accounts": {"owner": "o2"}}))
+    check("T54 pool_account_reports 缺字段不炸", server.pool_account_reports({}) == {})
+
+    lr = server.shape_last_run({"run_id": 9, "status": "completed", "conclusion": "success",
+                                "created_at": "2026-09-22T01:00:00Z", "event": "schedule", "url": "u"})
+    check("T55 shape_last_run 统一 pool-state 形态",
+          lr["id"] == 9 and lr["state"] == "success" and lr["url"] == "u")
+    lr2 = server.shape_last_run({"id": 7, "state": "in_progress", "conclusion": "", "created_at": "x"})
+    check("T56 shape_last_run 统一 runs 形态", lr2["id"] == 7 and lr2["state"] == "in_progress")
+    check("T57 shape_last_run 空值返回 None", server.shape_last_run(None) is None)
+
+    # ---------------- get_accounts 合并 pool-state 监测明细 ----------------
+    print("[get_accounts 合并监测]")
+    real_pc = server.CONFIG.get("pool_config")
+    real_pool = server.get_pool_state
+    real_secrets = server.get_secret_names
+    tmpcfg = os.path.join(tmpdir, "pool-config.json")
+    with open(tmpcfg, "w", encoding="utf-8") as f:
+        json.dump({"pool_id": "t", "target_machines": 1, "hub": {"owner": "hubby"},
+                   "accounts": [
+                       {"id": "acc-1", "owner": "acct1", "repo": "cloud-rdp",
+                        "token_secret": "POOL_TOKEN_1", "enabled": True},
+                       {"id": "acc-2", "owner": "acct2", "repo": "cloud-rdp",
+                        "token_secret": "POOL_TOKEN_2", "enabled": True}]}, f)
+    try:
+        server.CONFIG["pool_config"] = tmpcfg
+        server.clear_cache()
+        server.get_pool_state = lambda: {"ok": True, "via": "raw", "state": {
+            "version": 1, "updated_utc": "2026-09-22T03:31:03.7302008Z", "target_machines": 1,
+            "primary": {"owner": "acct1", "run_id": 11, "since": "2026-09-22T01:00:00Z"},
+            "standby": [],
+            "accounts": [
+                {"id": "acc-1", "owner": "acct1", "repo": "cloud-rdp", "enabled": True,
+                 "secret_name": "POOL_TOKEN_1", "token_state": "ok", "alive_count": 1, "total": 5,
+                 "last_run": {"run_id": 11, "status": "in_progress", "conclusion": "",
+                              "created_at": "2026-09-22T01:00:00Z",
+                              "event": "workflow_dispatch", "url": "u1"},
+                 "note": "", "role": "primary"},
+                {"id": "acc-2", "owner": "acct2", "repo": "cloud-rdp", "enabled": True,
+                 "secret_name": "POOL_TOKEN_2", "token_state": "missing", "alive_count": 0,
+                 "total": 0, "last_run": None, "note": "Secret POOL_TOKEN_2 未配置", "role": ""}]}}
+        server.get_secret_names = lambda: {"POOL_TOKEN_1"}
+        acc = server.get_accounts()
+        check("T58 get_accounts ok", acc.get("ok") is True)
+        check("T59 监测数据可用标记", acc.get("monitor_available") is True)
+        check("T60 池状态更新时间解析出来", acc.get("state_age_human") != "", str(acc.get("state_updated")))
+        a1 = (acc.get("accounts") or [{}])[0]
+        check("T61 acc-1 token_state 透传", a1.get("token_state") == "ok")
+        check("T62 acc-1 alive_count 透传", a1.get("alive_count") == 1)
+        check("T63 acc-1 role 取自明细", a1.get("role") == "primary")
+        check("T64 acc-1 last_run 整形", (a1.get("last_run") or {}).get("id") == 11)
+        check("T65 acc-1 secret_present 由 Secret 名推断", a1.get("secret_present") is True)
+        a2 = (acc.get("accounts") or [{}, {}])[1]
+        check("T66 acc-2 token_state = missing", a2.get("token_state") == "missing")
+        check("T67 acc-2 提示语透传", "未配置" in (a2.get("report_note") or ""))
+        check("T68 acc-2 secret_present False", a2.get("secret_present") is False)
+
+        # ---------------- 新增账号 API ----------------
+        print("[API accounts/add]")
+        code, body, _ = req(base, "/api/accounts/add", "POST",
+                            {"owner": "acct3", "repo": "cloud-rdp", "token_secret": "POOL_TOKEN_3"})
+        d = json.loads(body)
+        check("T69 add 200/ok", code == 200 and d.get("ok") is True, body[:200])
+        check("T70 add 自动生成 id", (d.get("id") or "").startswith("acc-"), str(d.get("id")))
+        with open(tmpcfg, encoding="utf-8") as f:
+            saved = json.load(f)
+        check("T71 已写回配置文件", any(a.get("owner") == "acct3" for a in saved.get("accounts") or []))
+        check("T72 add 返回 Secret 提示", "POOL_TOKENS" in (d.get("hint") or ""))
+
+        code, _, _ = req(base, "/api/accounts/add", "POST",
+                         {"owner": "acct3", "repo": "cloud-rdp", "token_secret": "X"})
+        check("T73 重复 owner → 409", code == 409, "code=%s" % code)
+        code, _, _ = req(base, "/api/accounts/add", "POST",
+                         {"owner": "", "repo": "r", "token_secret": "S"})
+        check("T74 空 owner → 400", code == 400, "code=%s" % code)
+        code, _, _ = req(base, "/api/accounts/add", "POST",
+                         {"owner": "acct9", "repo": "r", "token_secret": "1bad"})
+        check("T75 非法 Secret 名 → 400", code == 400, "code=%s" % code)
+        code, _, _ = req(base, "/api/accounts/add", "POST",
+                         {"owner": "acct9", "repo": "r", "token_secret": "OK_NAME", "id": "acc-1"})
+        check("T76 重复 id → 409", code == 409, "code=%s" % code)
+    finally:
+        server.get_pool_state = real_pool
+        server.get_secret_names = real_secrets
+        if real_pc is None:
+            server.CONFIG.pop("pool_config", None)
+        else:
+            server.CONFIG["pool_config"] = real_pc
         server.clear_cache()
 
     # ---------------- 收尾 ----------------

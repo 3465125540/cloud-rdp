@@ -57,22 +57,51 @@ if (-not [string]::IsNullOrWhiteSpace($PrevStatePath) -and (Test-Path -LiteralPa
 }
 
 # ---------- 1. 发现各账号在跑机 ----------
+# 顺带收集「每账号巡检明细」($reports)，随池状态一起发布 —— 工作台读它做实时状态监测。
 $alive    = @()
 $accounts = @($cfg.accounts)
+$reports  = @()
 foreach ($acc in $accounts) {
-    if ($acc.enabled -eq $false) { continue }
+    $rep = [pscustomobject]@{
+        id          = [string]$acc.id
+        owner       = [string]$acc.owner
+        repo        = [string]$acc.repo
+        enabled     = ($acc.enabled -ne $false)
+        secret_name = [string]$acc.token_secret
+        token_state = 'ok'        # ok | missing | query_failed | disabled
+        alive_count = 0
+        total       = 0
+        last_run    = $null
+        note        = ''
+    }
+    if ($acc.enabled -eq $false) {
+        $rep.token_state = 'disabled'
+        $rep.note        = '账号已停用'
+        $reports += $rep
+        continue
+    }
     $tok = Get-PoolAccountToken -Account $acc
     if ([string]::IsNullOrWhiteSpace($tok)) {
+        $rep.token_state = 'missing'
+        $rep.note        = "Secret $($acc.token_secret) 未配置"
         Say "账号 $($acc.id) ($($acc.owner))：跳过（Secret $($acc.token_secret) 未配置）"
+        $reports += $rep
         continue
     }
     $r = Get-AccountAliveRuns -Account $acc -Token $tok -Workflow $wf -ApiBaseUri $ApiBaseUri
     if (-not $r.ok) {
+        $rep.token_state = 'query_failed'
+        $rep.note        = [string]$r.error
         Say "账号 $($acc.id) ($($acc.owner))：查询失败 —— $($r.error)"
+        $reports += $rep
         continue
     }
-    Say "账号 $($acc.id) ($($acc.owner))：在跑 $($r.runs.Count) 台"
+    $rep.alive_count = @($r.runs).Count
+    $rep.total       = [int]$r.total
+    $rep.last_run    = $r.last_run
+    Say "账号 $($acc.id) ($($acc.owner))：在跑 $($r.runs.Count) 台（历史 $($r.total) 条）"
     $alive += $r.runs
+    $reports += $rep
 }
 Say "在跑机合计 = $($alive.Count) / 目标 $($cfg.target_machines)"
 
@@ -138,7 +167,7 @@ foreach ($x in $dispatched) {
         url     = ''
     }
 }
-$state = Build-PoolState -Config $cfg -Alive $finalAlive
+$state = Build-PoolState -Config $cfg -Alive $finalAlive -Reports $reports
 
 # 记录最近派发时间（供下一轮防抖）
 $recentOut = [ordered]@{}
@@ -155,5 +184,5 @@ ConvertTo-PoolStateJson -State $state | Out-File -LiteralPath $OutStatePath -Enc
 
 $p = $state.primary
 Say ("权威状态：primary = " + $(if ($p) { "$($p.owner) (run $($p.run_id))" } else { '(无)' }) + "  standby = $($state.standby.Count) 台")
-Say "状态文件：$OutStatePath"
+Say "状态文件：$OutStatePath  （含 $($reports.Count) 个账号巡检明细）"
 exit 0

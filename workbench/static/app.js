@@ -13,13 +13,13 @@ function esc(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function toast(msg, kind) {
+function toast(msg, kind, ms) {
   var t = $("#toast");
   t.className = "toast " + (kind || "");
   t.innerHTML = msg;
   t.hidden = false;
   clearTimeout(t._h);
-  t._h = setTimeout(function () { t.hidden = true; }, 4200);
+  t._h = setTimeout(function () { t.hidden = true; }, ms || 4200);
 }
 function badge(text, kind) {
   return '<span class="badge ' + (kind || "mute") + '">' + esc(text) + "</span>";
@@ -151,14 +151,38 @@ function renderMachines() {
   }).join("");
 }
 
+function tokenStateBadge(ts) {
+  if (ts === "ok") return badge("凭证正常", "ok");
+  if (ts === "missing") return badge("缺 Secret", "bad");
+  if (ts === "query_failed") return badge("查询失败", "warn");
+  if (ts === "disabled") return badge("已停用", "mute");
+  return '<span class="muted">—</span>';
+}
+
+function runStateKind(state) {
+  if (state === "success") return "ok";
+  if (state === "in_progress" || state === "queued") return "info";
+  if (state === "failure" || state === "cancelled" || state === "timed_out") return "bad";
+  return "mute";
+}
+
 function renderAccounts() {
   var acc = DATA.accounts || {};
   var rows = acc.accounts || [];
   var tb = $("#tbl-accounts tbody");
   $("#accounts-empty").hidden = rows.length > 0;
-  $("#accounts-meta").textContent = acc.ok
-    ? (rows.length + " 个账号" + (acc.secrets_readable ? "" : "（Secret 列表读不到，需 repo 权限的 Token）"))
-    : "";
+
+  var bits = [];
+  if (acc.ok) {
+    bits.push(rows.length + " 个账号");
+    if (acc.monitor_available) {
+      bits.push("监测数据 " + (acc.state_age_human || "?") + (acc.state_via ? "（" + acc.state_via + "）" : ""));
+    } else {
+      bits.push("暂无监测数据（等协调器发布）");
+    }
+    if (!acc.secrets_readable) bits.push("Secret 列表读不到（需 repo 权限 Token）");
+  }
+  $("#accounts-meta").textContent = bits.join("  ·  ");
 
   if (!acc.ok) {
     tb.innerHTML = '<tr><td colspan="5" class="empty">' + esc(acc.error || "读取失败") + "</td></tr>";
@@ -170,9 +194,22 @@ function renderAccounts() {
     else if (a.secret_present === false) secret = badge("缺失", "bad");
     else secret = '<span class="muted">未知</span>';
 
-    var alive = a.alive
-      ? badge("#" + a.run_id, "ok") + ' <span class="muted">' + esc(a.since_human || "") + "</span>"
-      : '<span class="muted">—</span>';
+    // ---- 实时监测列：凭证状态 + 在跑机数 + 最近一次 run ----
+    var mon = [tokenStateBadge(a.token_state)];
+    if (a.alive_count !== null && a.alive_count !== undefined) {
+      mon.push('<span class="mon-num">在跑 ' + esc(a.alive_count) + " 台</span>");
+    }
+    if (a.last_run) {
+      mon.push('<span class="mon-run">' + badge(a.last_run.state || "-", runStateKind(a.last_run.state)) +
+        (a.last_run.created_human ? ' <span class="muted">' + esc(a.last_run.created_human) + "</span>" : "") + "</span>");
+    } else if (a.source && a.source !== "none") {
+      mon.push('<span class="muted">无运行记录</span>');
+    }
+    if (a.source === "live") mon.push('<span class="src-tag" title="工作台用本机 Token 实时探测">实时</span>');
+    var note = "";
+    if (a.report_note && a.token_state !== "ok") {
+      note = '<div class="muted mon-note">' + esc(a.report_note) + "</div>";
+    }
 
     var name = esc(a.owner || "-");
     if (a.placeholder) name += ' <span class="muted">(待填)</span>';
@@ -181,7 +218,7 @@ function renderAccounts() {
       '<td class="strong">' + name + '<div class="muted mono">' + esc(a.id || "") + "</div></td>" +
       "<td>" + secret + '<div class="muted mono">' + esc(a.token_secret || "") + "</div></td>" +
       "<td>" + roleBadge(a.role) + "</td>" +
-      "<td>" + alive + "</td>" +
+      '<td class="mon-cell">' + mon.join(" ") + note + "</td>" +
       '<td class="right"><label class="toggle"><input type="checkbox" data-acc="' + esc(a.id) + '"' +
         (a.enabled ? " checked" : "") + '><span class="slider"></span></label></td>' +
       "</tr>";
@@ -246,6 +283,49 @@ function bind() {
       t.classList.toggle("active", t === b);
     });
     renderRuns();
+  });
+
+  // 新增账号
+  $("#btn-add-account").addEventListener("click", function () {
+    var f = $("#form-add-account");
+    f.hidden = !f.hidden;
+    if (!f.hidden) $("#acc-owner").focus();
+  });
+  $("#btn-add-cancel").addEventListener("click", function () {
+    $("#form-add-account").hidden = true;
+    $("#acc-add-msg").textContent = "";
+  });
+  $("#form-add-account").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var owner = ($("#acc-owner").value || "").trim();
+    var repo = ($("#acc-repo").value || "").trim();
+    var secret = ($("#acc-secret").value || "").trim();
+    var id = ($("#acc-id").value || "").trim();
+    var enabled = $("#acc-enabled").checked;
+    var msg = $("#acc-add-msg");
+    if (!owner || !repo || !secret) {
+      msg.textContent = "owner / repo / Secret 名都要填";
+      return;
+    }
+    var btn = $("#btn-add-submit");
+    btn.disabled = true;
+    msg.textContent = "添加中…";
+    api("/api/accounts/add", {
+      method: "POST",
+      body: JSON.stringify({ owner: owner, repo: repo, token_secret: secret, id: id, enabled: enabled })
+    }).then(function (res) {
+      toast("已添加账号 " + esc(owner) + "（" + esc(res.id) + "）", "ok");
+      if (res.verify_note) toast(esc(res.verify_note), "warn", 8000);
+      if (res.hint) toast(esc(res.hint), "info", 12000);
+      $("#form-add-account").reset();
+      $("#acc-repo").value = "cloud-rdp";
+      $("#acc-enabled").checked = true;
+      msg.textContent = "";
+      $("#form-add-account").hidden = true;
+      load(true);
+    }).catch(function (err) {
+      msg.textContent = "失败：" + err.message;
+    }).then(function () { btn.disabled = false; });
   });
 
   // 账号启用/停用

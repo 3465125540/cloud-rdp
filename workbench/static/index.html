@@ -66,13 +66,33 @@
     <section class="card span-5">
       <div class="card-head">
         <h2>&#128273; GitHub 账号管理</h2>
-        <span class="muted" id="accounts-meta"></span>
+        <div class="head-right">
+          <span class="muted" id="accounts-meta"></span>
+          <button class="btn btn-mini" id="btn-add-account" title="新增一个账号（写回 scripts/pool-config.json）">＋ 新增</button>
+        </div>
       </div>
       <div class="card-body">
+        <form class="add-acc" id="form-add-account" hidden autocomplete="off">
+          <div class="add-acc-grid">
+            <label>owner（GitHub 用户名）<input type="text" id="acc-owner" placeholder="例如 octocat" /></label>
+            <label>repo（仓库名）<input type="text" id="acc-repo" value="cloud-rdp" /></label>
+            <label>Secret 名<input type="text" id="acc-secret" placeholder="例如 POOL_TOKEN_3" /></label>
+            <label>id（可留空自动）<input type="text" id="acc-id" placeholder="acc-N" /></label>
+          </div>
+          <div class="add-acc-foot">
+            <label class="chk"><input type="checkbox" id="acc-enabled" checked /> 启用</label>
+            <span class="add-acc-msg" id="acc-add-msg"></span>
+            <span class="spacer"></span>
+            <button type="button" class="btn btn-ghost btn-mini" id="btn-add-cancel">取消</button>
+            <button type="submit" class="btn btn-primary btn-mini" id="btn-add-submit">添加</button>
+          </div>
+          <p class="muted add-acc-tip">PAT 不会写进配置文件；添加后请到仓库 Secrets 里配置
+            <code>POOL_TOKENS</code>（JSON）或对应的 Secret。</p>
+        </form>
         <table class="tbl" id="tbl-accounts">
           <thead>
             <tr>
-              <th>账号</th><th>Secret</th><th>角色</th><th>在跑机</th><th class="right">启用</th>
+              <th>账号</th><th>Secret</th><th>角色</th><th>实时监测</th><th class="right">启用</th>
             </tr>
           </thead>
           <tbody></tbody>

@@ -76,6 +76,12 @@ function Invoke-GhApi {
 }
 
 # 列某账号 fork 的「在跑机」（in_progress / queued / waiting / requested）。
+#
+# 返回值（除原有 ok/error/runs 外，另加三个用于「实时状态监测」的字段，
+# 全部复用同一次 API 响应，不额外发请求）：
+#   token_ok : token 非空且查询成功（= 该账号凭证可用）
+#   total    : 本次拉到的 run 条数（最近 PerPage 条，含已结束的）
+#   last_run : 最近一次 run 摘要 {run_id,status,conclusion,created_at,event,url}；无则 $null
 function Get-AccountAliveRuns {
     param(
         $Account,
@@ -85,16 +91,22 @@ function Get-AccountAliveRuns {
         [int]$PerPage = 20
     )
     if ([string]::IsNullOrWhiteSpace($Token)) {
-        return @{ ok = $false; error = "缺 token（Secret $($Account.token_secret) 未配置）"; runs = @() }
+        return @{ ok = $false; error = "缺 token（Secret $($Account.token_secret) 未配置）";
+                  runs = @(); token_ok = $false; total = 0; last_run = $null }
     }
     $path = "/repos/$($Account.owner)/$($Account.repo)/actions/workflows/$Workflow/runs?per_page=$PerPage"
     try {
         $resp = Invoke-GhApi -Token $Token -Path $path -ApiBaseUri $ApiBaseUri
     } catch {
-        return @{ ok = $false; error = $_.Exception.Message; runs = @() }
+        return @{ ok = $false; error = $_.Exception.Message;
+                  runs = @(); token_ok = $false; total = 0; last_run = $null }
     }
+
+    $all = @()
+    if ($resp -and $resp.workflow_runs) { $all = @($resp.workflow_runs) }
+
     $alive = @()
-    foreach ($r in @($resp.workflow_runs)) {
+    foreach ($r in $all) {
         if ($r.status -in @('in_progress', 'queued', 'waiting', 'requested', 'pending')) {
             $alive += [pscustomobject]@{
                 account = [string]$Account.id
@@ -109,7 +121,23 @@ function Get-AccountAliveRuns {
             }
         }
     }
-    return @{ ok = $true; error = ''; runs = $alive }
+
+    # GitHub 默认按创建时间倒序返回 → 第一条即「最近一次 run」
+    $lastRun = $null
+    if ($all.Count -gt 0) {
+        $r0 = $all[0]
+        $lastRun = [pscustomobject]@{
+            run_id     = $r0.id
+            status     = [string]$r0.status
+            conclusion = [string]$r0.conclusion
+            created_at = $r0.created_at
+            event      = [string]$r0.event
+            url        = [string]$r0.html_url
+        }
+    }
+
+    return @{ ok = $true; error = ''; runs = $alive;
+              token_ok = $true; total = $all.Count; last_run = $lastRun }
 }
 
 # 触发某账号 fork 的 workflow_dispatch。
@@ -158,30 +186,66 @@ function Resolve-PoolRoles {
     }
 }
 
+# 把一台在跑机转成池状态里的精简条目（$null 进 $null 出）。
+# 注意：刻意放在函数外 —— 在 Build-PoolState 里内嵌 function 会被反复重定义，
+# 在 PS 5.1 下会偶发「同一调用第二次返回 $null」的诡异行为（踩过）。
+function ConvertTo-PoolStateMachine {
+    param($m)
+    if (-not $m) { return $null }
+    return [ordered]@{
+        account = $m.account
+        owner   = $m.owner
+        repo    = $m.repo
+        run_id  = $m.run_id
+        since   = $(if ($m.started) { $m.started } else { $m.created })
+    }
+}
+
 # 构造池状态对象（写进 hub 的 pool-state 分支；spoke 读它决定角色）。
+#
+# 可选 -Reports：协调器巡检时收集的「每账号明细」。传入后会在 state 里追加
+# accounts 字段（并把权威角色回填进去），供工作台做实时状态监测 —— 因为
+# Actions Secret 的值永不通过 API 返回，工作台只能靠这份权威结果得知各账号情况。
 function Build-PoolState {
-    param($Config, [object[]]$Alive, [int]$TargetMachines = 0)
+    param($Config, [object[]]$Alive, [int]$TargetMachines = 0, [object[]]$Reports = $null)
     if ($TargetMachines -le 0) { $TargetMachines = [int]$Config.target_machines }
     $roles = Resolve-PoolRoles -Alive $Alive
-    function ConvOne($m) {
-        if (-not $m) { return $null }
-        return [ordered]@{
-            account = $m.account
-            owner   = $m.owner
-            repo    = $m.repo
-            run_id  = $m.run_id
-            since   = $(if ($m.started) { $m.started } else { $m.created })
+
+    # 每账号明细（可选）：把权威角色回填进去，随池状态一起发布。
+    # accounts 恒为数组（没有明细时是空数组），消费端无需判空。
+    $accs = @()
+    if ($null -ne $Reports) {
+        $roleByOwner = @{}
+        if ($roles.primary) { $roleByOwner[[string]$roles.primary.owner] = 'primary' }
+        foreach ($s in @($roles.standby)) { $roleByOwner[[string]$s.owner] = 'standby' }
+        foreach ($rep in @($Reports)) {
+            if (-not $rep) { continue }
+            $accs += [pscustomobject]@{
+                id          = [string]$rep.id
+                owner       = [string]$rep.owner
+                repo        = [string]$rep.repo
+                enabled     = ($rep.enabled -ne $false)
+                secret_name = [string]$rep.secret_name
+                token_state = [string]$rep.token_state
+                alive_count = [int]$rep.alive_count
+                total       = [int]$rep.total
+                last_run    = $rep.last_run
+                note        = [string]$rep.note
+                role        = [string]$roleByOwner[[string]$rep.owner]
+            }
         }
     }
-    $state = [ordered]@{
+
+    # 一次性构造（不用 indexer 追加新键 —— 顺序字典上加新键在 PS 5.1 偶发不稳）
+    return [ordered]@{
         version         = 1
         pool_id         = [string]$Config.pool_id
         updated_utc     = (Get-Date).ToUniversalTime().ToString('o')
         target_machines = $TargetMachines
-        primary         = (ConvOne $roles.primary)
-        standby         = @($roles.standby | ForEach-Object { ConvOne $_ })
+        primary         = (ConvertTo-PoolStateMachine $roles.primary)
+        standby         = @($roles.standby | ForEach-Object { ConvertTo-PoolStateMachine $_ })
+        accounts        = @($accs)
     }
-    return $state
 }
 
 # spoke 侧：从 hub 的 raw 地址读池状态（公开仓库免认证）。读不到返回 $null。

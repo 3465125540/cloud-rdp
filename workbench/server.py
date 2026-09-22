@@ -366,11 +366,39 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+_ISO_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
+
+
 def parse_iso(s):
+    """尽量宽容地解析 ISO 时间。
+
+    注意：PowerShell 的 `(Get-Date).ToUniversalTime().ToString('o')` 会给出 7 位
+    小数秒（如 2026-09-22T03:31:03.7302008Z），而 Python 3.10- 的
+    datetime.fromisoformat 只认 3 位或 6 位小数 —— 直接解析会失败，导致池状态
+    的「更新时间」显示不出来。这里在小数位超标时截到 6 位再试。
+    """
     if not s:
         return None
+    txt = str(s).strip()
+    if not txt:
+        return None
     try:
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    m = _ISO_RE.match(txt)
+    if not m:
+        return None
+    date, clock, frac, tz = m.group(1), m.group(2), m.group(3) or "", m.group(4) or ""
+    if frac:
+        frac = (frac + "000000")[:7]          # ".1234567" -> ".123456"
+    if tz == "Z":
+        tz = "+00:00"
+    elif tz and ":" not in tz and len(tz) == 5:   # "+0800" -> "+08:00"
+        tz = tz[:3] + ":" + tz[3:]
+    try:
+        return datetime.fromisoformat(date + "T" + clock + frac + tz)
     except Exception:
         return None
 
@@ -612,8 +640,71 @@ def get_pool_state():
     return cached("pool_state", CONFIG["cache_seconds"], probe)
 
 
+def pool_account_reports(state):
+    """把 pool-state 里的 accounts 明细整理成 owner -> 明细 的映射。
+
+    兼容三种形态：list / 单条 dict（个别 PowerShell 版本会把单元素数组压扁）/ 缺失。
+    """
+    raw = (state or {}).get("accounts")
+    if isinstance(raw, dict):
+        raw = [raw]
+    out = {}
+    for r in (raw or []):
+        if not isinstance(r, dict):
+            continue
+        owner = str(r.get("owner") or "")
+        if owner:
+            out[owner] = r
+    return out
+
+
+def shape_last_run(r):
+    """把「最近一次 run」统一成一种形状 —— 兼容 pool-state 明细与 Actions runs 两种来源。"""
+    if not r:
+        return None
+    return {
+        "id": r.get("run_id") if r.get("run_id") is not None else r.get("id"),
+        "state": r.get("state") or r.get("conclusion") or r.get("status") or "",
+        "conclusion": r.get("conclusion") or "",
+        "status": r.get("status") or "",
+        "created_at": r.get("created_at") or "",
+        "created_human": human_age(r.get("created_at") or ""),
+        "event": r.get("event") or "",
+        "url": r.get("url") or "",
+    }
+
+
+def hub_live_probe(owner, repo_name):
+    """hub 账号 = 工作台自己配的那个仓库。
+
+    对 hub 账号可以拿本机 token 实时探测（复用已缓存的 runs，不额外发请求），
+    比协调器 10 分钟一次的结果新鲜得多。非 hub 账号返回 None（只能靠 pool-state）。
+    """
+    cfg_repo = str(CONFIG.get("repo") or "")
+    if "/" not in cfg_repo:
+        return None
+    h_owner, h_repo = cfg_repo.split("/", 1)
+    if str(owner) != h_owner or str(repo_name) != h_repo:
+        return None
+    try:
+        runs = get_runs(workflow_key="keepalive")
+    except Exception:
+        return None
+    if not runs.get("ok"):
+        return None
+    rows = runs.get("keepalive") or []
+    return {"alive_count": len([r for r in rows if r.get("in_progress")]),
+            "last_run": (rows[0] if rows else None)}
+
+
 def get_accounts():
-    """账号池账号清单，合并 Secret 就位情况与池状态里的在跑机。"""
+    """账号池账号清单：合并 Secret 就位情况 + pool-state 每账号巡检明细 + 在跑机。
+
+    实时状态监测的数据来源（按可信度排序）：
+      * live        —— hub 账号：用本机 token 直接查 Actions runs（最新）
+      * pool-state  —— 协调器每 10 分钟巡检后发布的权威明细（覆盖所有账号）
+      * none        —— 还没有任何数据（协调器还没跑过 / 状态分支还没生成）
+    """
     pc = load_pool_config()
     if not pc["ok"]:
         return {"ok": False, "error": pc["error"], "path": pc["path"], "accounts": []}
@@ -621,40 +712,70 @@ def get_accounts():
     secrets = get_secret_names()
     pool = get_pool_state()
     state = pool.get("state") or {}
+    reports = pool_account_reports(state)
 
-    # owner -> 池状态条目
+    # owner -> 池状态条目（primary / standby）
     by_owner = {}
-    if state.get("primary"):
+    if isinstance(state.get("primary"), dict):
         pr = state["primary"]
         by_owner[str(pr.get("owner") or "")] = dict(pr, role="primary")
     for st in (state.get("standby") or []):
-        by_owner.setdefault(str(st.get("owner") or ""), dict(st, role="standby"))
+        if isinstance(st, dict):
+            by_owner.setdefault(str(st.get("owner") or ""), dict(st, role="standby"))
 
     accounts = []
     for a in (cfg.get("accounts") or []):
         owner = str(a.get("owner") or "")
         secret = str(a.get("token_secret") or "")
-        alive = by_owner.get(owner)
+        repo_name = str(a.get("repo") or "")
+        enabled = a.get("enabled") is not False
+        alive = by_owner.get(owner) or {}
+        rep = reports.get(owner) or {}
+
+        source = "pool-state" if rep else "none"
+        alive_count = rep.get("alive_count")
+        last_run = shape_last_run(rep.get("last_run"))
+
+        # hub 账号：实时探测（复用缓存，几乎零成本）
+        if enabled:
+            live = hub_live_probe(owner, repo_name)
+            if live:
+                alive_count = live["alive_count"]
+                last_run = shape_last_run(live["last_run"])
+                source = "live"
+
         accounts.append({
             "id": a.get("id") or "",
             "owner": owner,
-            "repo": a.get("repo") or "",
-            "enabled": a.get("enabled") is not False,
+            "repo": repo_name,
+            "enabled": enabled,
             "token_secret": secret,
             "secret_present": (None if secrets is None else (secret in secrets)) if secret else None,
-            "alive": bool(alive),
-            "role": (alive or {}).get("role") or "",
-            "run_id": (alive or {}).get("run_id"),
-            "since": (alive or {}).get("since") or "",
-            "since_human": human_age((alive or {}).get("since") or ""),
+            "alive": bool(alive) or bool(alive_count),
+            "role": str(rep.get("role") or alive.get("role") or ""),
+            "run_id": alive.get("run_id"),
+            "since": alive.get("since") or "",
+            "since_human": human_age(alive.get("since") or ""),
             "placeholder": owner.startswith("REPLACE_"),
+            # ---- 实时状态监测 ----
+            "token_state": str(rep.get("token_state") or ""),
+            "alive_count": alive_count,
+            "last_run": last_run,
+            "report_note": str(rep.get("note") or ""),
+            "source": source,
         })
+
     return {"ok": True, "error": "", "path": pc["path"],
             "pool_id": cfg.get("pool_id") or "",
             "target_machines": cfg.get("target_machines"),
             "hub": cfg.get("hub") or {},
             "accounts": accounts,
-            "secrets_readable": secrets is not None}
+            "secrets_readable": secrets is not None,
+            # 监测数据新鲜度（来自 pool-state）
+            "state_updated": state.get("updated_utc") or "",
+            "state_age_human": human_age(state.get("updated_utc") or ""),
+            "state_via": pool.get("via") or "",
+            "monitor_available": bool(reports)}
 
 
 # ==================================================================== Actions runs
@@ -988,15 +1109,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._route("POST")
 
+    def do_HEAD(self):
+        # 浏览器/预览面板探活会先发 HEAD；不支持会返回 501，被误判成「服务不可用」。
+        self._route("HEAD")
+
+    def handle_error(self, request, client_address):
+        # 探活（HEAD）后立刻断开是常态，别把 ConnectionReset 当成异常刷屏。
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        return super().handle_error(request, client_address)
+
     def _route(self, method):
         path, _, query = self.path.partition("?")
         params = urllib.parse.parse_qs(query)
+        lookup = "GET" if method == "HEAD" else method   # HEAD 复用 GET 的处理器，_send 不写 body
         try:
             if not path.startswith("/api/"):
-                if method != "GET":
+                if lookup != "GET":
                     return self._json(405, {"ok": False, "error": "method not allowed"})
                 return self._static(path)
-            fn = ROUTES.get((method, path))
+            fn = ROUTES.get((lookup, path))
             if not fn:
                 return self._json(404, {"ok": False, "error": "no such api: %s %s" % (method, path)})
             fn(self, params)
@@ -1066,6 +1199,103 @@ def api_accounts_toggle(h, params):
                          "path": pc["path"]})
 
 
+_RE_OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_RE_REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+_RE_SECRET = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")
+_RE_ACCID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def verify_repo_exists(owner, repo):
+    """用本机 token 校验仓库是否存在。返回 (state, note)：
+    'ok'（存在）/ 'missing'（明确 404）/ 'unknown'（离线或网络异常，不拦）。"""
+    if OFFLINE:
+        return "unknown", "离线模式，跳过仓库校验"
+    try:
+        gh_api("/repos/%s/%s" % (owner, repo), timeout=15)
+        return "ok", ""
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "missing", "仓库 %s/%s 不存在（或本机 token 无权访问）" % (owner, repo)
+        return "unknown", "仓库校验未完成：GitHub API %s" % e.code
+    except Exception as e:
+        return "unknown", "仓库校验未完成：%s: %s" % (type(e).__name__, e)
+
+
+def api_accounts_add(h, params):
+    """新增账号：写回 pool-config.json（原子写）。PAT 绝不进本文件。"""
+    body = h._read_body()
+    owner = str(body.get("owner") or "").strip()
+    repo = str(body.get("repo") or "cloud-rdp").strip()
+    secret = str(body.get("token_secret") or "").strip()
+    acc_id = str(body.get("id") or "").strip()
+    enabled = body.get("enabled")
+    if enabled is None:
+        enabled = True
+
+    errs = []
+    if not owner:
+        errs.append("owner（GitHub 用户名）必填")
+    elif not _RE_OWNER.match(owner):
+        errs.append("owner 格式不合法（GitHub 用户名：字母数字与连字符）")
+    if not repo:
+        errs.append("repo（仓库名）必填")
+    elif not _RE_REPO.match(repo):
+        errs.append("repo 名不合法")
+    if not secret:
+        errs.append("token_secret（Secret 名）必填")
+    elif not _RE_SECRET.match(secret):
+        errs.append("token_secret 必须是合法 Secret 名（字母/下划线开头，仅含字母数字下划线）")
+    if acc_id and not _RE_ACCID.match(acc_id):
+        errs.append("id 不合法（字母数字与 . _ -）")
+    if errs:
+        return h._json(400, {"ok": False, "error": "；".join(errs)})
+
+    pc = load_pool_config()
+    if not pc["ok"]:
+        return h._json(400, {"ok": False, "error": pc["error"]})
+    cfg = pc["config"] or {}
+    accs = cfg.get("accounts")
+    if not isinstance(accs, list):
+        accs = []
+        cfg["accounts"] = accs
+
+    for a in accs:
+        if str(a.get("owner") or "").lower() == owner.lower():
+            return h._json(409, {"ok": False, "error": "账号 %s 已存在" % owner})
+    if acc_id:
+        for a in accs:
+            if str(a.get("id") or "") == acc_id:
+                return h._json(409, {"ok": False, "error": "id %s 已存在" % acc_id})
+
+    # 仓库校验：明确 404 才拦；离线/网络异常放行（只提示），避免误伤
+    v_state, v_note = verify_repo_exists(owner, repo)
+    if v_state == "missing":
+        return h._json(400, {"ok": False, "error": v_note})
+
+    if not acc_id:
+        existing = set(str(a.get("id") or "") for a in accs)
+        n = 1
+        while ("acc-%d" % n) in existing:
+            n += 1
+        acc_id = "acc-%d" % n
+
+    entry = {"id": acc_id, "owner": owner, "repo": repo,
+             "token_secret": secret, "enabled": bool(enabled)}
+    accs.append(entry)
+    try:
+        save_pool_config(cfg)
+    except Exception as e:
+        return h._json(500, {"ok": False, "error": "写回失败：%s" % e})
+    clear_cache()
+
+    hint = ("PAT 不会写进本文件。请到 GitHub 仓库 Secrets 配置其一："
+            "① 推荐 —— Secret 名 POOL_TOKENS，值是 JSON，加一项 \"%s\": \"ghp_...\"；"
+            "② 或建名为 %s 的 Secret，值就是该账号的 PAT。" % (owner, secret))
+    return h._json(200, {"ok": True, "id": acc_id, "account": entry,
+                         "path": pc["path"], "verified": v_state,
+                         "verify_note": v_note, "hint": hint})
+
+
 def api_machines(h, params):
     ts = tailscale_status()
     machines = []
@@ -1119,6 +1349,7 @@ ROUTES = {
     ("GET", "/api/overview"): api_overview,
     ("GET", "/api/accounts"): api_accounts,
     ("POST", "/api/accounts/toggle"): api_accounts_toggle,
+    ("POST", "/api/accounts/add"): api_accounts_add,
     ("GET", "/api/machines"): api_machines,
     ("GET", "/api/runs"): api_runs,
     ("GET", "/api/pool-state"): api_pool_state,

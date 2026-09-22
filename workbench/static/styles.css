@@ -163,6 +163,40 @@ html, body {
 .tab:hover { color: var(--fg); }
 .tab.active { background: var(--card-2); color: var(--fg); box-shadow: 0 1px 4px rgba(0,0,0,.3); }
 
+/* ---------------- 账号管理：新增账号表单 + 实时监测列 ---------------- */
+.add-acc {
+  margin: 0 0 12px; padding: 11px 12px;
+  background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: 10px;
+}
+.add-acc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.add-acc-grid label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: var(--fg-dim);
+}
+.add-acc-grid input[type=text] {
+  background: var(--card); border: 1px solid var(--line); color: var(--fg);
+  border-radius: 7px; padding: 6px 9px; font-size: 12.5px; width: 100%;
+}
+.add-acc-grid input[type=text]:focus { outline: none; border-color: var(--info); }
+.add-acc-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.add-acc-foot .chk { font-size: 12px; color: var(--fg-dim); cursor: pointer; }
+.add-acc-foot .spacer { flex: 1 1 auto; }
+.add-acc-msg { font-size: 11.5px; color: #ff9d97; }
+.add-acc-tip { margin: 9px 0 0; font-size: 11px; line-height: 1.5; }
+.add-acc-tip code {
+  font-family: var(--mono); font-size: 10.5px;
+  background: rgba(255,255,255,.06); border-radius: 4px; padding: 1px 5px;
+}
+
+.mon-cell { display: flex; flex-wrap: wrap; gap: 5px 7px; align-items: center; }
+.mon-num { font-size: 11.5px; color: var(--fg); }
+.mon-run { display: inline-flex; align-items: center; gap: 5px; }
+.mon-note { flex-basis: 100%; font-size: 10.5px; line-height: 1.4; }
+.src-tag {
+  font-size: 10px; color: #9dc6ff; border: 1px solid rgba(88,166,255,.4);
+  background: rgba(88,166,255,.1); border-radius: 999px; padding: 1px 7px;
+}
+
 /* ---------------- 操作台 ---------------- */
 .ops { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; padding: 12px 14px 14px; }
 .op-group { background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: 10px; padding: 12px 14px; }

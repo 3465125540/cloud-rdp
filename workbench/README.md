@@ -107,8 +107,9 @@ python workbench\selftest.py
 | --- | --- | --- |
 | GET | `/api/health` | 服务与各链路健康状态 |
 | GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存 |
-| GET | `/api/accounts` | 账号池清单 |
+| GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
+| POST | `/api/accounts/add` | `{owner, repo, secret_name, id?, enabled?}` 新增账号（校验后原子写回 pool-config.json，不写 PAT 明文） |
 | GET | `/api/machines` | 机器实况 |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录 |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
@@ -146,6 +147,12 @@ A：Tailscale 里累积的历史节点都还在。默认勾了「**只看在线*
 
 **Q：Secret 那一列显示「未知」？**
 A：读 Actions Secret **名字**列表需要仓库 admin 权限的 Token。Token 权限不够时会显示「未知」而不是「缺失」，避免误判。
+
+**Q：新增账号时能填 PAT 吗？**
+A：不能，也不该填。账号池里一账号 = 一个 fork，token 只以 **GitHub Actions Secret** 的形式存在（名字如 `POOL_TOKEN_<ID>`），值永不通过 API 返回、也永不写进 `pool-config.json`。新增账号表单只需填 owner / repo / Secret 名，之后去对应仓库配好同名 Secret 即可。
+
+**Q：实时监测的「在跑机数 / 最近 run」从哪来？**
+A：两条来源合并：① 协调器每 10 分钟巡检，把**每个账号**的明细（凭证状态 / 在跑机数 / 最近 run）发布到 `pool-state` 分支 —— 覆盖全部账号；② hub 账号本机有 token 时，工作台额外轮询 `/actions/runs` 做**实时**探测（更新鲜）。卡片底部会标数据新鲜度（如「2 分钟前 · 协调器」或「实时」）。刚新增的账号在下一次协调器巡检前，明细可能为空属正常。
 
 **Q：派发按钮点了没反应？**
 A：workflow_dispatch 触发后 GitHub 通常要 10~60 秒才创建 run。界面会在 12 秒后自动刷新一次，也可以手动点「刷新」。
