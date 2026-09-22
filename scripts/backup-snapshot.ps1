@@ -160,6 +160,25 @@ function Get-TreeSize {
     return @{ Files = $items.Count; Bytes = [long]$sum }
 }
 
+# 计算「应抓文件数」= 源目录全部文件 − 匹配 excludeFilePatterns 的文件。
+# 为什么需要：完整抓取（noExcludeDirs）只是「不排除子目录」，仍应用文件级排除
+# （LOCK/LOG/LOG.old/desktop.ini 等运行时无价值文件）。所以暂存文件数天然少于源文件数 ——
+# 直接拿源文件数比对会误报「文件数不足」。真机踩过：.workbuddy-ai 每次固定差 24，
+# 就是被排除的 LOCK/LOG 类文件，不是被占用。
+function Get-ExpectedFileCount {
+    param([string]$Path, [string[]]$ExcludeFiles)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    $items = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)
+    if (-not $ExcludeFiles -or $ExcludeFiles.Count -eq 0) { return $items.Count }
+    $kept = @($items | Where-Object {
+        $n = $_.Name
+        $ex = $false
+        foreach ($pat in $ExcludeFiles) { if ($n -like $pat) { $ex = $true; break } }
+        -not $ex
+    })
+    return $kept.Count
+}
+
 # ---------------------------------------------------------------- 用户 HKCU 导出
 # 关键难点：runner 以 runneradmin 身份运行，而 RDP 用户是 a，
 # 二者 HKCU 不同。需要直接读用户 a 的 NTUSER.DAT。
@@ -403,11 +422,15 @@ foreach ($raw in $dirs) {
               $code, $src, $size.Files, $got.Files, ($size.Files - $got.Files))
         $problems.Add("file:$src")
     }
-    # 完整抓取目录没有目录级排除，源与暂存的文件数必须一致 —— 不一致说明有文件没复制成功
-    if ($full -and $got.Files -lt $size.Files) {
-        Warn ("[完整抓取] 文件数不足：{0} 源 {1} / 暂存 {2}（差 {3}）—— 大概率被占用" -f `
-              $src, $size.Files, $got.Files, ($size.Files - $got.Files))
-        $problems.Add("filecount:$src")
+    # 完整抓取目录：暂存文件数应等于「源文件数 − 被 excludeFilePatterns 排除的文件数」。
+    # 只算真正该抓的文件，避免把 LOCK/LOG 这类主动排除误报成「文件数不足」（真机差 24 的根因）。
+    if ($full) {
+        $expected = Get-ExpectedFileCount -Path $src -ExcludeFiles $exFiles
+        if ($got.Files -lt $expected) {
+            Warn ("[完整抓取] 文件数不足：{0} 应抓 {1} / 暂存 {2}（差 {3}）—— 大概率被占用" -f `
+                  $src, $expected, $got.Files, ($expected - $got.Files))
+            $problems.Add("filecount:$src")
+        }
     }
 
     $totalBytes += $got.Bytes
