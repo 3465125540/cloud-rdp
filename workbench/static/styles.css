@@ -210,6 +210,11 @@ html, body {
 }
 .op-group .chk { cursor: pointer; }
 
+/* ---------------- 卡片「缩略」（收起 / 展开） ---------------- */
+.collapse-btn { white-space: nowrap; }
+.card.collapsed .card-body { display: none; }
+.card.collapsed .card-head { border-bottom: none; }
+
 /* ---------------- 页脚 ---------------- */
 .foot { margin-top: 18px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .errors { display: flex; flex-direction: column; gap: 5px; }

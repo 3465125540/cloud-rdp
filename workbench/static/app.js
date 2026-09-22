@@ -298,6 +298,31 @@ function setTimer() {
   TIMER = setInterval(function () { load(false); }, Math.max(10, secs) * 1000);
 }
 
+/* ------------------------------------------------------------ 卡片「缩略」 */
+// 任何带 data-collapse="<key>" 的按钮：点击后收起 / 展开所在 .card 的 body，
+// 状态记进 localStorage（刷新后保持）。
+function initCollapse() {
+  Array.prototype.forEach.call(document.querySelectorAll("[data-collapse]"), function (btn) {
+    var key = "wb.collapse." + btn.dataset.collapse;
+    var card = btn.closest(".card");
+    if (!card) return;
+    function apply(collapsed) {
+      card.classList.toggle("collapsed", collapsed);
+      btn.innerHTML = collapsed ? "展开 &#9662;" : "缩略 &#9652;";
+      btn.title = collapsed ? "展开表格" : "缩略 / 展开表格";
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    }
+    var saved = null;
+    try { saved = localStorage.getItem(key); } catch (e) {}
+    apply(saved === "1");
+    btn.addEventListener("click", function () {
+      var next = !card.classList.contains("collapsed");
+      apply(next);
+      try { localStorage.setItem(key, next ? "1" : "0"); } catch (e) {}
+    });
+  });
+}
+
 /* ------------------------------------------------------------ 事件 */
 function bind() {
   $("#btn-refresh").addEventListener("click", function () { load(true); });
@@ -429,6 +454,9 @@ function bind() {
       .catch(function (err) { toast("派发失败：" + esc(err.message), "bad"); })
       .then(function () { b.disabled = false; b.innerHTML = old; });
   });
+
+  // 卡片「缩略」按钮（日志板块等）
+  initCollapse();
 }
 
 /* ------------------------------------------------------------ 启动 */

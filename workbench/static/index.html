@@ -36,6 +36,40 @@
   <!-- ============ 主网格 ============ -->
   <main class="grid">
 
+    <!-- 操作台（提上：放在最前，常用操作一进来就能点到） -->
+    <section class="card span-12">
+      <div class="card-head"><h2>&#127918; 操作台</h2></div>
+      <div class="card-body ops">
+        <div class="op-group">
+          <h3>账号池协调器</h3>
+          <p class="muted">巡检各账号在跑机 → 补足到目标台数 → 到寿轮换 → 发布权威角色。</p>
+          <div class="row">
+            <button class="btn" data-act="coordinator">立即巡检</button>
+            <button class="btn btn-ghost" data-act="coordinator-dry">干跑（只看决策）</button>
+          </div>
+        </div>
+
+        <div class="op-group">
+          <h3>派发保活机</h3>
+          <p class="muted">手动开一台机器（单机模式；池模式请用协调器派发）。</p>
+          <div class="row">
+            <label>时长(分钟)<input type="number" id="inp-duration" value="350" min="1" max="350" /></label>
+            <label class="chk"><input type="checkbox" id="inp-install" checked /> 重装软件</label>
+            <label class="chk"><input type="checkbox" id="inp-migrate" /> 迁移139</label>
+            <button class="btn" data-act="keepalive">派发</button>
+          </div>
+        </div>
+
+        <div class="op-group">
+          <h3>本地</h3>
+          <p class="muted">清空缓存后重新拉取全部数据。</p>
+          <div class="row">
+            <button class="btn btn-ghost" id="btn-refresh2">强制刷新缓存</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 机器运行实况 -->
     <section class="card span-7">
       <div class="card-head">
@@ -105,9 +139,13 @@
     <section class="card span-12">
       <div class="card-head">
         <h2>&#128197; 定时计划运行日志</h2>
-        <div class="tabs" id="run-tabs">
-          <button class="tab active" data-tab="keepalive">保活 windows-rdp.yml</button>
-          <button class="tab" data-tab="coordinator">协调器 pool-coordinator.yml</button>
+        <div class="head-right">
+          <div class="tabs" id="run-tabs">
+            <button class="tab active" data-tab="keepalive">保活 windows-rdp.yml</button>
+            <button class="tab" data-tab="coordinator">协调器 pool-coordinator.yml</button>
+          </div>
+          <button class="btn btn-mini btn-ghost collapse-btn" data-collapse="runs"
+                  title="缩略 / 展开日志表格">缩略 &#9652;</button>
         </div>
       </div>
       <div class="card-body">
@@ -121,40 +159,6 @@
           <tbody></tbody>
         </table>
         <div class="empty" id="runs-empty" hidden>暂无运行记录</div>
-      </div>
-    </section>
-
-    <!-- 操作台 -->
-    <section class="card span-12">
-      <div class="card-head"><h2>&#127918; 操作台</h2></div>
-      <div class="card-body ops">
-        <div class="op-group">
-          <h3>账号池协调器</h3>
-          <p class="muted">巡检各账号在跑机 → 补足到目标台数 → 到寿轮换 → 发布权威角色。</p>
-          <div class="row">
-            <button class="btn" data-act="coordinator">立即巡检</button>
-            <button class="btn btn-ghost" data-act="coordinator-dry">干跑（只看决策）</button>
-          </div>
-        </div>
-
-        <div class="op-group">
-          <h3>派发保活机</h3>
-          <p class="muted">手动开一台机器（单机模式；池模式请用协调器派发）。</p>
-          <div class="row">
-            <label>时长(分钟)<input type="number" id="inp-duration" value="350" min="1" max="350" /></label>
-            <label class="chk"><input type="checkbox" id="inp-install" checked /> 重装软件</label>
-            <label class="chk"><input type="checkbox" id="inp-migrate" /> 迁移139</label>
-            <button class="btn" data-act="keepalive">派发</button>
-          </div>
-        </div>
-
-        <div class="op-group">
-          <h3>本地</h3>
-          <p class="muted">清空缓存后重新拉取全部数据。</p>
-          <div class="row">
-            <button class="btn btn-ghost" id="btn-refresh2">强制刷新缓存</button>
-          </div>
-        </div>
       </div>
     </section>
 
