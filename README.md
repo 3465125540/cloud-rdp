@@ -565,11 +565,74 @@ env:
 
 ---
 
+### 7. 账号池：多账号无缝保活（主/备，先搭机制后填）
+
+**目标**：用多个 GitHub 账号组成「账号池」，让机器**一直有 2 台在跑**（互为主备），
+一台到寿自动换下一个账号接力 —— 单账号额度耗尽或单机故障都不会断档。
+
+**为什么需要多账号**：单账号的月度 Actions 额度是硬约束。账号池把负载摊到多个账号，
+每台机器跑 ~5.5 小时就换账号接力，从而**无缝续命**。
+
+**三个角色**：
+
+| 角色 | 是什么 | 干什么 |
+|------|--------|--------|
+| **hub 协调器** | `pool-coordinator.yml`（跑在 hub 仓库，每 10 分钟一次） | 巡检各账号 fork 的在跑机 → 补机/轮换 → 用各账号 PAT 触发 `windows-rdp.yml` → 把权威角色写到 `pool-state` 分支 |
+| **primary（主）** | 最老的在跑机 | **唯一**写 139（用户数据 + 整机快照） |
+| **standby（备）** | 其余在跑机 | 只读热备：开机照常还原、每 10 分钟重拉保持与主一致，**不写 139**；每 5 分钟读 hub 权威状态，主下线后**自升为主**并立即补一次备份 |
+
+**为什么主/备**：两台机器同时写 139 会互相覆盖/冲突。让「最老的在跑机」当主、其余当备，
+任一时刻只有一个写者 —— 既有冗余、又无冲突。
+
+**推荐账号数：≥3 个**。2 个也能跑，但轮换时没有空闲账号做重叠替补 → 换机瞬间会有几分钟
+空档；3 个及以上才真正「无缝」。
+
+**填充步骤（4 步）**：
+
+1. **每个账号 fork 本仓库**（或独立仓库），保证仓库名一致（默认 `cloud-rdp`）。
+2. **给每个账号建一个 PAT**（classic 勾 `repo` + `workflow`，或 fine-grained 给
+   `Actions: read/write` + `Contents: read`）。存到 **hub 仓库的 Secret**，推荐一个
+   JSON Secret `POOL_TOKENS`（加账号不用改 workflow）：
+   ```json
+   { "账号1登录名": "ghp_xxx", "账号2登录名": "ghp_yyy", "账号3登录名": "ghp_zzz" }
+   ```
+   （也支持每账号一个 Secret，名字写进 `pool-config.json` 的 `token_secret`。）
+3. **填 `scripts/pool-config.json`**：`hub.owner` 改成你的 hub 账号、`accounts[].owner`
+   改成各账号登录名（`enabled` 控制启用）。**密钥绝不写这里**（只放 Secret）。
+4. **启用协调器**：`pool-coordinator.yml` 默认每 10 分钟自动跑；也可手动 `Run workflow`
+   （勾 `dry_run` 只演练不派发）。它会自动在 hub 仓库建 `pool-state` 分支。
+
+**关键参数（`pool-config.json`）**：
+
+| 字段 | 默认 | 含义 |
+|------|------|------|
+| `target_machines` | 2 | 目标在跑机数（一直维持这么多） |
+| `machine.lifetime_minutes` | 330 | 单机目标寿命（≈5.5h，给 6h 硬上限留收尾余量） |
+| `machine.rotate_lead_minutes` | 45 | 到「寿命 − 45min」就派替补，形成重叠交接 |
+| `machine.keepalive_minutes` | 330 | 派发时传给机器的保活时长 |
+| `standby.repull_minutes` | 10 | 备机重拉间隔 |
+| `standby.role_poll_minutes` | 5 | 备机核对权威角色的间隔 |
+
+**降级与兜底（重要）**：
+
+- **hub 停摆**：备机不会盲目抢主（怕双写），主会继续写到自然结束；修复 hub 后自动恢复。
+- **只有 2 个账号**：轮换无法重叠 → 换机瞬间有几分钟空档（其余时间仍有 2 台）。
+- **某账号 PAT 失效**：协调器跳过该账号并记录，其余账号继续。
+- **单机模式**：`pool_role` 留空 = 完全等同历史行为（手动/定时单机跑，向后兼容）。
+
+**与「接力续期」的区别**：接力（上一节）是**同账号同仓库**串起来跑；账号池是**跨账号、
+主备冗余、由独立协调器驱动**。两者可独立使用；账号池派发的机器 `relay_minutes=0`。
+
+**相关文件**：`scripts/pool-config.json`（池配置）、`scripts/pool-lib.ps1`（公共库）、
+`scripts/pool-coordinator.ps1`（协调器逻辑）、`.github/workflows/pool-coordinator.yml`（定时工作流）。
+
+---
+
 ## 五、目录结构
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（21 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
 └── scripts/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
@@ -589,10 +652,13 @@ cloud-rdp/
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
     ├── reinstall-apps.ps1              # winget 后台逐包重装（日志 + 进度 JSON）
+    ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
+    ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
+    ├── pool-coordinator.ps1            # 【新】hub 协调器：补机 + 轮换 + 发布权威角色
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 21 步。**0d 之后就能连**，其余在后台继续跑：
+工作流 22 步。**0d 之后就能连**，其余在后台继续跑：
 
 | # | 步骤 | 说明 |
 |---|------|------|
@@ -600,6 +666,7 @@ cloud-rdp/
 | **0a** | 记录 job 起点 + 开 RDP + **关防火墙** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
+| **0c2** | **解析账号池角色** | `pool_role` 留空=单机（等同历史行为）；`primary`=唯一写 139；`standby`=只读热备、主下线自升为主。角色写入 `_state\pool-role.txt` |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
 | **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机。诊断日志 `D:\cloudrdp-sys\_state\mail.log`，结果透出 `MAIL_RESULT` |
 | **0f** | **设置中文 + 微软拼音（提前到瘦身之前）** | `setup-chinese.ps1`：`Install-Language` 实测每次 **30~43 分钟**，所以放最前面 + **5 分钟封顶、超时转后台**（`LANGPACK=TIMEOUT_BACKGROUND`）。它能在后面瘦身/拉数据/还原的 ~40 分钟里悄悄装完。步级 `timeout-minutes: 6` + `continue-on-error` 双保险 |
@@ -613,8 +680,8 @@ cloud-rdp/
 | **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
 | **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 .workbuddy-ai 取证** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
-| 14 | 保活 | 每 10 分钟同步数据；每 30 分钟 C 盘守卫；每 60 分钟抓整机快照。时长收敛到 `360 − 已用 − 8(余量)`。**最后 15 分钟在后台启动收尾**，主循环继续跑 → 远程连接全程不中断 |
-| 15 | 等待后台收尾 | `if: always()`：等 finalize 后台作业完成（最多 4 分钟）；未启动才前台补跑。收尾 = C 盘清理 + 全量同步 + 整机快照 |
+| 14 | 保活 | **主/单机**：每 10 分钟同步数据、每 60 分钟快照并推送；**备机**：每 10 分钟**重拉**、每 60 分钟只做本地快照（不写 139），每 5 分钟核对权威角色、主下线即自升为主。每 30 分钟 C 盘守卫。时长收敛到 `360 − 已用 − 8(余量)`。**最后 15 分钟在后台启动收尾**，主循环继续跑 → 远程连接全程不中断 |
+| 15 | 等待后台收尾 | `if: always()`：等 finalize 后台作业完成（最多 4 分钟）；未启动才前台补跑。收尾 = C 盘清理 + 全量同步 + 整机快照（**备机**跳过同步/推送，只做本地快照） |
 
 139 云盘内的存放位置：
 

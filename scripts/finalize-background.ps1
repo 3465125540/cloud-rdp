@@ -33,6 +33,8 @@ param(
     [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
     [string]$ScriptsDir = "",
     [string]$LogDir     = "",
+    # 账号池角色：primary/standalone 写 139；standby 只做本地完整快照、不推 139（避免与主双写）
+    [string]$Role       = "standalone",
     [switch]$Background
 )
 
@@ -84,12 +86,12 @@ if ($Background) {
 
     $exe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
     if (-not $exe) { $exe = (Get-Command powershell.exe -ErrorAction Stop).Source }
-    $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Stage "{1}" -ScriptsDir "{2}" -LogDir "{3}"' -f `
-        $PSCommandPath, $Stage, $ScriptsDir, $LogDir
+    $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Stage "{1}" -ScriptsDir "{2}" -LogDir "{3}" -Role "{4}"' -f `
+        $PSCommandPath, $Stage, $ScriptsDir, $LogDir, $Role
 
     Start-Process -FilePath $exe -ArgumentList $argStr -WindowStyle Hidden | Out-Null
 
-    Say "已在后台启动收尾（C 盘清理 → 全量同步 → 整机快照），远程连接保持可用"
+    Say "已在后台启动收尾（role=$Role；C 盘清理 → 同步 → 整机快照），远程连接保持可用"
     Say "日志: $LogFile"
     Set-GhEnv "FINALIZE_STATE=后台收尾中"
     exit 0
@@ -126,13 +128,17 @@ try {
 }
 
 # --- 阶段 2：用户数据全量同步 -----------------------------------------------
+# 备机不写 139（避免与主双写）；主/单机正常全量同步。
+$isStandby = ($Role.Trim().ToLowerInvariant() -eq 'standby')
 Write-Status ([ordered]@{
     state = 'running'; phase = 'sync-up'; startedUtc = $started.ToString('o')
     updatedUtc = (Get-Date).ToUniversalTime().ToString('o'); exitCode = 0; error = $errMsg
 })
 try {
     $p2 = Join-Path $ScriptsDir 'sync-up.ps1'
-    if (Test-Path -LiteralPath $p2) {
+    if ($isStandby) {
+        Log "[2/3] 跳过 sync-up（备机不写 139，保持只读热备）"
+    } elseif (Test-Path -LiteralPath $p2) {
         Log "[2/3] sync-up"
         & $p2 2>&1 | Out-File -LiteralPath $LogFile -Append -Encoding utf8
         Log "[2/3] done (exit=$LASTEXITCODE)"
@@ -152,12 +158,17 @@ Write-Status ([ordered]@{
 })
 try {
     $p3 = Join-Path $ScriptsDir 'backup-snapshot.ps1'
-    if (Test-Path -LiteralPath $p3) {
-        Log "[3/3] backup-snapshot -Push（全量）"
-        & $p3 -Push 2>&1 | Out-File -LiteralPath $LogFile -Append -Encoding utf8
+    if (-not (Test-Path -LiteralPath $p3)) {
+        Log "[3/3] 跳过：未找到 $p3"
+    } elseif ($isStandby) {
+        # 备机：只做本地完整快照（保证本机备份完整），不推 139
+        Log "[3/3] backup-snapshot（本地完整快照，备机不推送）"
+        & $p3 2>&1 | Out-File -LiteralPath $LogFile -Append -Encoding utf8
         Log "[3/3] done (exit=$LASTEXITCODE)"
     } else {
-        Log "[3/3] 跳过：未找到 $p3"
+        Log "[3/3] backup-snapshot -Push（全量 + 推送）"
+        & $p3 -Push 2>&1 | Out-File -LiteralPath $LogFile -Append -Encoding utf8
+        Log "[3/3] done (exit=$LASTEXITCODE)"
     }
 } catch {
     if ($errMsg) { $errMsg += " | " }

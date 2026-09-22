@@ -1,0 +1,87 @@
+name: Pool Coordinator
+
+# 账号池协调器（hub 侧大脑）：每 10 分钟巡检一次账号池，
+#   ① 用各账号 PAT 查各 fork 的在跑机  ② 维持 target_machines 台  ③ 指派 primary/standby
+#   ④ 把权威角色写进 pool-state 分支（spoke 的 standby 读它 → 主机挂了自升为主）
+# 与 windows-rdp.yml 完全独立：跑在 ubuntu-latest，只做 GitHub API 调用，几乎不耗额度。
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只打印决策不真派发（true/false）'
+        required: false
+        default: 'false'
+
+# 协调器自己串行，避免两轮重叠导致状态互相覆盖
+concurrency:
+  group: pool-coordinator
+  cancel-in-progress: false
+
+permissions:
+  contents: write     # 需要把 pool-state.json 推到 pool-state 分支
+
+jobs:
+  coordinate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 0. 拉取仓库
+        uses: actions/checkout@v5
+
+      - name: 1. 取上一轮池状态（防重复派发用，取不到就算了）
+        continue-on-error: true
+        run: |
+          mkdir -p .pool-prev
+          if git fetch origin pool-state --depth=1 2>/dev/null; then
+            git show FETCH_HEAD:state/pool-state.json > .pool-prev/pool-state.json 2>/dev/null || true
+          fi
+          if [ -s .pool-prev/pool-state.json ]; then
+            echo "已取到上一轮状态："; head -c 400 .pool-prev/pool-state.json; echo
+          else
+            echo "（无上一轮状态）"
+          fi
+
+      - name: 2. 巡检 + 决策 + 派发
+        continue-on-error: true
+        shell: pwsh
+        env:
+          # 推荐：一个 JSON Secret 装全部账号 PAT —— {"<owner>":"ghp_...","<owner2>":"ghp_..."}
+          # 加账号只需改这个 Secret，不用动本文件。
+          POOL_TOKENS: ${{ secrets.POOL_TOKENS }}
+          # 兜底：也可给每个账号单独建 Secret，名字与 pool-config.json 里的 token_secret 对应。
+          POOL_TOKEN_1: ${{ secrets.POOL_TOKEN_1 }}
+          POOL_TOKEN_2: ${{ secrets.POOL_TOKEN_2 }}
+          POOL_TOKEN_3: ${{ secrets.POOL_TOKEN_3 }}
+          POOL_TOKEN_4: ${{ secrets.POOL_TOKEN_4 }}
+          POOL_TOKEN_5: ${{ secrets.POOL_TOKEN_5 }}
+          POOL_TOKEN_6: ${{ secrets.POOL_TOKEN_6 }}
+        run: |
+          $args = @('-PrevStatePath', '.pool-prev/pool-state.json', '-OutStatePath', 'state/pool-state.json')
+          if ('${{ inputs.dry_run }}' -eq 'true') { $args += '-DryRun' }
+          pwsh -NoProfile -File ./scripts/pool-coordinator.ps1 @args
+
+      - name: 3. 发布权威状态到 pool-state 分支
+        continue-on-error: true
+        run: |
+          set -e
+          if [ ! -s state/pool-state.json ]; then echo "无状态文件，跳过"; exit 0; fi
+          cp state/pool-state.json /tmp/pool-state.json
+          git config user.name  'pool-coordinator'
+          git config user.email 'pool-coordinator@users.noreply.github.com'
+          if git ls-remote --exit-code --heads origin pool-state >/dev/null 2>&1; then
+            git fetch origin pool-state --depth=1
+            git checkout -B pool-state FETCH_HEAD
+          else
+            echo "pool-state 分支不存在 → 新建孤儿分支"
+            git checkout --orphan pool-state
+            git rm -rf --cached . >/dev/null 2>&1 || true
+          fi
+          mkdir -p state
+          cp /tmp/pool-state.json state/pool-state.json
+          git add -f state/pool-state.json
+          git commit -m "pool state $(date -u +%FT%TZ)" || echo "（无变化）"
+          git push origin pool-state
+          echo "已发布 pool-state"

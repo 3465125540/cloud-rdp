@@ -28,6 +28,23 @@ on:
         description: '接力总时长（分钟）：单 job 上限 6 小时，填 2880 可借接力续到 48 小时。0 = 不接力'
         required: false
         default: '0'
+      # ---------- 账号池（留空 = 单机模式，行为与历史版本完全一致）----------
+      pool_role:
+        description: '账号池角色：primary（写139）/standby（只读热备）。留空 = 单机'
+        required: false
+        default: ''
+      pool_owner:
+        description: '本机所属 GitHub 账号（owner）。留空则用仓库 owner 兜底'
+        required: false
+        default: ''
+      pool_hub:
+        description: '池协调器所在仓库 owner/repo（读取权威角色）。留空 = 单机'
+        required: false
+        default: ''
+      pool_id:
+        description: '池标识（仅用于日志/状态标记）。留空 = 单机'
+        required: false
+        default: ''
   schedule:
     # 早场：北京 8:30 开机（UTC 00:30）→ 跑满 6 小时
     - cron: '30 0 * * *'
@@ -76,6 +93,15 @@ env:
   INPUT_CHINESE: "${{ inputs.chinese }}"
   # 接力：>0 表示本轮跑满后自动触发下一个 run，直到累计够这么多分钟（单 job 上限 6 小时，靠接力续命）
   INPUT_RELAY_MINUTES: "${{ inputs.relay_minutes }}"
+  # ---------- 账号池 ----------
+  # pool_role 非空即进入「池模式」。角色由 hub 协调器派发时指定；standby 会读 hub 权威状态自升为主。
+  INPUT_POOL_ROLE: "${{ inputs.pool_role }}"
+  INPUT_POOL_OWNER: "${{ inputs.pool_owner }}"
+  INPUT_POOL_HUB: "${{ inputs.pool_hub }}"
+  INPUT_POOL_ID: "${{ inputs.pool_id }}"
+  # hub 发布权威状态的分支/路径（spoke 用 raw.githubusercontent 匿名读取）
+  POOL_STATE_BRANCH: 'pool-state'
+  POOL_STATE_PATH: 'state/pool-state.json'
 
 jobs:
   build:
@@ -186,6 +212,54 @@ jobs:
 
           # 「可连」时刻：供 0d 打印拿到 IP 的耗时、13 打印就绪总耗时
           (Get-Date).ToUniversalTime().ToString('o') | Out-File (Join-Path $env:CLOUDRDP_SYS_DIR '_state\rdp-ready-at.txt') -Encoding ascii
+      - name: 0c2. 解析账号池角色（primary / standby / 单机）
+        shell: pwsh
+        run: |
+          # pool_role 留空 = 单机模式（与历史行为完全一致，向后兼容）。
+          # 非空 = 池模式：本机初始角色由 hub 派发时指定。
+          #   * primary —— 唯一写 139（用户数据 + 整机快照）
+          #   * standby —— 只读热备：持续重拉保持与主一致，不写 139；主下线后读 hub 权威状态自升为主
+          $role = [string]$env:INPUT_POOL_ROLE
+          if ([string]::IsNullOrWhiteSpace($role)) { $role = 'standalone' }
+          $role = $role.Trim().ToLowerInvariant()
+          if ($role -notin @('primary', 'standby', 'standalone')) { $role = 'standalone' }
+
+          $hub    = ([string]$env:INPUT_POOL_HUB).Trim()
+          $poolId = ([string]$env:INPUT_POOL_ID).Trim()
+          $owner  = ([string]$env:INPUT_POOL_OWNER).Trim()
+          if ([string]::IsNullOrWhiteSpace($owner)) { $owner = [string]$env:GITHUB_REPOSITORY_OWNER }
+
+          # 池模式必须同时有角色 + hub 坐标，否则退回单机（绝不让半配置把机器卡死）
+          $pooled = ($role -ne 'standalone') -and (-not [string]::IsNullOrWhiteSpace($hub))
+          if (-not $pooled) { $role = 'standalone' }
+
+          $stateDir = Join-Path $env:CLOUDRDP_SYS_DIR '_state'
+          New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+          $roleFile = Join-Path $stateDir 'pool-role.txt'
+          $role | Out-File -LiteralPath $roleFile -Encoding ascii
+          if ($pooled) {
+              @(
+                "pool_id=$poolId"
+                "pool_hub=$hub"
+                "pool_owner=$owner"
+                "assigned_role=$role"
+                "role_file=$roleFile"
+              ) | Out-File -LiteralPath (Join-Path $stateDir 'pool-info.txt') -Encoding ascii
+          }
+
+          "POOL_ROLE=$role"                              | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+          "POOL_OWNER=$owner"                            | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+          "POOL_HUB=$hub"                                | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+          "POOL_ID=$poolId"                              | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+          "POOL_MODE=$(if ($pooled) { 'pool' } else { 'standalone' })" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+
+          $desc = switch ($role) {
+            'primary' { '主 —— 唯一写 139（数据 + 整机快照）' }
+            'standby' { '备 —— 只读热备：持续重拉，不写 139；主下线即自升为主' }
+            default   { '单机 —— 未启用账号池，行为同历史版本' }
+          }
+          Write-Host "[pool] 角色 = $role  —— $desc"
+          if ($pooled) { Write-Host "[pool] hub = $hub   owner = $owner   pool_id = $poolId" }
       - name: 0d. 打印连接信息（可立即连接）
         shell: pwsh
         run: |
@@ -561,6 +635,37 @@ jobs:
           $tailAt = $stop.AddMinutes(-$TAIL_RESERVE)
           Write-Host "[keepalive] 收尾将于 $($tailAt.ToString('HH:mm')) UTC 在后台启动（远程连接不中断）"
 
+          # ---------- 池角色：primary 独占写 139；standby 只读热备 ----------
+          $poolMode = ($env:POOL_MODE -eq 'pool')
+          $poolHub  = [string]$env:POOL_HUB
+          $roleFile = Join-Path $env:CLOUDRDP_SYS_DIR '_state\pool-role.txt'
+          $myOwner  = [string]$env:POOL_OWNER
+          if ([string]::IsNullOrWhiteSpace($myOwner)) { $myOwner = [string]$env:GITHUB_REPOSITORY_OWNER }
+
+          function Get-CurrentRole {
+              try {
+                  if (Test-Path -LiteralPath $roleFile) {
+                      $r = (Get-Content -LiteralPath $roleFile -Raw).Trim().ToLowerInvariant()
+                      if ($r) { return $r }
+                  }
+              } catch { }
+              return 'standalone'
+          }
+
+          $role     = if ($poolMode) { Get-CurrentRole } else { 'standalone' }
+          $isWriter = ($role -ne 'standby')   # primary / standalone 都写 139
+          $rolePoll = 5                       # 每 5 分钟核对一次权威角色
+
+          if ($poolMode) {
+              . .\scripts\pool-lib.ps1
+              Write-Host "[pool] 池模式：owner=$myOwner  初始角色=$role  hub=$poolHub"
+              if ($role -eq 'standby') {
+                  Write-Host "[pool] 备机：不写 139，每 10 分钟重拉保持热备；权威状态指向本机即自升为主"
+              } else {
+                  Write-Host "[pool] 主机：独占写 139（用户数据 + 整机快照）"
+              }
+          }
+
           $n = 0
           $finalizeStarted = $false
           while ((Get-Date).ToUniversalTime() -lt $stop) {
@@ -568,21 +673,60 @@ jobs:
               $n++
               $t    = (Get-Date).ToUniversalTime()
               $left = [int](($stop - $t).TotalMinutes)
-              Write-Host "[$n] server running... 剩余 $left 分钟"
-              if ($n % 10 -eq 0) { & .\scripts\sync-up.ps1 }              # 每 10 分钟：用户数据
+              Write-Host "[$n] server running... 剩余 $left 分钟  (role=$role)"
+
+              if ($n % 10 -eq 0) {
+                  if ($isWriter) { & .\scripts\sync-up.ps1 }     # 主：推用户数据到 139
+                  else           { & .\scripts\sync-down.ps1 }   # 备：重拉，保持与主一致
+              }
               if ($n % 30 -eq 0) { & .\scripts\disk-guard.ps1 -Enforce }  # 每 30 分钟：C 盘守卫
-              if ($n % 60 -eq 0) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 每 60 分钟：快速快照
+              if ($n % 60 -eq 0) {
+                  if ($isWriter) { & .\scripts\backup-snapshot.ps1 -Quick -Push }   # 主：快速快照 + 推送
+                  else           { & .\scripts\backup-snapshot.ps1 -Quick }         # 备：本地完整快照，不碰 139
+              }
+
+              # ---------- 池角色核对：standby 读 hub 权威状态，主下线则自升为主 ----------
+              # 权威状态由 hub 协调器每 10 分钟发布（primary = 最老的在跑机）。
+              # 只「升主」不「降级」：协调器任一时刻只指定一个 primary，故不存在双主；
+              # 不做降级可避免状态抖动时主备反复横跳。
+              if ($poolMode -and ($n % $rolePoll -eq 0)) {
+                  try {
+                      $parts = $poolHub.Split('/')
+                      $st = $null
+                      if ($parts.Count -ge 2) {
+                          $st = Get-PoolState -HubOwner $parts[0] -HubRepo $parts[1] `
+                                -StateBranch $env:POOL_STATE_BRANCH -StatePath $env:POOL_STATE_PATH
+                      }
+                      if ($st) {
+                          $primOwner = ''
+                          if ($st.primary) { $primOwner = [string]$st.primary.owner }
+                          $mine = (-not [string]::IsNullOrWhiteSpace($myOwner)) -and ($primOwner -ieq $myOwner)
+                          if ($role -eq 'standby' -and ($mine -or [string]::IsNullOrWhiteSpace($primOwner))) {
+                              $why = if ($mine) { '权威状态已指向本机' } else { '权威状态无 primary（主已下线）' }
+                              Write-Host "[pool] $why → 自升为主，立即补齐备份（数据 + 快速快照）"
+                              $role = 'primary'; $isWriter = $true
+                              $role | Out-File -LiteralPath $roleFile -Encoding ascii
+                              & .\scripts\sync-up.ps1
+                              & .\scripts\backup-snapshot.ps1 -Quick -Push
+                          } else {
+                              Write-Host "[pool] 角色核对：权威 primary=$(if ($primOwner) { $primOwner } else { '(空)' })  本机=$role（保持不变）"
+                          }
+                      } else {
+                          Write-Host "[pool] 角色核对：读不到 hub 状态（保持 $role）"
+                      }
+                  } catch { Write-Host "[pool] 角色核对失败（忽略，保持 $role）：$($_.Exception.Message)" }
+              }
 
               if (-not $finalizeStarted -and $t -ge $tailAt) {
-                  Write-Host "[keepalive] 到点：后台启动收尾（C盘清理 + 全量同步 + 整机快照）"
-                  & .\scripts\finalize-background.ps1 -Background
+                  Write-Host "[keepalive] 到点：后台启动收尾（role=$role）"
+                  & .\scripts\finalize-background.ps1 -Background -Role $role
                   $finalizeStarted = $true
               }
           }
           # 兜底：保活时长被压到小于 TAIL_RESERVE 时循环里没触发过，这里补一次
           if (-not $finalizeStarted) {
-              Write-Host "[keepalive] 补启动后台收尾"
-              & .\scripts\finalize-background.ps1 -Background
+              Write-Host "[keepalive] 补启动后台收尾（role=$role）"
+              & .\scripts\finalize-background.ps1 -Background -Role $role
               $finalizeStarted = $true
           }
           Write-Host "[keepalive] 保活窗口结束"
@@ -624,7 +768,16 @@ jobs:
               }
           } else {
               Write-Host "[finalize] 后台收尾超时或未启动 → 前台补跑一次"
+              # 角色决定是否写 139：备机只做本地完整快照，避免与主双写
+              $rf = Join-Path $env:CLOUDRDP_SYS_DIR '_state\pool-role.txt'
+              $role = 'standalone'
+              if (Test-Path -LiteralPath $rf) { $role = (Get-Content -LiteralPath $rf -Raw).Trim().ToLowerInvariant() }
               & .\scripts\disk-guard.ps1 -Enforce
-              & .\scripts\sync-up.ps1
-              & .\scripts\backup-snapshot.ps1 -Push
+              if ($role -eq 'standby') {
+                  Write-Host "[finalize] 备机（$role）：只做本地完整快照，不写 139"
+                  & .\scripts\backup-snapshot.ps1
+              } else {
+                  & .\scripts\sync-up.ps1
+                  & .\scripts\backup-snapshot.ps1 -Push
+              }
           }
