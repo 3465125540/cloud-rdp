@@ -35,7 +35,7 @@
   "accounts": [
     {
       "id": "acc-1",
-      "owner": "REPLACE_OWNER_1",
+      "owner": "yc1966asgf",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_1",
       "enabled": true
