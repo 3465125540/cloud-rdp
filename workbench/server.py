@@ -498,6 +498,18 @@ def _unc(ip, rel):
     return "\\\\%s\\%s\\%s\\%s" % (ip, share, tail, rel.replace("/", "\\"))
 
 
+def _unc_abs(ip, abs_path):
+    """远端绝对路径 → UNC。盘符决定共享名（`D:\\x` → `\\\\ip\\D$\\x`）。"""
+    p = str(abs_path or "").replace("/", "\\")
+    if len(p) >= 2 and p[1] == ":":
+        share = p[0].upper() + "$"
+        rest = p[2:].lstrip("\\")
+    else:
+        share = CONFIG.get("smb_share") or "D$"
+        rest = p.lstrip("\\")
+    return "\\\\%s\\%s\\%s" % (ip, share, rest)
+
+
 _SMB_DONE = set()
 
 
@@ -515,13 +527,12 @@ def _smb_preauth(ip):
         return False
 
 
-def read_remote_text(ip, rel):
-    """读远端机器上 D:\\cloudrdp-sys 下的文本文件。失败抛异常。"""
-    p = _unc(ip, rel)
+def _read_unc(ip, unc):
+    """读一个 UNC 文本文件。首次失败时 `net use` 预鉴权后重试一次；仍失败抛异常。"""
     err = None
     for attempt in (0, 1):
         try:
-            with open(p, "r", encoding="utf-8-sig", errors="replace") as f:
+            with open(unc, "r", encoding="utf-8-sig", errors="replace") as f:
                 return f.read()
         except Exception as e:
             err = e
@@ -530,6 +541,16 @@ def read_remote_text(ip, rel):
                 continue
             break
     raise err
+
+
+def read_remote_text(ip, rel):
+    """读远端机器上 D:\\cloudrdp-sys 下的文本文件。失败抛异常。"""
+    return _read_unc(ip, _unc(ip, rel))
+
+
+def read_remote_abs(ip, abs_path):
+    """读远端机器上任意绝对路径的文本文件（如 runner 工作区）。失败抛异常。"""
+    return _read_unc(ip, _unc_abs(ip, abs_path))
 
 
 def parse_pool_info(text):
@@ -542,6 +563,19 @@ def parse_pool_info(text):
         k, v = line.split("=", 1)
         out[k.strip()] = v.strip()
     return out
+
+
+def parse_git_origin_owner(text):
+    """从 runner 工作区 `.git/config` 文本里取 origin 的 GitHub owner；取不到返回 ""。
+
+    Actions 的 checkout 有时把 URL 写成 `https://x-access-token:<token>@github.com/o/r`，
+    **只提取 owner，绝不返回/记录整条 url**，避免把 token 带出去。
+    """
+    m = re.search(r"url\s*=\s*(\S+)", text or "")
+    if not m:
+        return ""
+    mm = re.search(r"github\.com[:/]+([^/\s]+)/", m.group(1))
+    return mm.group(1) if mm else ""
 
 
 def map_machine_accounts(machines, account_list):
@@ -563,7 +597,7 @@ def machine_detail(ip, online):
     """读单台机器的池角色 + 快照新鲜度 + 运行时长 + 归属账号。任何一项读不到就留空，不抛。"""
     detail = {"role": "", "role_source": "", "snapshot": None, "error": "",
               "started_utc": "", "uptime_seconds": None, "uptime_human": "",
-              "pool_owner": "", "pool_id": "", "assigned_role": ""}
+              "pool_owner": "", "pool_id": "", "assigned_role": "", "owner_source": ""}
     if OFFLINE or not ip or not online:
         return detail
     try:
@@ -610,14 +644,36 @@ def machine_detail(ip, online):
                 detail["uptime_human"] = human_duration(up)
     except Exception:
         pass
-    # 归属账号：机器上 _state\pool-info.txt 记录派发它的账号（pool_owner）—— 池模式才有
+    # 归属账号（来源 ①）：池模式机器写的 _state\pool-info.txt 里的 pool_owner
     try:
         info = parse_pool_info(read_remote_text(ip, "_state/pool-info.txt"))
         detail["pool_owner"] = info.get("pool_owner", "")
         detail["pool_id"] = info.get("pool_id", "")
         detail["assigned_role"] = info.get("assigned_role", "")
+        if detail["pool_owner"]:
+            detail["owner_source"] = "_state/pool-info.txt"
     except Exception:
         pass
+    # 归属账号（来源 ②，兜底）：单机/老机器没有 pool-info.txt，
+    #   但 runner 工作区 D:\a\<repo>\<repo>\.git\config 的 origin owner 就是账号。
+    if not detail["pool_owner"]:
+        repo_name = (str(CONFIG.get("repo") or "").split("/")[-1] or "cloud-rdp")
+        cands = [r"D:\a\%s\%s\.git\config" % (repo_name, repo_name)]
+        try:   # 兜底再兜底：扫 D:\a 下第一个非 _ 目录（仓库名变了也能兜住）
+            for name in sorted(os.listdir(_unc_abs(ip, r"D:\a"))):
+                if not name.startswith("_"):
+                    cands.append(r"D:\a\%s\%s\.git\config" % (name, name))
+        except Exception:
+            pass
+        for abs_path in cands:
+            try:
+                owner = parse_git_origin_owner(read_remote_abs(ip, abs_path))
+            except Exception:
+                owner = ""
+            if owner:
+                detail["pool_owner"] = owner
+                detail["owner_source"] = "runner 工作区 .git/config"
+                break
     return detail
 
 

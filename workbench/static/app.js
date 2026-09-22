@@ -168,11 +168,16 @@ function renderMachines() {
       ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">一键登录</button>' +
         ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">查看信息</button>'
       : '<span class="muted">离线</span>';
-    // 主机列第二行：机器归属的账号（机器自己写的 pool_owner → 账号池 id）
+    // 主机列第二行：机器归属的账号
+    //   来源① 池机器写的 _state\pool-info.txt（pool_owner）→ 映射成账号池 id
+    //   来源② 单机/老机器：runner 工作区 .git\config 的 origin owner（owner_source 标明来源）
     var acct = "";
     if (m.account_id || m.pool_owner) {
       var label = [m.account_id, m.pool_owner].filter(function (x) { return !!x; }).join(" · ");
-      acct = '<div class="acct muted" title="该机器由这个账号派发">' + esc(label) + "</div>";
+      var src = m.owner_source ? "，来源：" + m.owner_source : "";
+      acct = '<div class="acct muted" title="该机器由这个账号派发' + esc(src) + '">' + esc(label) + "</div>";
+    } else if (online) {
+      acct = '<div class="acct muted" title="读不到机器上的归属信息（SMB 鉴权失败 / 机器未就绪）">账号未知</div>';
     }
     return "<tr>" +
       "<td class=\"strong\">" + esc(m.hostname || "-") + acct + "</td>" +

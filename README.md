@@ -638,13 +638,13 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8787
-python workbench\selftest.py   :: 离线自测（99 项）
+python workbench\selftest.py   :: 离线自测（103 项）
 ```
 
 | 面板 | 内容 |
 | --- | --- |
 | **GitHub 账号管理** | 账号清单 + Secret 是否就位 + 当前主/备 + 在跑机；一键启用/停用（写回 `pool-config.json`） |
-| **机器运行实况** | Tailscale 在线状态 + 归属账号（读远端 `_state\pool-info.txt`）+ 角色（读 `_state\pool-role.txt`）+ 已运行时长 + 快照新鲜度（读 `_snapshot\manifest.json`） |
+| **机器运行实况** | Tailscale 在线状态 + 归属账号（读远端 `_state\pool-info.txt`，单机兜底读 runner 工作区 `D:\a\<repo>\<repo>\.git\config`）+ 角色（读 `_state\pool-role.txt`）+ 已运行时长 + 快照新鲜度（读 `_snapshot\manifest.json`） |
 | **定时计划运行日志** | `windows-rdp.yml` 与 `pool-coordinator.yml` 的最近 25 次 run（状态/触发方式/用时/SHA/跳日志）；「缩略」只显示最近 5 条 |
 | **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`，免手输密码 |
 | **操作台** | 立即巡检协调器 / 干跑 / 派发保活机 / 强制刷新缓存 |
@@ -663,7 +663,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（99 项）
+│   ├── selftest.py                     #   离线自测（103 项）
 │   ├── start.cmd                       #   双击启动
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

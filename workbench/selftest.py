@@ -185,7 +185,7 @@ def main():
           'data-collapse="runs" data-limit="5"' in req(base, "/")[1])
     check("T85 machine_detail 含归属账号字段",
           all(k in server.machine_detail("100.1.2.3", False)
-              for k in ("pool_owner", "pool_id", "assigned_role")))
+              for k in ("pool_owner", "pool_id", "assigned_role", "owner_source")))
     pi = server.parse_pool_info("pool_id=p1\npool_owner=alice\nassigned_role=primary\n")
     check("T86 parse_pool_info 解析 key=value",
           pi.get("pool_owner") == "alice" and pi.get("assigned_role") == "primary", str(pi))
@@ -197,6 +197,19 @@ def main():
           ms[0].get("account_id") == "acc-1", str(ms))
     check("T89 未登记 owner / 无 owner → account_id 为空",
           ms[1].get("account_id") == "" and ms[2].get("account_id") == "", str(ms))
+    check("T90 _unc_abs 按盘符拼共享名",
+          server._unc_abs("1.2.3.4", r"D:\a\cloud-rdp\cloud-rdp\.git\config")
+          == "\\\\1.2.3.4\\D$\\a\\cloud-rdp\\cloud-rdp\\.git\\config",
+          server._unc_abs("1.2.3.4", r"D:\a\x\.git\config"))
+    check("T91 parse_git_origin_owner 解析普通 URL",
+          server.parse_git_origin_owner('[remote "origin"]\n\turl = https://github.com/acct9/cloud-rdp\n')
+          == "acct9")
+    gc = server.parse_git_origin_owner('[remote "origin"]\n\turl = https://x-access-token:SECRET123@github.com/acct9/cloud-rdp.git\n')
+    check("T92 带 token 的 URL 只取 owner（不外泄 token）",
+          gc == "acct9" and "SECRET123" not in gc, repr(gc))
+    check("T93 非 GitHub / 空文本 → 空",
+          server.parse_git_origin_owner("") == ""
+          and server.parse_git_origin_owner('[remote "origin"]\n\turl = https://gitlab.com/a/b\n') == "")
 
     # ---------------- 路由健壮性 ----------------
     print("[路由]")
