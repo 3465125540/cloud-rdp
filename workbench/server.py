@@ -45,6 +45,9 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
+# 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
+# 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
+STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
@@ -1054,6 +1057,7 @@ def build_overview():
     return {
         "ok": True,
         "version": VERSION,
+        "started_at": STARTED_AT,
         "generated_at": now_iso(),
         "config": {
             "repo": CONFIG.get("repo"),
@@ -1180,7 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
 # ==================================================================== API 实现
 def api_health(h, params):
     gh = gh_ready()
-    h._json(200, {"ok": True, "version": VERSION, "time": now_iso(),
+    h._json(200, {"ok": True, "version": VERSION, "started_at": STARTED_AT, "time": now_iso(),
                   "repo": CONFIG.get("repo"), "token_present": bool(resolve_token()),
                   "github": gh, "offline": OFFLINE})
 

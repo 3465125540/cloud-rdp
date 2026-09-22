@@ -263,6 +263,7 @@ function renderErrors() {
     return '<div class="err-line">' + esc(e) + "</div>";
   }).join("");
   $("#foot-meta").textContent = "workbench v" + (DATA.version || "?") +
+    (DATA.started_at ? "（服务启动于 " + DATA.started_at + "）" : "") +
     "  ·  数据生成于 " + (DATA.generated_at || "") +
     "  ·  账号池配置：" + ((DATA.config || {}).pool_config_path || "-");
 }

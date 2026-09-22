@@ -109,7 +109,7 @@ python workbench\selftest.py
 | GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存 |
 | GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
-| POST | `/api/accounts/add` | `{owner, repo, secret_name, id?, enabled?}` 新增账号（校验后原子写回 pool-config.json，不写 PAT 明文） |
+| POST | `/api/accounts/add` | `{owner, repo, token_secret, id?, enabled?}` 新增账号（校验后原子写回 pool-config.json，不写 PAT 明文） |
 | GET | `/api/machines` | 机器实况 |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录 |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |

@@ -82,7 +82,8 @@ def main():
     code, body, _ = req(base, "/api/health")
     d = json.loads(body)
     check("T06 health 200/ok", code == 200 and d.get("ok") is True)
-    check("T07 health 有 version/repo", bool(d.get("version")) and bool(d.get("repo")))
+    check("T07 health 有 version/repo/started_at",
+          bool(d.get("version")) and bool(d.get("repo")) and bool(d.get("started_at")))
     check("T08 health 标记 offline", d.get("offline") is True)
 
     # ---------------- /api/overview ----------------
