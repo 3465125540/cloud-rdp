@@ -1,24 +1,16 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-09-22T06:30:10.9742994Z",
+  "updated_utc": "2026-09-22T06:57:22.5530023Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-1",
     "owner": "yc1966asgf",
     "repo": "cloud-rdp",
     "run_id": null,
-    "since": "2026-09-22T06:30:10.0700867Z"
+    "since": "2026-09-22T06:57:20.7235427Z"
   },
-  "standby": [
-    {
-      "account": "acc-2",
-      "owner": "REPLACE_OWNER_2",
-      "repo": "cloud-rdp",
-      "run_id": null,
-      "since": "2026-09-22T06:30:10.0700867Z"
-    }
-  ],
+  "standby": [],
   "accounts": [
     {
       "id": "acc-1",
@@ -44,12 +36,12 @@
       "total": 0,
       "last_run": null,
       "note": "Secret POOL_TOKEN_2 未配置",
-      "role": "standby"
+      "role": ""
     }
   ],
   "recent_dispatches": {
-    "yc1966asgf": "2026-09-22T06:30:10.0700867Z",
     "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "yc1966asgf": "2026-09-22T06:57:20.7235427Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z"
   }
 }
