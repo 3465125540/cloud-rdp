@@ -24,10 +24,23 @@ function toast(msg, kind, ms) {
 function badge(text, kind) {
   return '<span class="badge ' + (kind || "mute") + '">' + esc(text) + "</span>";
 }
+// 后端返回的不是 JSON（多半是 HTML）时的统一提示。
+// 常见于「当前页面不是由工作台后端提供的」——比如用静态预览面板打开、或直接双击 index.html：
+// 此时 /api/... 会落到那个静态服务器上，返回它的 HTML，而不是工作台的 JSON。
+function notJsonError(ct, text) {
+  var head = String(text || "").trim().replace(/\s+/g, " ").slice(0, 60);
+  return new Error("后端没有返回 JSON（Content-Type=" + (ct || "未知") +
+    "，开头是「" + head + "…」）。这说明当前页面不是由工作台后端在提供：请用浏览器直接打开 " +
+    "http://127.0.0.1:8787 （不要用静态预览面板，也不要直接双击 index.html）。");
+}
 function api(path, opts) {
   opts = opts || {};
   opts.headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
   return fetch(path, opts).then(function (r) {
+    var ct = (r.headers.get("Content-Type") || "").toLowerCase();
+    if (ct.indexOf("json") < 0) {
+      return r.text().then(function (t) { throw notJsonError(ct, t); });
+    }
     return r.json().then(function (j) {
       if (!r.ok && j && j.error) { throw new Error(j.error); }
       return j;
@@ -45,7 +58,16 @@ function load(force) {
     render();
     $("#last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
   }).catch(function (e) {
-    toast("拉取失败：" + esc(e.message), "bad");
+    toast("拉取失败：" + esc(e.message), "bad", 12000);
+    if (!DATA) {
+      // 首次就失败：把原因常驻在页面上（别让它几秒后消失），并给出正确入口
+      $("#brand-sub").textContent = "未连上工作台后端";
+      $("#errors").innerHTML =
+        '<div class="err-line">' + esc(e.message) + "</div>" +
+        '<div class="err-line">当前页面：' + esc(location.href) + "</div>" +
+        '<div class="err-line">正确入口：<a href="http://127.0.0.1:8787" target="_blank">' +
+        "http://127.0.0.1:8787</a>（用浏览器直接打开；不要用应用内预览面板）</div>";
+    }
   }).then(function () {
     BUSY = false;
   });
