@@ -43,10 +43,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -119,6 +119,10 @@ DEFAULT_CONFIG = {
     # ---- 一键备份（写请求文件 → 机器保活循环取走执行）----
     "backup_request_file": "_state/backup-request.txt",
     "backup_done_file": "_state/backup-done.txt",
+
+    # ---- 备份139（只做增量同步：把新增/有变化的文件推到 139，不抓快照）----
+    "sync_request_file": "_state/sync139-request.txt",
+    "sync_done_file": "_state/sync139-done.txt",
 
     # ---- 访问控制（部署到服务器时强烈建议设置）----
     # 非空 = 所有请求都要带 token（?token=xxx 或 X-Workbench-Token 头）。
@@ -461,6 +465,24 @@ def human_duration(secs):
     if secs < 3600:
         return "%dm%02ds" % (secs // 60, secs % 60)
     return "%dh%02dm" % (secs // 3600, (secs % 3600) // 60)
+
+
+# 北京时区（UTC+8）。仪表盘统一按北京时间展示绝对时间。
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def beijing_time(iso, fmt="%m-%d %H:%M:%S"):
+    """把 ISO 时间转成北京时区（UTC+8）的绝对时间字符串。
+
+    用于「实时北京时间」展示：相比 human_age 的相对描述（如「3.7 小时前」），
+    绝对时间不随页面停留而失真，也便于一眼对表。无时区信息时按 UTC 处理。
+    """
+    dt = parse_iso(iso)
+    if not dt:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BEIJING_TZ).strftime(fmt)
 
 
 # ==================================================================== Tailscale
@@ -852,6 +874,8 @@ def machine_detail(ip, online):
                 break
     # 一键备份：机器上是否还挂着未处理的备份请求（保活循环取走后会删掉）
     detail["backup_request"] = read_backup_request(ip)
+    # 备份139：机器上是否还挂着未处理的「增量同步」请求
+    detail["sync139_request"] = read_sync139_request(ip)
     return detail
 
 
@@ -895,6 +919,44 @@ def request_backup(ip, requested_by=""):
         return {"ok": False, "error": "写备份请求失败：%s" % e, "file": rel}
     return {"ok": True, "error": "", "file": rel, "ip": ip,
             "note": "已下发备份请求：机器会在 ≤1 分钟内执行「同步数据到 139 + 快速快照推送」"}
+
+
+def read_sync139_request(ip):
+    """读机器上的 `_state/sync139-request.txt`（备份139 请求）。无请求返回 pending=False。"""
+    out = {"pending": False, "requested_at": "", "requested_by": ""}
+    try:
+        info = parse_pool_info(read_remote_text(ip, CONFIG.get("sync_request_file")
+                                               or "_state/sync139-request.txt"))
+        if info:
+            out["pending"] = True
+            out["requested_at"] = info.get("requested_at", "")
+            out["requested_by"] = info.get("requested_by", "")
+    except Exception:
+        pass
+    return out
+
+
+def request_sync139(ip, requested_by=""):
+    """下发「备份139」：只做增量同步 —— 把数据目录下新增/有变化的文件推到 139。
+
+    与 request_backup（一键备份 = 同步 + 快照推送）的区别：本请求**不抓快照**，
+    只跑 scripts/sync-up.ps1。该脚本用 `rclone copy --update`（只增不删）：
+    远端已存在且未变化的文件会被跳过，因此天然「避免重复上传」。
+    """
+    ip = (ip or "").strip()
+    if not ip:
+        return {"ok": False, "error": "缺少 ip"}
+    if not re.match(r"^[0-9A-Za-z_.\-]+$", ip):
+        return {"ok": False, "error": "IP 非法：%s" % ip}
+    rel = CONFIG.get("sync_request_file") or "_state/sync139-request.txt"
+    body = ("requested_at=%s\nrequested_by=%s\nreason=manual-sync139\n"
+            % (now_iso(), requested_by or "workbench"))
+    try:
+        write_remote_text(ip, rel, body)
+    except Exception as e:
+        return {"ok": False, "error": "写备份139请求失败：%s" % e, "file": rel}
+    return {"ok": True, "error": "", "file": rel, "ip": ip,
+            "note": "已下发备份139请求：机器会在 ≤1 分钟内增量同步新增文件到 139（不抓快照）"}
 
 
 # ==================================================================== 账号池
@@ -999,6 +1061,7 @@ def shape_last_run(r):
         "status": r.get("status") or "",
         "created_at": r.get("created_at") or "",
         "created_human": human_age(r.get("created_at") or ""),
+        "created_beijing": beijing_time(r.get("created_at") or ""),
         "event": r.get("event") or "",
         "url": r.get("url") or "",
     }
@@ -1128,6 +1191,7 @@ def get_accounts():
             # 监测数据新鲜度（来自 pool-state）
             "state_updated": state.get("updated_utc") or "",
             "state_age_human": human_age(state.get("updated_utc") or ""),
+            "state_updated_beijing": beijing_time(state.get("updated_utc") or ""),
             "state_via": pool.get("via") or "",
             "monitor_available": bool(reports)}
 
@@ -1154,8 +1218,10 @@ def _shape_run(r):
         "state": conclusion if conclusion else status,
         "created_at": created,
         "created_human": human_age(created),
+        "created_beijing": beijing_time(created),
         "updated_at": updated,
         "updated_human": human_age(updated),
+        "updated_beijing": beijing_time(updated),
         "duration": human_duration(dur),
         "duration_seconds": dur,
         "head_sha": (r.get("head_sha") or "")[:8],
@@ -1878,6 +1944,13 @@ def api_backup(h, params):
     return h._json(200 if res.get("ok") else 400, res)
 
 
+def api_backup139(h, params):
+    """POST /api/backup139 {ip} —— 备份139：下发请求文件，机器只做增量同步（不抓快照）。"""
+    body = h._read_body()
+    res = request_sync139(body.get("ip") or "", requested_by=str(body.get("by") or "workbench"))
+    return h._json(200 if res.get("ok") else 400, res)
+
+
 ROUTES = {
     ("GET", "/api/health"): api_health,
     ("GET", "/api/overview"): api_overview,
@@ -1889,6 +1962,7 @@ ROUTES = {
     ("GET", "/api/pool-state"): api_pool_state,
     ("POST", "/api/dispatch"): api_dispatch,
     ("POST", "/api/backup"): api_backup,
+    ("POST", "/api/backup139"): api_backup139,
     ("POST", "/api/rdp"): api_rdp,
     ("GET", "/api/rdp/preview"): api_rdp_preview,
     ("GET", "/api/rdp/default"): api_rdp_default,

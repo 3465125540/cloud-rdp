@@ -270,6 +270,20 @@ def main():
     check("T43 parse_iso 往返", server.parse_iso("2026-09-22T01:00:00Z") is not None)
     check("T44 _shape_run 关键字段",
           all(k in server._shape_run({}) for k in ("id", "state", "in_progress", "url")))
+    check("T105 beijing_time UTC→北京时间（UTC+8）",
+          server.beijing_time("2026-09-22T03:31:03Z") == "09-22 11:31:03",
+          server.beijing_time("2026-09-22T03:31:03Z"))
+    check("T106 beijing_time 容忍 7 位小数秒",
+          server.beijing_time("2026-09-22T03:31:03.7302008Z") == "09-22 11:31:03",
+          server.beijing_time("2026-09-22T03:31:03.7302008Z"))
+    check("T107 beijing_time 已是 +08:00 不再偏移",
+          server.beijing_time("2026-09-22T11:31:03+08:00") == "09-22 11:31:03",
+          server.beijing_time("2026-09-22T11:31:03+08:00"))
+    check("T108 beijing_time 空值不炸", server.beijing_time("") == "")
+    check("T109 _shape_run 带 created_beijing",
+          "created_beijing" in server._shape_run({"created_at": "2026-09-22T03:31:03Z"}))
+    check("T110 shape_last_run 带 created_beijing",
+          "created_beijing" in server.shape_last_run({"created_at": "2026-09-22T03:31:03Z"}))
 
     # ---------------- 回归：get_runs 真实代码路径（离线分支会提前 return，覆盖不到） ----------------
     print("[回归 get_runs]")
@@ -480,6 +494,27 @@ def main():
         check("T94 无请求 pending=False", server.read_backup_request("100.64.0.8").get("pending") is False)
         check("T95 非法 ip → ok=False", server.request_backup("bad ip!").get("ok") is False)
         check("T96 缺 ip → ok=False", server.request_backup("").get("ok") is False)
+    finally:
+        server.write_remote_text = real_write
+        server.read_remote_text = real_read
+
+    # ---------------- 备份139（增量同步请求下发 / 读取） ----------------
+    print("[备份139]")
+    server.write_remote_text = fake_write
+    server.read_remote_text = fake_read
+    try:
+        rs = server.request_sync139("100.64.0.9", requested_by="tester")
+        check("T111 request_sync139 ok", rs.get("ok") is True, str(rs))
+        check("T112 请求文件路径正确", rs.get("file") == "_state/sync139-request.txt", str(rs.get("file")))
+        sbody = store.get(("100.64.0.9", "_state/sync139-request.txt"), "")
+        check("T113 请求体含 requested_at/by", "requested_at=" in sbody and "requested_by=tester" in sbody, sbody)
+        srq = server.read_sync139_request("100.64.0.9")
+        check("T114 read_sync139_request pending=True", srq.get("pending") is True, str(srq))
+        check("T115 与一键备份请求互不干扰（不同文件）",
+              server.read_backup_request("100.64.0.7").get("pending") is False)
+        check("T116 非法 ip → ok=False", server.request_sync139("bad ip!").get("ok") is False)
+        check("T117 缺 ip → ok=False", server.request_sync139("").get("ok") is False)
+        check("T118 路由含 POST /api/backup139", ("POST", "/api/backup139") in server.ROUTES)
     finally:
         server.write_remote_text = real_write
         server.read_remote_text = real_read

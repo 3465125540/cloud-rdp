@@ -184,6 +184,21 @@ function renderMachines() {
           '" data-tip="立即在机器上执行「同步数据到 139 云盘 + 快速快照推送」。机器保活循环每分钟取走一次，通常 ≤1 分钟开始，约 1~3 分钟完成">☁ 一键备份</button>' +
           "</div>";
       }
+      // 快照栏附「备份139」按钮：只做增量同步（rclone copy --update），不抓快照
+      var sr = m.sync139_request || {};
+      if (sr.pending) {
+        snap += '<div class="backup-box">' +
+          '<button class="btn btn-mini btn-backup pending" disabled><i class="spin"></i> 同步中</button>' +
+          '<div class="muted backup-note" data-tip="请求已于 ' + esc(sr.requested_at || "刚刚") +
+          ' 下发（by ' + esc(sr.requested_by || "workbench") +
+          '）。机器保活循环每分钟取走执行，完成后此行会恢复为可点击">已下发，等待执行</div></div>';
+      } else {
+        snap += '<div class="backup-box">' +
+          '<button class="btn btn-mini btn-backup" data-backup139="' + esc(m.ip) +
+          '" data-host="' + esc(m.hostname) +
+          '" data-tip="立即把数据目录（D:\\a\\cloud-rdp）下「新增 / 有变化」的文件增量上传到 139 云盘。用 rclone copy --update：已存在且未变化的文件会跳过（不重复上传），也不会删除远端文件。只同步、不抓快照">⬆ 备份139</button>' +
+          "</div>";
+      }
     }
     var lastSeen = online ? '<span class="muted">—</span>'
       : '<span class="muted">' + esc(m.last_seen_human || "未知") + "</span>";
@@ -239,7 +254,9 @@ function renderAccounts() {
   if (acc.ok) {
     bits.push(rows.length + " 个账号");
     if (acc.monitor_available) {
-      bits.push("监测数据 " + (acc.state_age_human || "?") + (acc.state_via ? "（" + acc.state_via + "）" : ""));
+      // 实时北京时间（绝对时间，UTC+8）；不再用「3.7 小时前」这类相对描述
+      var bj = acc.state_updated_beijing || acc.state_age_human || "?";
+      bits.push("监测数据 " + bj + " 北京" + (acc.state_via ? "（" + acc.state_via + "）" : ""));
     } else {
       bits.push("暂无监测数据（等协调器发布）");
     }
@@ -271,7 +288,8 @@ function renderAccounts() {
     }
     if (a.last_run) {
       mon.push('<span class="mon-run">' + badge(a.last_run.state || "-", runStateKind(a.last_run.state)) +
-        (a.last_run.created_human ? ' <span class="muted">' + esc(a.last_run.created_human) + "</span>" : "") + "</span>");
+        (a.last_run.created_beijing ? ' <span class="muted" title="北京时间（UTC+8）；原始 UTC：' +
+          esc(a.last_run.created_at || "?") + '">' + esc(a.last_run.created_beijing) + "</span>" : "") + "</span>");
     } else if (a.source && a.source !== "none") {
       mon.push('<span class="muted">无运行记录</span>');
     }
@@ -317,7 +335,7 @@ function renderRuns() {
       '<td class="mono">#' + esc(x.number) + "</td>" +
       "<td>" + st + "</td>" +
       "<td>" + ev + "</td>" +
-      '<td class="nowrap"><span title="' + esc(x.created_at) + '">' + esc(x.created_human) + "</span></td>" +
+      '<td class="nowrap"><span title="北京时间（UTC+8）；原始 UTC：' + esc(x.created_at) + '">' + esc(x.created_beijing || x.created_human) + "</span></td>" +
       '<td class="mono nowrap">' + esc(x.duration) + "</td>" +
       '<td class="mono">' + esc(x.head_sha) + "</td>" +
       '<td class="dim">' + esc(x.title || "-") + "</td>" +
@@ -489,6 +507,31 @@ function doBackup(btn) {
     });
 }
 
+/* ------------------------------------------------------------ 备份139（仅增量同步） */
+// 与「一键备份」同一套文件请求机制，但只跑 scripts/sync-up.ps1（rclone copy --update）：
+// 只把新增/有变化的文件推到 139，已存在的相同文件跳过（不重复上传），不抓快照。
+function doBackup139(btn) {
+  var ip = btn.dataset.backup139, host = btn.dataset.host || "";
+  if (!confirm("对「" + (host || ip) + "」执行备份139？\n\n将在机器上：\n" +
+               "  · 把数据目录（D:\\a\\cloud-rdp）下新增 / 有变化的文件增量上传到 139 云盘\n" +
+               "  · 已存在且未变化的文件会跳过（不重复上传），也不会删除远端文件\n" +
+               "  · 不抓快照\n\n通常 ≤1 分钟开始，视新增文件量而定。")) return;
+  btn.disabled = true;
+  var old = btn.innerHTML;
+  btn.innerHTML = '<i class="spin"></i> 下发中';
+  api("/api/backup139", { method: "POST", body: JSON.stringify({ ip: ip }) })
+    .then(function (res) {
+      toast("已下发备份139请求" + (host ? "（" + esc(host) + "）" : "") +
+        "<br><span class='muted'>" + esc(res.note || "机器将在 ≤1 分钟内增量同步到 139") + "</span>", "ok", 9000);
+      setTimeout(function () { load(true); }, 8000);   // 稍后刷新，让按钮切到「已下发」
+    })
+    .catch(function (err) {
+      toast("备份139失败：" + esc(err.message), "bad", 10000);
+      btn.disabled = false;
+      btn.innerHTML = old;
+    });
+}
+
 /* ------------------------------------------------------------ 悬浮提示（data-tip） */
 // 任何带 data-tip="..." 的元素，鼠标停留时在它附近浮出一段说明（纯文本，\n 换行）。
 function initTips() {
@@ -613,6 +656,7 @@ function bind() {
   $("#tbl-machines").addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (!b) return;
+    if (b.dataset.backup139) { doBackup139(b); return; }
     if (b.dataset.backup) { doBackup(b); return; }
     if (b.dataset.info) { showConnInfo(b.dataset.info, b.dataset.host || ""); return; }
     var ip = b.dataset.rdp || b.dataset.rdpfile;

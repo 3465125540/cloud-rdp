@@ -41,6 +41,10 @@
   "backup_request_file": "_state/backup-request.txt",
   "backup_done_file": "_state/backup-done.txt",
 
+  "_备份139_说明": "备份139 = 只做增量同步（rclone copy --update，不抓快照）的请求文件路径",
+  "sync_request_file": "_state/sync139-request.txt",
+  "sync_done_file": "_state/sync139-done.txt",
+
   "_安全_说明": "公网部署务必设置 access_token！工作台 /api/conn-info 会返回 RDP 明文密码。",
   "access_token": "请改成一串足够长的随机字符",
 

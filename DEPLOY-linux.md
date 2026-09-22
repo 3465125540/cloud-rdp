@@ -187,7 +187,7 @@ sudo ufw deny 8787/tcp
 
 ---
 
-## 6. 「一键备份」是怎么工作的
+## 6. 「一键备份 / 备份139」是怎么工作的
 
 工作台无法直接给机器下命令（机器是 GitHub Actions runner，没有对外命令通道），
 所以采用**请求文件轮询**：
@@ -205,12 +205,32 @@ sudo ufw deny 8787/tcp
                      写 _state\backup-done.txt 留痕
 ```
 
+**备份139** 走同一套机制，但请求文件是 `_state\sync139-request.txt`，机器只跑
+`scripts/sync-up.ps1`（**不抓快照**）。该脚本用 `rclone copy --update`（只增不删）：
+
+```
+[工作台]  --SMB写-->  机器 D:\cloudrdp-sys\_state\sync139-request.txt
+                                  │
+                     机器保活循环每分钟轮询（取走即删）
+                                  ▼
+                    主(primary/standalone)：sync-up.ps1  →  rclone copy --update 到 139
+                    备(standby)          ：跳过（不写 139）
+                                  │
+                                  ▼
+                     写 _state\sync139-done.txt 留痕
+```
+
+- `--update` 只上传「新增 / 比远端更新」的文件，远端已存在的相同文件会被跳过，
+  因此天然**避免重复上传**，也不会删除远端文件。
 - 界面上：**机器运行实况 → 快照栏**。有快照时显示「多久之前 / 文件数 / 绝对时间」；
-  下方是 **☁ 一键备份** 按钮。点了之后按钮变「备份中…」，直到机器取走请求。
-- **前提**：机器上跑的 workflow 必须是**支持该轮询的版本**（第 14 步含 `backup-request.txt` 检查）。
-  旧机器不认这个文件，按钮会一直停在「已下发，等待执行」。
+  下方是 **☁ 一键备份**（同步 + 快照推送）和 **⬆ 备份139**（只增量同步）两个按钮。
+  点了之后按钮变「备份中… / 同步中…」，直到机器取走请求。
+- **前提**：机器上跑的 workflow 必须是**支持该轮询的版本**（第 14 步含 `backup-request.txt`
+  与 `sync139-request.txt` 检查）。旧机器不认这两个文件，按钮会一直停在「已下发，等待执行」。
 - 快照时间来自机器上的 `_snapshot/manifest.json`（`createdUtc`/`createdLocal`），
   工作台按**服务器本机时区**显示成 `MM-DD HH:MM`。
+- 「GitHub 账号管理」的监测数据时间与「定时计划运行日志」的开始时间，统一按
+  **实时北京时间（UTC+8）** 显示（绝对时间，非「X 小时前」）。
 
 ---
 
@@ -253,7 +273,7 @@ systemctl status  cloud-rdp-workbench         # 状态
 
 ```bash
 cd /opt/cloud-rdp && python3 workbench/selftest.py
-# 期望输出： 结果：134 PASS / 0 FAIL
+# 期望输出： 结果：148 PASS / 0 FAIL
 ```
 
 ---
