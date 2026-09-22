@@ -744,13 +744,37 @@ def get_accounts():
                 last_run = shape_last_run(live["last_run"])
                 source = "live"
 
+        # 凭证是否就位：三条线索，按可信度取（Secret 值永不回显，只能看名字 + 协调器巡检结果）
+        #   ① pool-state 的 token_state=ok —— 协调器真的解析并用了该 token（最可信）
+        #   ② 精确 Secret 名存在 —— 每账号一个 Secret 的通道
+        #   ③ 存在 POOL_TOKENS（JSON 通道）—— 值不可读，无法确认是否含本账号 → 存疑（None）
+        if secrets is None:
+            secret_via = ""
+        elif secret and secret in secrets:
+            secret_via = "secret"
+        elif "POOL_TOKENS" in secrets:
+            secret_via = "pool_tokens"
+        else:
+            secret_via = "none"
+        if rep.get("token_state") == "ok":
+            secret_present = True
+        elif secrets is None:
+            secret_present = None
+        elif secret and secret in secrets:
+            secret_present = True
+        elif "POOL_TOKENS" in secrets:
+            secret_present = None
+        else:
+            secret_present = False
+
         accounts.append({
             "id": a.get("id") or "",
             "owner": owner,
             "repo": repo_name,
             "enabled": enabled,
             "token_secret": secret,
-            "secret_present": (None if secrets is None else (secret in secrets)) if secret else None,
+            "secret_present": secret_present,
+            "secret_via": secret_via,
             "alive": bool(alive) or bool(alive_count),
             "role": str(rep.get("role") or alive.get("role") or ""),
             "run_id": alive.get("run_id"),

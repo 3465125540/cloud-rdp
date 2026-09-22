@@ -304,6 +304,17 @@ def main():
         check("T67 acc-2 提示语透传", "未配置" in (a2.get("report_note") or ""))
         check("T68 acc-2 secret_present False", a2.get("secret_present") is False)
 
+        # ---- POOL_TOKENS（JSON 通道）：值不可读 → 不得误报「缺失」 ----
+        server.clear_cache()
+        server.get_secret_names = lambda: {"POOL_TOKENS"}
+        accp = server.get_accounts()
+        p1 = (accp.get("accounts") or [{}])[0]
+        p2 = (accp.get("accounts") or [{}, {}])[1]
+        check("T77 token_state=ok → 已配置（JSON 通道）",
+              p1.get("secret_present") is True and p1.get("secret_via") == "pool_tokens")
+        check("T78 JSON 通道未确认 → 存疑而非缺失",
+              p2.get("secret_present") is None and p2.get("secret_via") == "pool_tokens")
+
         # ---------------- 新增账号 API ----------------
         print("[API accounts/add]")
         code, body, _ = req(base, "/api/accounts/add", "POST",

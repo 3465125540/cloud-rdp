@@ -590,6 +590,10 @@ env:
 **填充步骤（4 步）**：
 
 1. **每个账号 fork 本仓库**（或独立仓库），保证仓库名一致（默认 `cloud-rdp`）。
+   > ⚠️ **fork 里要再配一份 workflow 用的 Secret**：`windows-rdp.yml` 跑在 **fork 自己的**仓库里，
+   > 读的是 **fork 自己的** Secret。GitHub 的 Secret **值永不回显、也不能跨仓库复制**，
+   > 所以每个 fork 都得**手动**再配一遍：`TAILSCALE_AUTHKEY`、`ALIST_139_AUTHORIZATION`、
+   > `GH_RELAY_TOKEN`、`GH_BILLING_TOKEN`、`MAIL_*`（见第三节）。少配一个，机器就起不来或收不到邮件。
 2. **给每个账号建一个 PAT**（classic 勾 `repo` + `workflow`，或 fine-grained 给
    `Actions: read/write` + `Contents: read`）。存到 **hub 仓库的 Secret**，推荐一个
    JSON Secret `POOL_TOKENS`（加账号不用改 workflow）：
@@ -634,7 +638,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8787
-python workbench\selftest.py   :: 离线自测（55 项）
+python workbench\selftest.py   :: 离线自测（88 项）
 ```
 
 | 面板 | 内容 |
@@ -659,7 +663,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
 ├── workbench/                          # 【新】智能体工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（55 项）
+│   ├── selftest.py                     #   离线自测（88 项）
 │   ├── start.cmd                       #   双击启动
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

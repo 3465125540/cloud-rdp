@@ -190,9 +190,16 @@ function renderAccounts() {
   }
   tb.innerHTML = rows.map(function (a) {
     var secret;
-    if (a.secret_present === true) secret = badge("已配置", "ok");
-    else if (a.secret_present === false) secret = badge("缺失", "bad");
-    else secret = '<span class="muted">未知</span>';
+    if (a.secret_present === true) {
+      secret = badge("已配置", "ok");
+      if (a.secret_via === "pool_tokens") secret += ' <span class="muted" title="token 来自 hub 仓库的 JSON Secret POOL_TOKENS">(JSON)</span>';
+    } else if (a.secret_present === false) {
+      secret = badge("缺失", "bad");
+    } else if (a.secret_via === "pool_tokens") {
+      secret = '<span class="muted" title="hub 仓库存在 POOL_TOKENS（JSON）；其值 GitHub 永不回显，无法确认是否含本账号。以「凭证」列的协调器巡检结果为准">可能已配置</span>';
+    } else {
+      secret = '<span class="muted">未知</span>';
+    }
 
     // ---- 实时监测列：凭证状态 + 在跑机数 + 最近一次 run ----
     var mon = [tokenStateBadge(a.token_state)];

@@ -124,7 +124,7 @@ python workbench\selftest.py
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（55 项）
+├── selftest.py           # 离线自测（88 项）
 ├── start.cmd             # 双击启动
 ├── config.example.json   # 配置样例（复制成 config.json 使用）
 ├── README.md
@@ -147,6 +147,9 @@ A：Tailscale 里累积的历史节点都还在。默认勾了「**只看在线*
 
 **Q：Secret 那一列显示「未知」？**
 A：读 Actions Secret **名字**列表需要仓库 admin 权限的 Token。Token 权限不够时会显示「未知」而不是「缺失」，避免误判。
+
+**Q：Secret 那一列显示「可能已配置」？**
+A：说明 hub 仓库配了 **JSON 通道** Secret `POOL_TOKENS`（值形如 `{"账号登录名": "ghp_..."}`），而本账号没有同名的独立 Secret。GitHub 的 Secret **值永不回显**，工作台无法确认那个 JSON 里到底有没有这个 owner，所以既不敢标「已配置」、也不误报「缺失」。**以「凭证」列的协调器巡检结果为准** —— 协调器是真的拿 token 去调 API 了，最权威。若该列显示 `ok`，说明 token 已就位（只是来自 JSON 通道）。
 
 **Q：新增账号时能填 PAT 吗？**
 A：不能，也不该填。账号池里一账号 = 一个 fork，token 只以 **GitHub Actions Secret** 的形式存在（名字如 `POOL_TOKEN_<ID>`），值永不通过 API 返回、也永不写进 `pool-config.json`。新增账号表单只需填 owner / repo / Secret 名，之后去对应仓库配好同名 Secret 即可。
