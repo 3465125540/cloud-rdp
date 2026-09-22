@@ -87,7 +87,8 @@ jobs:
 
     steps:
       - name: 0. 拉取仓库
-        uses: actions/checkout@v4
+        # v5 = Node 24 runtime，消除 GitHub「Node.js 20 is deprecated」警告（v4 跑在 Node 20）
+        uses: actions/checkout@v5
       - name: 0a. 记录 job 起点 + 开启远程桌面 + 关闭 Windows 防火墙
         shell: pwsh
         run: |
