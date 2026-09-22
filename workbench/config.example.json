@@ -43,5 +43,6 @@
   "rdp_width": 1920,
   "rdp_height": 1080,
   "rdp_launch": true,
-  "rdp_store_cred": true
+  "rdp_store_cred": true,
+  "rdp_launch_mode": "mstsc"
 }

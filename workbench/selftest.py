@@ -211,6 +211,46 @@ def main():
           server.parse_git_origin_owner("") == ""
           and server.parse_git_origin_owner('[remote "origin"]\n\turl = https://gitlab.com/a/b\n') == "")
 
+    # ---------------- 一键登录：mstsc /v: 零弹窗（KB5083769 后） ----------------
+    print("[一键登录 / Default.rdp]")
+    check("T94 default_rdp_path 指向 Documents\\Default.rdp",
+          os.path.basename(server.default_rdp_path()) == "Default.rdp"
+          and "Documents" in server.default_rdp_path(), server.default_rdp_path())
+    st = server.default_rdp_status()
+    check("T95 default_rdp_status 字段齐全",
+          all(k in st for k in ("path", "exists", "auth_level", "auth_zero", "backup")), str(st))
+    check("T96 默认唤起方式 = mstsc（命令行，不受 .rdp 安全警告影响）",
+          server.DEFAULT_CONFIG.get("rdp_launch_mode") == "mstsc")
+    ci = json.loads(req(base, "/api/conn-info?ip=1.2.3.4")[1])
+    check("T97 /api/conn-info 带 launch_mode + default_rdp",
+          ci.get("launch_mode") == "mstsc" and isinstance(ci.get("default_rdp"), dict), str(ci))
+    dd = req(base, "/api/rdp/default")
+    dj = json.loads(dd[1])
+    check("T98 GET /api/rdp/default → 200 且含 auth_zero",
+          dd[0] == 200 and dj.get("ok") is True and "auth_zero" in dj, str(dj))
+    if server.IS_WINDOWS:
+        _popen, _ensure = server.subprocess.Popen, server.ensure_default_rdp_auth_level
+        calls = {}
+
+        class _FakePopen(object):
+            def __init__(self, args, *a, **k):
+                calls["args"] = args
+
+        server.subprocess.Popen = _FakePopen
+        server.ensure_default_rdp_auth_level = lambda: (True, "stub")
+        try:
+            lr = server.launch_rdp("1.2.3.4", "x.rdp")
+        finally:
+            server.subprocess.Popen = _popen
+            server.ensure_default_rdp_auth_level = _ensure
+        check("T99 launch_rdp 走 mstsc /v:IP 且返回四元组",
+              lr[0] is True and lr[2] == "mstsc"
+              and calls.get("args", [None, ""])[:2] == ["mstsc", "/v:1.2.3.4"],
+              "%s / %s" % (lr, calls))
+    else:
+        check("T99 非 Windows：launch_rdp 不唤起",
+              server.launch_rdp("1.2.3.4", "x.rdp")[0] is False)
+
     # ---------------- 路由健壮性 ----------------
     print("[路由]")
     check("T38 未知 API → 404", req(base, "/api/nope")[0] == 404)

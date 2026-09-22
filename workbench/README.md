@@ -62,6 +62,7 @@ python workbench\selftest.py
 | `rdp_user` / `rdp_password` | `a` / `a` | 与 `windows-rdp.yml` 的 `RDP_USERNAME/PASSWORD` 保持一致 |
 | `rdp_launch` | `true` | 生成 `.rdp` 后是否自动唤起 mstsc |
 | `rdp_store_cred` | `true` | 是否 `cmdkey` 预存凭据（免手输密码） |
+| `rdp_launch_mode` | `mstsc` | 唤起方式：`mstsc`=`mstsc /v:<ip>` 命令行（零弹窗，推荐）；`file`=`os.startfile(.rdp)`（老行为，会被 KB5083769 安全警告挡住） |
 | `snapshot_stale_minutes` | `90` | 快照超过这么久没更新 → 标黄 |
 
 ### Token 自动发现顺序
@@ -91,9 +92,27 @@ python workbench\selftest.py
 
 `POST /api/rdp {ip, hostname}` 做三件事：
 
-1. 在桌面写一个 `RDP-<host>-<ip>.rdp`（分辨率、剪贴板/磁盘重定向、`authentication level:i:0` 等都配好）；
+1. 在桌面写一个 `RDP-<host>-<ip>.rdp`（分辨率、剪贴板/磁盘重定向、`authentication level:i:0` 等都配好，留档 / 手动双击用）；
 2. `cmdkey /generic:TERMSRV/<ip> /user:a /pass:a` 把凭据存进 Windows 凭据管理器 → 连的时候**不弹密码框**；
-3. `os.startfile()` 唤起 `mstsc`。
+3. 唤起 `mstsc`。
+
+### 为什么不用 `os.startfile(.rdp)`（2026-04 KB5083769 之后）
+
+2026 年 4 月的安全更新（KB5083769 / CVE-2026-26151）改了 `.rdp` 文件的行为：**每次打开 `.rdp` 文件**
+都会弹一个「远程桌面连接安全警告」，列出所有资源重定向（驱动器/剪贴板/打印机…）且默认全关，还要手动勾选 ——
+这个阻断框会挡在真正的连接窗口前面，看起来就像「点了没反应 / 没弹窗」。
+
+但微软明确说明：**手动连接（直接在 mstsc 里输地址 / 命令行 `/v:`）不受影响**，只有「打开 `.rdp` 文件」才会。
+
+所以默认唤起方式是 **`mstsc /v:<ip>` 命令行**（配置项 `rdp_launch_mode`，默认 `"mstsc"`；
+设成 `"file"` 可退回老行为）。另外 `mstsc /v:` 会以 `Documents\Default.rdp` 为模板，
+所以启动前会把 `Default.rdp` 的 `authentication level` 置为 `0`（首次改动前备份为
+`Default.rdp.bak-workbench`）—— 这样连自签证书机器时**也不再弹「无法验证身份」**。
+
+结果：**一键登录零弹窗**，直接进桌面。免管理员、免改策略注册表、免签名。
+
+> 也可以从「查看信息」弹窗里点「修复证书警告」手动触发 `POST /api/rdp/default`，
+> 它会报告 / 修正 `Default.rdp` 的 `authentication level`。
 
 > 机器只能经 Tailscale 内网访问，tailnet 才是真正的安全边界，密码只当第二道门 —— 与 `windows-rdp.yml` 里的取舍一致。
 
@@ -138,7 +157,7 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（103 项）
+├── selftest.py           # 离线自测（109 项）
 ├── start.cmd             # 双击启动
 ├── config.example.json   # 配置样例（复制成 config.json 使用）
 ├── README.md

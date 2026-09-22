@@ -116,6 +116,12 @@ DEFAULT_CONFIG = {
     "rdp_height": 1080,
     "rdp_launch": True,                      # 生成后是否自动唤起 mstsc
     "rdp_store_cred": True,                  # 是否 cmdkey 预存凭据（实现免手输密码）
+    # 唤起方式：
+    #   "mstsc" = 走 `mstsc /v:<ip>` 命令行（手动连接）—— 2026-04 KB5083769/CVE-2026-26151 之后，
+    #             **只有打开 .rdp 文件**才会弹「安全警告 / 资源勾选」阻断框；手动连接不受影响。
+    #             配合把 Default.rdp 的 authentication level 置 0，证书警告也一并消失 → 零弹窗。
+    #   "file"  = 老行为：os.startfile(.rdp)，会被 KB5083769 的安全警告挡住。
+    "rdp_launch_mode": "mstsc",
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -1067,6 +1073,97 @@ def build_rdp_text(ip, user):
     return "\r\n".join(lines)
 
 
+def default_rdp_path():
+    """mstsc 的「默认连接设置」文件（`mstsc /v:` 会以它为模板）。"""
+    return os.path.join(os.path.expanduser("~"), "Documents", "Default.rdp")
+
+
+def default_rdp_status():
+    """Default.rdp 现状：路径 / 是否存在 / authentication level / 是否已备份。"""
+    p = default_rdp_path()
+    exists = os.path.isfile(p)
+    level = None
+    if exists:
+        try:
+            with open(p, "r", encoding="ascii", errors="replace") as f:
+                m = re.search(r"authentication level:i:(\d+)", f.read())
+            level = int(m.group(1)) if m else None
+        except Exception:
+            level = None
+    return {"path": p, "exists": exists, "auth_level": level,
+            "auth_zero": level == 0, "backup": os.path.isfile(p + ".bak-workbench")}
+
+
+def ensure_default_rdp_auth_level():
+    """确保 Default.rdp 里 `authentication level:i:0`（连自签证书机器不再弹「无法验证身份」）。
+
+    `mstsc /v:<ip>` 会读取 Default.rdp 作为模板；把认证级别设为 0 后，证书警告也消失，
+    于是「手动连接」路径可以做到**零弹窗**。首次改动前会把原文件备份为
+    `Default.rdp.bak-workbench`（只备份一次）。返回 (ok, 说明文字)。
+    """
+    if not IS_WINDOWS:
+        return (False, "非 Windows")
+    p = default_rdp_path()
+    if not os.path.isfile(p):
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="ascii", newline="") as f:
+                f.write("screen mode id:i:2\r\nauthentication level:i:0\r\n"
+                        "prompt for credentials:i:0\r\n")
+            return (True, "已新建 Default.rdp（authentication level=0）")
+        except Exception as e:
+            return (False, "新建 Default.rdp 失败：%s" % e)
+    try:
+        with open(p, "r", encoding="ascii", errors="replace") as f:
+            txt = f.read()
+    except Exception as e:
+        return (False, "读 Default.rdp 失败：%s" % e)
+    if re.search(r"authentication level:i:0\b", txt):
+        return (True, "Default.rdp 已是 authentication level=0")
+    bak = p + ".bak-workbench"
+    if not os.path.isfile(bak):
+        try:
+            shutil.copy2(p, bak)
+        except Exception:
+            pass
+    if re.search(r"authentication level:i:\d+", txt):
+        txt = re.sub(r"authentication level:i:\d+", "authentication level:i:0", txt)
+    else:
+        txt = txt.rstrip("\r\n") + "\r\nauthentication level:i:0\r\n"
+    try:
+        with open(p, "w", encoding="ascii", newline="") as f:
+            f.write(txt)
+        return (True, "已把 Default.rdp 的 authentication level 改为 0（原文件备份为 "
+                      "Default.rdp.bak-workbench）")
+    except Exception as e:
+        return (False, "写 Default.rdp 失败：%s" % e)
+
+
+def launch_rdp(ip, rdp_path):
+    """唤起远程桌面连接。返回 (launched, error, mode, note)。
+
+    默认走 `mstsc /v:<ip>`：2026-04 KB5083769（CVE-2026-26151）之后，
+    **只有打开 .rdp 文件**才会弹「远程桌面连接安全警告 / 资源勾选」阻断框，
+    手动连接（命令行 /v:）不受影响；再把 Default.rdp 认证级别置 0，证书警告也没了。
+    """
+    mode = str(CONFIG.get("rdp_launch_mode") or "mstsc").lower()
+    if not IS_WINDOWS:
+        return (False, "非 Windows，已生成文件但未唤起客户端", mode, "")
+    if mode == "file":
+        try:
+            os.startfile(rdp_path)  # noqa: S606
+            return (True, "", mode, "")
+        except Exception as e:
+            return (False, "唤起失败：%s" % e, mode, "")
+    # mstsc /v:<ip>
+    _ok, note = ensure_default_rdp_auth_level()
+    try:
+        subprocess.Popen(["mstsc", "/v:" + ip])
+        return (True, "", mode, note)
+    except Exception as e:
+        return (False, "唤起失败：%s" % e, mode, note)
+
+
 def store_credential(ip, user, password):
     if not IS_WINDOWS or not CONFIG.get("rdp_store_cred", True):
         return {"ok": False, "error": "非 Windows 或已关闭凭据预存"}
@@ -1105,18 +1202,14 @@ def make_rdp(ip, hostname="", launch=None, store_cred=None):
 
     launched = False
     launch_error = ""
+    launch_mode = str(CONFIG.get("rdp_launch_mode") or "mstsc").lower()
+    launch_note = ""
     if launch:
-        try:
-            if IS_WINDOWS:
-                os.startfile(path)  # noqa: S606
-                launched = True
-            else:
-                launch_error = "非 Windows，已生成文件但未唤起客户端"
-        except Exception as e:
-            launch_error = "唤起失败：%s" % e
+        launched, launch_error, launch_mode, launch_note = launch_rdp(ip, path)
     return {"ok": True, "path": path, "ip": ip, "user": user,
             "cred_stored": cred.get("ok"), "cred_error": cred.get("error") or "",
-            "launched": launched, "launch_error": launch_error}
+            "launched": launched, "launch_error": launch_error,
+            "launch_mode": launch_mode, "launch_note": launch_note}
 
 
 # ==================================================================== 汇总
@@ -1493,7 +1586,21 @@ def api_conn_info(h, params):
         "store_cred": bool(CONFIG.get("rdp_store_cred", True)),
         "rdp_width": int(CONFIG.get("rdp_width") or 1920),
         "rdp_height": int(CONFIG.get("rdp_height") or 1080),
+        "launch_mode": str(CONFIG.get("rdp_launch_mode") or "mstsc"),
+        "default_rdp": default_rdp_status(),
     })
+
+
+def api_rdp_default(h, params):
+    """GET 查 / POST 修 Default.rdp 的 authentication level（让 mstsc /v: 零弹窗）。"""
+    if h.command == "POST":
+        ok, note = ensure_default_rdp_auth_level()
+        st = default_rdp_status()
+        st.update({"ok": ok, "note": note})
+        return h._json(200 if ok else 500, st)
+    st = default_rdp_status()
+    st["ok"] = True
+    return h._json(200, st)
 
 
 ROUTES = {
@@ -1508,6 +1615,8 @@ ROUTES = {
     ("POST", "/api/dispatch"): api_dispatch,
     ("POST", "/api/rdp"): api_rdp,
     ("GET", "/api/rdp/preview"): api_rdp_preview,
+    ("GET", "/api/rdp/default"): api_rdp_default,
+    ("POST", "/api/rdp/default"): api_rdp_default,
     ("GET", "/api/conn-info"): api_conn_info,
 }
 

@@ -402,15 +402,37 @@ function showConnInfo(ip, host) {
   var title = "连接信息" + (host ? " · " + host : "");
   openModal(title, '<div class="muted">读取中…</div>');
   api("/api/conn-info?ip=" + encodeURIComponent(ip)).then(function (c) {
+    var mode = c.launch_mode || "mstsc";
+    var modeLabel = mode === "file"
+      ? "打开 .rdp 文件（2026-04 更新后会弹「安全警告」）"
+      : "mstsc /v: 命令行（不触发 .rdp 安全警告）";
+    var d = c.default_rdp || {};
+    var authLine = "";
+    var fixBtn = "";
+    if (mode !== "file") {
+      if (d.auth_zero) {
+        authLine = '<div class="muted">证书警告：已关闭（Default.rdp authentication level=0）</div>';
+      } else {
+        var lv = (d.auth_level === null || d.auth_level === undefined) ? "未设置" : String(d.auth_level);
+        authLine = '<div class="warn-line">证书警告未关闭（Default.rdp authentication level=' +
+          esc(lv) + '）—— 连接自签证书机器时会弹「无法验证身份」</div>';
+        fixBtn = '<button class="btn btn-mini" data-fix-default="1">修复证书警告</button>';
+      }
+    }
     var html =
       '<div class="conn-list">' +
         connRow("Tailscale IP :", c.ip || ip) +
         connRow("Username     :", c.username || "") +
         connRow("Password     :", c.password || "") +
       "</div>" +
+      '<div class="conn-note">' +
+        '<div class="muted">唤起方式：' + esc(modeLabel) + "</div>" +
+        authLine +
+      "</div>" +
       '<div class="conn-foot">' +
         '<button class="btn btn-primary btn-mini" data-conn-login="' + esc(ip) +
           '" data-host="' + esc(host || "") + '">一键登录</button>' +
+        fixBtn +
         '<button class="btn btn-mini" data-copy-all="1">复制全部</button>' +
         '<span class="muted">点任意一行可复制该值</span>' +
       "</div>";
@@ -513,6 +535,7 @@ function bind() {
         var msg = (launch ? "已唤起远程桌面：" : "已生成 .rdp：") + "<br><span class='mono'>" + esc(res.path) + "</span>";
         if (res.cred_stored) msg += "<br><span class='muted'>凭据已预存（免手输密码）</span>";
         else if (res.cred_error) msg += "<br><span class='muted'>凭据未预存：" + esc(res.cred_error) + "</span>";
+        if (res.launch_note) msg += "<br><span class='muted'>" + esc(res.launch_note) + "</span>";
         if (res.launch_error) msg += "<br><span class='muted'>" + esc(res.launch_error) + "</span>";
         toast(msg, "ok");
       })
@@ -567,6 +590,16 @@ function bind() {
       toast("已复制连接信息", "ok");
       return;
     }
+    var fx = e.target.closest("[data-fix-default]");
+    if (fx) {
+      fx.disabled = true;
+      api("/api/rdp/default", { method: "POST" }).then(function (r) {
+        if (r.ok) toast("已修复：" + esc(r.note || "Default.rdp authentication level=0"), "ok");
+        else toast("修复失败：" + esc(r.note || "未知错误"), "bad");
+      }).catch(function (err) { toast("修复失败：" + esc(err.message), "bad"); })
+        .then(function () { fx.disabled = false; });
+      return;
+    }
     var lb = e.target.closest("[data-conn-login]");
     if (lb) {
       lb.disabled = true;
@@ -575,6 +608,7 @@ function bind() {
         .then(function (res) {
           var msg = "已唤起远程桌面：<br><span class='mono'>" + esc(res.path) + "</span>";
           if (res.cred_stored) msg += "<br><span class='muted'>凭据已预存（免手输密码）</span>";
+          if (res.launch_note) msg += "<br><span class='muted'>" + esc(res.launch_note) + "</span>";
           toast(msg, "ok");
           closeModal();
         })
