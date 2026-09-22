@@ -59,7 +59,10 @@ jobs:
           POOL_TOKEN_5: ${{ secrets.POOL_TOKEN_5 }}
           POOL_TOKEN_6: ${{ secrets.POOL_TOKEN_6 }}
         run: |
-          $args = @('-PrevStatePath', '.pool-prev/pool-state.json', '-OutStatePath', 'state/pool-state.json')
+          # 输出写到仓库工作区之外（/tmp）——否则这份未跟踪的 state/pool-state.json
+          # 会挡住第 3 步 `git checkout pool-state`（该分支跟踪同一路径）而报
+          # "untracked working tree files would be overwritten"，状态再也发不出去。
+          $args = @('-PrevStatePath', '.pool-prev/pool-state.json', '-OutStatePath', '/tmp/pool-state.json')
           if ('${{ inputs.dry_run }}' -eq 'true') { $args += '-DryRun' }
           pwsh -NoProfile -File ./scripts/pool-coordinator.ps1 @args
 
@@ -67,8 +70,8 @@ jobs:
         continue-on-error: true
         run: |
           set -e
-          if [ ! -s state/pool-state.json ]; then echo "无状态文件，跳过"; exit 0; fi
-          cp state/pool-state.json /tmp/pool-state.json
+          # 第 2 步已把状态写到 /tmp（仓库工作区外），这里直接用。
+          if [ ! -s /tmp/pool-state.json ]; then echo "无状态文件，跳过"; exit 0; fi
           git config user.name  'pool-coordinator'
           git config user.email 'pool-coordinator@users.noreply.github.com'
           if git ls-remote --exit-code --heads origin pool-state >/dev/null 2>&1; then
