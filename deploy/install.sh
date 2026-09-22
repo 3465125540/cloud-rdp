@@ -36,8 +36,9 @@ die()  { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------- 1. 依赖检查 ----------
 log "检查依赖…"
 command -v python3 >/dev/null 2>&1 || die "缺少 python3，请先 apt install -y python3"
-PYVER="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
-python3 -c 'import sys; raise SystemExit(0 if sys.version_info>=(3,8) else 1)' \
+PYBIN="$(command -v python3)"
+PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+"$PYBIN" -c 'import sys; raise SystemExit(0 if sys.version_info>=(3,8) else 1)' \
   || die "Python 版本过低（$PYVER），需要 3.8+"
 
 MISSING=()
@@ -70,8 +71,8 @@ if [ -f "$CFG" ]; then
   log "已存在 $CFG —— 保留不覆盖"
 else
   log "生成 $CFG（含随机 access_token）"
-  TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-  python3 - "$INSTALL_DIR/deploy/config.linux.json" "$CFG" "$PORT" "$TOKEN_FILE" "$TOKEN" <<'PY'
+  TOKEN="$("$PYBIN" -c 'import secrets;print(secrets.token_urlsafe(32))')"
+  "$PYBIN" - "$INSTALL_DIR/deploy/config.linux.json" "$CFG" "$PORT" "$TOKEN_FILE" "$TOKEN" <<'PY'
 import json, sys
 src, dst, port, tokfile, token = sys.argv[1:6]
 cfg = json.load(open(src, encoding="utf-8"))
@@ -101,7 +102,8 @@ UNIT_SRC="$INSTALL_DIR/deploy/workbench.service"
 UNIT_DST="/etc/systemd/system/${SERVICE_NAME}.service"
 if [ -f "$UNIT_SRC" ] && command -v systemctl >/dev/null 2>&1; then
   log "安装 systemd 服务 → $UNIT_DST"
-  sed "s#/opt/cloud-rdp#$INSTALL_DIR#g" "$UNIT_SRC" > "$UNIT_DST"
+  # 替换：安装路径 + python3 实际路径（发行版可能装在 /usr/local/bin 等）
+  sed -e "s#/opt/cloud-rdp#$INSTALL_DIR#g" -e "s#/usr/bin/python3#$PYBIN#g" "$UNIT_SRC" > "$UNIT_DST"
   # 端口可能与默认不同，同步进 unit 的环境变量
   sed -i "s#^Environment=WORKBENCH_PORT=.*#Environment=WORKBENCH_PORT=$PORT#" "$UNIT_DST"
   systemctl daemon-reload
@@ -110,7 +112,7 @@ if [ -f "$UNIT_SRC" ] && command -v systemctl >/dev/null 2>&1; then
   systemctl --no-pager --full status "$SERVICE_NAME" | head -12 || true
 else
   warn "未找到 systemd（$UNIT_SRC）—— 手动启动："
-  echo "        cd $INSTALL_DIR && WORKBENCH_CONFIG=$CFG python3 workbench/server.py --no-open"
+  echo "        cd $INSTALL_DIR && WORKBENCH_CONFIG=$CFG $PYBIN workbench/server.py --no-open"
 fi
 
 echo
