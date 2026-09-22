@@ -719,40 +719,6 @@ jobs:
                   }
               }
 
-              # ---------- 备份139 请求（工作台「快照栏 → 备份139」按钮下发）----------
-              # 与一键备份同机制，但**只做增量同步**：把数据目录下新增/有变化的文件推到 139。
-              # sync-up.ps1 用 rclone copy --update（只增不删）→ 已存在的相同文件会跳过，
-              # 天然「避免重复上传」；本请求不抓快照。备机不写 139，故跳过。
-              $syReq = Join-Path $env:CLOUDRDP_SYS_DIR '_state\sync139-request.txt'
-              if (Test-Path -LiteralPath $syReq) {
-                  try {
-                      $syRaw = (Get-Content -LiteralPath $syReq -Raw)
-                      Remove-Item -LiteralPath $syReq -Force -ErrorAction SilentlyContinue
-                      $syBy = 'workbench'
-                      $mb2 = [regex]::Match($syRaw, '(?m)^requested_by=(.+)$')
-                      if ($mb2.Success -and -not [string]::IsNullOrWhiteSpace($mb2.Groups[1].Value)) {
-                          $syBy = $mb2.Groups[1].Value.Trim()
-                      }
-                      if ($isWriter) {
-                          Write-Host "[sync139] 收到备份139请求（by $syBy）→ 增量同步新增文件到 139（不抓快照）"
-                          & .\scripts\sync-up.ps1
-                          $syStatus = 'OK'
-                      } else {
-                          Write-Host "[sync139] 备机：不写 139（跳过本次同步）"
-                          $syStatus = 'SKIP_STANDBY'
-                      }
-                      @(
-                        "handled_at=$((Get-Date).ToUniversalTime().ToString('o'))"
-                        "requested_by=$syBy"
-                        "role=$role"
-                        "status=$syStatus"
-                      ) | Out-File -LiteralPath (Join-Path $env:CLOUDRDP_SYS_DIR '_state\sync139-done.txt') -Encoding ascii
-                      Write-Host "[sync139] 备份139处理完成（$syStatus）"
-                  } catch {
-                      Write-Host "[sync139] 处理备份139请求失败：$($_.Exception.Message)"
-                  }
-              }
-
               # ---------- 池角色核对：standby 读 hub 权威状态，主下线则自升为主 ----------
               # 权威状态由 hub 协调器每 10 分钟发布（primary = 最老的在跑机）。
               # 只「升主」不「降级」：协调器任一时刻只指定一个 primary，故不存在双主；

@@ -25,6 +25,17 @@ function toast(msg, kind, ms) {
 function badge(text, kind) {
   return '<span class="badge ' + (kind || "mute") + '">' + esc(text) + "</span>";
 }
+function pad2(n) { return (n < 10 ? "0" : "") + n; }
+// 把后端给的 UTC ISO 时间换算成北京时间字符串，形如 "2026/9/22-20:16"。
+// 在前端本地换算 → 不依赖后端是否已升级（旧后端只给 state_updated / created_at 也正确）。
+function bjTime(iso) {
+  if (!iso) return "";
+  var t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  var d = new Date(t + 8 * 3600 * 1000);   // 先 +8h，再用 UTC getter 读 → 与浏览器本地时区无关
+  return d.getUTCFullYear() + "/" + (d.getUTCMonth() + 1) + "/" + d.getUTCDate() +
+    "-" + pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes());
+}
 // 后端返回的不是 JSON（多半是 HTML）时的统一提示。
 // 常见于「当前页面不是由工作台后端提供的」——比如用静态预览面板打开、或直接双击 index.html：
 // 此时 /api/... 会落到那个静态服务器上，返回它的 HTML，而不是工作台的 JSON。
@@ -155,20 +166,20 @@ function renderMachines() {
     var snap = '<span class="muted">—</span>';
     if (m.snapshot && m.snapshot.ok) {
       var sn = m.snapshot;
+      var snapTime = bjTime(sn.created) || sn.created_local || "";   // 实时北京时间（UTC+8）
       var parts = [];
-      if (sn.age_human) parts.push(sn.age_human);
-      if (sn.files !== null && sn.files !== undefined) parts.push(sn.files + " 文件");
-      snap = (sn.stale ? badge(parts.join(" · "), "warn") : badge(parts.join(" · "), "ok"));
-      // 快照时间（绝对时间，本机时区）：后端把 manifest 的 createdUtc/createdLocal 归一成 created_local
-      if (sn.created_local) {
-        snap += '<div class="snap-time muted" data-tip="快照生成时间（本机时区）。原始 UTC：' +
-          esc(sn.created || "?") + (sn.mode ? "，模式 " + esc(sn.mode) : "") + '">' +
-          esc(sn.created_local) + "</div>";
-      }
+      if (snapTime) parts.push(snapTime);
+      if (typeof sn.files === "number") parts.push(sn.files + " 文件");
+      var snapTip = "快照生成时间（实时北京时间 UTC+8）" + (sn.mode ? "，模式 " + sn.mode : "") +
+        "。原始 UTC：" + (sn.created || "?");
+      snap = '<span data-tip="' + esc(snapTip) + '">' +
+        (sn.stale ? badge(parts.join(" · "), "warn") : badge(parts.join(" · "), "ok")) + "</span>";
     } else if (m.snapshot) {
       snap = '<span class="muted" title="未读到 _snapshot/manifest.json">无快照</span>';
     }
     // 快照栏附「一键备份」按钮（仅在线机器 —— 需经 SMB 把请求文件写到机器上）
+    // 合并版：一次点击 = ① 增量同步到 139（rclone copy --update：只传新增/有变化的文件，
+    // 已存在的相同文件跳过 → 不重复上传，也不删远端）② 抓一次快速快照并推送。
     if (online) {
       var br = m.backup_request || {};
       if (br.pending) {
@@ -181,27 +192,13 @@ function renderMachines() {
         snap += '<div class="backup-box">' +
           '<button class="btn btn-mini btn-backup" data-backup="' + esc(m.ip) +
           '" data-host="' + esc(m.hostname) +
-          '" data-tip="立即在机器上执行「同步数据到 139 云盘 + 快速快照推送」。机器保活循环每分钟取走一次，通常 ≤1 分钟开始，约 1~3 分钟完成">☁ 一键备份</button>' +
-          "</div>";
-      }
-      // 快照栏附「备份139」按钮：只做增量同步（rclone copy --update），不抓快照
-      var sr = m.sync139_request || {};
-      if (sr.pending) {
-        snap += '<div class="backup-box">' +
-          '<button class="btn btn-mini btn-backup pending" disabled><i class="spin"></i> 同步中</button>' +
-          '<div class="muted backup-note" data-tip="请求已于 ' + esc(sr.requested_at || "刚刚") +
-          ' 下发（by ' + esc(sr.requested_by || "workbench") +
-          '）。机器保活循环每分钟取走执行，完成后此行会恢复为可点击">已下发，等待执行</div></div>';
-      } else {
-        snap += '<div class="backup-box">' +
-          '<button class="btn btn-mini btn-backup" data-backup139="' + esc(m.ip) +
-          '" data-host="' + esc(m.hostname) +
-          '" data-tip="立即把数据目录（D:\\a\\cloud-rdp）下「新增 / 有变化」的文件增量上传到 139 云盘。用 rclone copy --update：已存在且未变化的文件会跳过（不重复上传），也不会删除远端文件。只同步、不抓快照">⬆ 备份139</button>' +
+          '" data-tip="立即在机器上执行：① 把数据目录（D:\\a\\cloud-rdp）下新增/有变化的文件增量上传到 139 云盘（rclone copy --update：已存在的相同文件会跳过、不重复上传，也不删远端）② 抓一次快速快照并推送。机器保活循环每分钟取走一次，通常 ≤1 分钟开始，约 1~3 分钟完成">☁ 一键备份</button>' +
           "</div>";
       }
     }
     var lastSeen = online ? '<span class="muted">—</span>'
-      : '<span class="muted">' + esc(m.last_seen_human || "未知") + "</span>";
+      : '<span class="muted" title="最后在线（实时北京时间 UTC+8）；原始 UTC：' + esc(m.last_seen || "?") + '">' +
+        esc(bjTime(m.last_seen) || m.last_seen_human || "未知") + "</span>";
     var ops = online
       ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">一键登录</button>' +
         ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">查看信息</button>'
@@ -254,8 +251,8 @@ function renderAccounts() {
   if (acc.ok) {
     bits.push(rows.length + " 个账号");
     if (acc.monitor_available) {
-      // 实时北京时间（绝对时间，UTC+8）；不再用「3.7 小时前」这类相对描述
-      var bj = acc.state_updated_beijing || acc.state_age_human || "?";
+      // 实时北京时间（绝对时间，UTC+8）：前端从原始 UTC 换算，旧后端（只给 state_updated）也正确
+      var bj = bjTime(acc.state_updated) || acc.state_updated_beijing || "?";
       bits.push("监测数据 " + bj + " 北京" + (acc.state_via ? "（" + acc.state_via + "）" : ""));
     } else {
       bits.push("暂无监测数据（等协调器发布）");
@@ -287,9 +284,10 @@ function renderAccounts() {
       mon.push('<span class="mon-num">在跑 ' + esc(a.alive_count) + " 台</span>");
     }
     if (a.last_run) {
+      var lrj = bjTime(a.last_run.created_at) || a.last_run.created_beijing || "";
       mon.push('<span class="mon-run">' + badge(a.last_run.state || "-", runStateKind(a.last_run.state)) +
-        (a.last_run.created_beijing ? ' <span class="muted" title="北京时间（UTC+8）；原始 UTC：' +
-          esc(a.last_run.created_at || "?") + '">' + esc(a.last_run.created_beijing) + "</span>" : "") + "</span>");
+        (lrj ? ' <span class="muted" title="北京时间（UTC+8）；原始 UTC：' +
+          esc(a.last_run.created_at || "?") + '">' + esc(lrj) + "</span>" : "") + "</span>");
     } else if (a.source && a.source !== "none") {
       mon.push('<span class="muted">无运行记录</span>');
     }
@@ -335,7 +333,7 @@ function renderRuns() {
       '<td class="mono">#' + esc(x.number) + "</td>" +
       "<td>" + st + "</td>" +
       "<td>" + ev + "</td>" +
-      '<td class="nowrap"><span title="北京时间（UTC+8）；原始 UTC：' + esc(x.created_at) + '">' + esc(x.created_beijing || x.created_human) + "</span></td>" +
+      '<td class="nowrap"><span title="北京时间（UTC+8）；原始 UTC：' + esc(x.created_at) + '">' + esc(bjTime(x.created_at) || x.created_beijing || "-") + "</span></td>" +
       '<td class="mono nowrap">' + esc(x.duration) + "</td>" +
       '<td class="mono">' + esc(x.head_sha) + "</td>" +
       '<td class="dim">' + esc(x.title || "-") + "</td>" +
@@ -489,7 +487,8 @@ function showConnInfo(ip, host) {
 function doBackup(btn) {
   var ip = btn.dataset.backup, host = btn.dataset.host || "";
   if (!confirm("对「" + (host || ip) + "」执行一键备份？\n\n将在机器上：\n" +
-               "  · 同步用户数据到 139 云盘\n" +
+               "  · 把数据目录（D:\\a\\cloud-rdp）下新增/有变化的文件增量同步到 139 云盘\n" +
+               "    （rclone copy --update：已存在的相同文件跳过、不重复上传，也不删远端）\n" +
                "  · 抓一次快速快照并推送\n\n通常 1~3 分钟完成。")) return;
   btn.disabled = true;
   var old = btn.innerHTML;
@@ -502,31 +501,6 @@ function doBackup(btn) {
     })
     .catch(function (err) {
       toast("一键备份失败：" + esc(err.message), "bad", 10000);
-      btn.disabled = false;
-      btn.innerHTML = old;
-    });
-}
-
-/* ------------------------------------------------------------ 备份139（仅增量同步） */
-// 与「一键备份」同一套文件请求机制，但只跑 scripts/sync-up.ps1（rclone copy --update）：
-// 只把新增/有变化的文件推到 139，已存在的相同文件跳过（不重复上传），不抓快照。
-function doBackup139(btn) {
-  var ip = btn.dataset.backup139, host = btn.dataset.host || "";
-  if (!confirm("对「" + (host || ip) + "」执行备份139？\n\n将在机器上：\n" +
-               "  · 把数据目录（D:\\a\\cloud-rdp）下新增 / 有变化的文件增量上传到 139 云盘\n" +
-               "  · 已存在且未变化的文件会跳过（不重复上传），也不会删除远端文件\n" +
-               "  · 不抓快照\n\n通常 ≤1 分钟开始，视新增文件量而定。")) return;
-  btn.disabled = true;
-  var old = btn.innerHTML;
-  btn.innerHTML = '<i class="spin"></i> 下发中';
-  api("/api/backup139", { method: "POST", body: JSON.stringify({ ip: ip }) })
-    .then(function (res) {
-      toast("已下发备份139请求" + (host ? "（" + esc(host) + "）" : "") +
-        "<br><span class='muted'>" + esc(res.note || "机器将在 ≤1 分钟内增量同步到 139") + "</span>", "ok", 9000);
-      setTimeout(function () { load(true); }, 8000);   // 稍后刷新，让按钮切到「已下发」
-    })
-    .catch(function (err) {
-      toast("备份139失败：" + esc(err.message), "bad", 10000);
       btn.disabled = false;
       btn.innerHTML = old;
     });
@@ -656,7 +630,6 @@ function bind() {
   $("#tbl-machines").addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (!b) return;
-    if (b.dataset.backup139) { doBackup139(b); return; }
     if (b.dataset.backup) { doBackup(b); return; }
     if (b.dataset.info) { showConnInfo(b.dataset.info, b.dataset.host || ""); return; }
     var ip = b.dataset.rdp || b.dataset.rdpfile;
