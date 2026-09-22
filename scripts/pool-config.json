@@ -46,6 +46,13 @@
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_2",
       "enabled": true
+    },
+    {
+      "id": "acc-3",
+      "owner": "3465125540",
+      "repo": "cloud-rdp",
+      "token_secret": "POOL_TOKEN_3",
+      "enabled": true
     }
   ]
 }
