@@ -1,14 +1,14 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-09-22T03:01:38.0219538Z",
+  "updated_utc": "2026-09-22T03:49:05.0621774Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-1",
     "owner": "REPLACE_OWNER_1",
     "repo": "cloud-rdp",
     "run_id": null,
-    "since": "2026-09-22T03:01:37.9156680Z"
+    "since": "2026-09-22T03:49:04.9130907Z"
   },
   "standby": [
     {
@@ -16,11 +16,39 @@
       "owner": "REPLACE_OWNER_2",
       "repo": "cloud-rdp",
       "run_id": null,
-      "since": "2026-09-22T03:01:37.9156680Z"
+      "since": "2026-09-22T03:49:04.9130907Z"
+    }
+  ],
+  "accounts": [
+    {
+      "id": "acc-1",
+      "owner": "REPLACE_OWNER_1",
+      "repo": "cloud-rdp",
+      "enabled": true,
+      "secret_name": "POOL_TOKEN_1",
+      "token_state": "missing",
+      "alive_count": 0,
+      "total": 0,
+      "last_run": null,
+      "note": "Secret POOL_TOKEN_1 未配置",
+      "role": "primary"
+    },
+    {
+      "id": "acc-2",
+      "owner": "REPLACE_OWNER_2",
+      "repo": "cloud-rdp",
+      "enabled": true,
+      "secret_name": "POOL_TOKEN_2",
+      "token_state": "missing",
+      "alive_count": 0,
+      "total": 0,
+      "last_run": null,
+      "note": "Secret POOL_TOKEN_2 未配置",
+      "role": "standby"
     }
   ],
   "recent_dispatches": {
-    "REPLACE_OWNER_2": "2026-09-22T03:01:37.9156680Z",
-    "REPLACE_OWNER_1": "2026-09-22T03:01:37.9156680Z"
+    "REPLACE_OWNER_2": "2026-09-22T03:49:04.9130907Z",
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z"
   }
 }
