@@ -265,6 +265,27 @@ html, body {
   border: 1px solid rgba(248,81,73,.28); border-radius: 7px; padding: 5px 10px;
 }
 
+/* ---------------- 悬浮提示（data-tip） ---------------- */
+.tip {
+  position: fixed; z-index: 90; max-width: 330px;
+  background: #0b1220; border: 1px solid var(--line); color: var(--fg);
+  font-size: 12px; line-height: 1.55; padding: 7px 11px; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+  pointer-events: none;                       /* 不抢鼠标，避免闪烁 */
+}
+.tip[hidden] { display: none; }
+/* 带说明的元素给点可交互暗示；按钮保持手型指针 */
+[data-tip]:not(.btn):not(button) { cursor: help; }
+.tbl th[data-tip] { text-decoration: underline dotted rgba(255, 255, 255, .26); text-underline-offset: 3px; }
+
+/* ---------------- 快照栏：绝对时间 + 一键备份 ---------------- */
+.snap-time { font-size: 10.5px; margin-top: 3px; white-space: nowrap; }
+.backup-box { margin-top: 4px; }
+.btn-backup { border-color: rgba(88, 166, 255, .42); white-space: nowrap; }
+.btn-backup:hover { background: rgba(88, 166, 255, .14); border-color: rgba(88, 166, 255, .6); }
+.btn-backup.pending { opacity: .72; }
+.backup-note { font-size: 10px; margin-top: 3px; white-space: nowrap; }
+
 /* ---------------- Toast ---------------- */
 .toast {
   position: fixed; right: 22px; bottom: 22px; z-index: 50;

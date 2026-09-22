@@ -31,10 +31,12 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -44,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -102,11 +104,26 @@ DEFAULT_CONFIG = {
     "cache_seconds": 20,
 
     # ---- 机器实况 ----
-    "tailscale_exe": r"C:\Program Files\Tailscale\tailscale.exe",
+    # 平台默认：Windows 走官方安装路径；Linux 用 PATH 里的 tailscale（找不到会自动 which）
+    "tailscale_exe": (r"C:\Program Files\Tailscale\tailscale.exe" if IS_WINDOWS else "tailscale"),
     "machine_prefix": "github-rdp-server",   # 只把以此开头的 Tailscale 节点当「我们的机器」
     "smb_share": "D$",
     "smb_base": r"D:\cloudrdp-sys",          # 远端系统目录（含 _state / _snapshot）
     "snapshot_stale_minutes": 90,            # 快照超过这么久没更新 → 标记为「陈旧」
+    # 读远端文件的方式：auto=Windows 用 UNC 直读、Linux 用 smbclient；
+    # 也可强制 "unc" / "smbclient"。Linux 上 smbclient 需 `apt install smbclient`。
+    "smb_mode": "auto",
+    "smbclient_exe": "smbclient",
+    "smb_timeout": 25,
+
+    # ---- 一键备份（写请求文件 → 机器保活循环取走执行）----
+    "backup_request_file": "_state/backup-request.txt",
+    "backup_done_file": "_state/backup-done.txt",
+
+    # ---- 访问控制（部署到服务器时强烈建议设置）----
+    # 非空 = 所有请求都要带 token（?token=xxx 或 X-Workbench-Token 头）。
+    # 工作台会把 RDP 明文密码经 /api/conn-info 返回，暴露到公网极危险。
+    "access_token": "",
 
     # ---- 一键登录 ----
     "rdp_user": "a",
@@ -122,6 +139,11 @@ DEFAULT_CONFIG = {
     #             配合把 Default.rdp 的 authentication level 置 0，证书警告也一并消失 → 零弹窗。
     #   "file"  = 老行为：os.startfile(.rdp)，会被 KB5083769 的安全警告挡住。
     "rdp_launch_mode": "mstsc",
+    # Linux 专用：唤起 RDP 客户端的命令模板（留空 = 自动探测 xfreerdp / remmina）。
+    # 可用占位符：{ip} {user} {password} {file}。例：
+    #   "xfreerdp /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"
+    #   "remmina -c {file}"
+    "rdp_client_cmd": "",
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -496,7 +518,9 @@ def tailscale_status():
     return cached("tailscale", CONFIG["cache_seconds"], probe)
 
 
-# ==================================================================== SMB（读远端机器状态）
+# ==================================================================== 远端文件（SMB）
+# Windows：直接 open("\\\\ip\\D$\\...")（先 net use 预鉴权）
+# Linux  ：走 smbclient（子进程），把远端文件 get/put 到本机临时文件
 def _unc(ip, rel):
     share = CONFIG.get("smb_share") or "D$"
     base = str(CONFIG.get("smb_base") or r"D:\cloudrdp-sys")
@@ -514,6 +538,28 @@ def _unc_abs(ip, abs_path):
         share = CONFIG.get("smb_share") or "D$"
         rest = p.lstrip("\\")
     return "\\\\%s\\%s\\%s" % (ip, share, rest)
+
+
+def _rel_to_abs(rel):
+    """`_state/pool-role.txt` → `D:\\cloudrdp-sys\\_state\\pool-role.txt`。"""
+    base = str(CONFIG.get("smb_base") or r"D:\cloudrdp-sys").rstrip("\\/")
+    return base + "\\" + str(rel or "").replace("/", "\\")
+
+
+def _remote_parts(abs_path):
+    """远端路径 → (共享名, 共享内相对路径)。`D:\\x\\y` → ('D$', 'x\\y')。"""
+    p = str(abs_path or "").replace("/", "\\")
+    if len(p) >= 2 and p[1] == ":":
+        return p[0].upper() + "$", p[2:].lstrip("\\")
+    return (CONFIG.get("smb_share") or "D$"), p.lstrip("\\")
+
+
+def smb_backend():
+    """读远端文件的后端：'unc'（Windows）或 'smbclient'（Linux）。"""
+    m = str(CONFIG.get("smb_mode") or "auto").lower()
+    if m in ("unc", "smbclient"):
+        return m
+    return "unc" if IS_WINDOWS else "smbclient"
 
 
 _SMB_DONE = set()
@@ -549,14 +595,113 @@ def _read_unc(ip, unc):
     raise err
 
 
+# ---------- Linux：smbclient 后端 ----------
+def _smbclient_cmd(ip, share, script):
+    """组装一条 smbclient 调用。密码走 PASSWD 环境变量，不落 argv（避免 ps 泄露）。"""
+    exe = shutil.which(str(CONFIG.get("smbclient_exe") or "smbclient")) or "smbclient"
+    t = str(int(CONFIG.get("smb_timeout") or 25))
+    return ([exe, "//%s/%s" % (ip, share), "-U", str(CONFIG.get("rdp_user") or "a"),
+             "-t", t, "-c", script],
+            dict(os.environ, PASSWD=str(CONFIG.get("rdp_password") or "a")))
+
+
+def _smbclient_run(ip, share, script):
+    cmd, env = _smbclient_cmd(ip, share, script)
+    to = int(CONFIG.get("smb_timeout") or 25) + 10
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=to, env=env)
+    except FileNotFoundError:
+        raise RuntimeError("未找到 smbclient（Linux 请 `apt install smbclient`，或改用挂载）")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("smbclient 超时（%ss）" % to)
+    if out.returncode != 0:
+        msg = (out.stderr or out.stdout).decode("utf-8", "replace").strip()
+        raise RuntimeError(msg.splitlines()[-1][:200] if msg else "smbclient 返回 %d" % out.returncode)
+    return out.stdout
+
+
+def _smbclient_read(ip, share, rel):
+    fd, tmp = tempfile.mkstemp(prefix="wb-smb-")
+    os.close(fd)
+    try:
+        _smbclient_run(ip, share, 'get "%s" "%s"' % (rel.replace("\\", "/"), tmp.replace("\\", "/")))
+        with open(tmp, "r", encoding="utf-8-sig", errors="replace") as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _smbclient_write(ip, share, rel, text):
+    fd, tmp = tempfile.mkstemp(prefix="wb-smb-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        _smbclient_run(ip, share, 'put "%s" "%s"' % (tmp.replace("\\", "/"), rel.replace("\\", "/")))
+        return True
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _smbclient_list(ip, share, rel):
+    out = _smbclient_run(ip, share, 'ls "%s"' % (rel.replace("\\", "/")))
+    names = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        name = s.split()[0]
+        if name in (".", ".."):
+            continue
+        names.append(name)
+    return names
+
+
+# ---------- 统一入口 ----------
 def read_remote_text(ip, rel):
     """读远端机器上 D:\\cloudrdp-sys 下的文本文件。失败抛异常。"""
-    return _read_unc(ip, _unc(ip, rel))
+    return read_remote_abs(ip, _rel_to_abs(rel))
 
 
 def read_remote_abs(ip, abs_path):
     """读远端机器上任意绝对路径的文本文件（如 runner 工作区）。失败抛异常。"""
+    if smb_backend() == "smbclient":
+        share, rel = _remote_parts(abs_path)
+        return _smbclient_read(ip, share, rel)
     return _read_unc(ip, _unc_abs(ip, abs_path))
+
+
+def write_remote_text(ip, rel, text):
+    """把文本写到远端机器 D:\\cloudrdp-sys 下的相对路径（用于下发备份请求）。"""
+    abs_path = _rel_to_abs(rel)
+    share, sub = _remote_parts(abs_path)
+    if smb_backend() == "smbclient":
+        return _smbclient_write(ip, share, sub, text)
+    unc = _unc_abs(ip, abs_path)
+    try:
+        with open(unc, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return True
+    except Exception:
+        if ip not in _SMB_DONE and _smb_preauth(ip):
+            _SMB_DONE.add(ip)
+            with open(unc, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            return True
+        raise
+
+
+def list_remote_dir(ip, abs_path):
+    """列远端某目录下的条目名（best-effort）。失败抛异常。"""
+    if smb_backend() == "smbclient":
+        share, rel = _remote_parts(abs_path)
+        return _smbclient_list(ip, share, rel)
+    return os.listdir(_unc_abs(ip, abs_path))
 
 
 def parse_pool_info(text):
@@ -599,6 +744,49 @@ def map_machine_accounts(machines, account_list):
     return machines
 
 
+def parse_snapshot_manifest(man):
+    """从 `_snapshot/manifest.json` 提取前端需要的字段（兼容新旧两种格式）。
+
+    现行 manifest（backup-snapshot.ps1 写的）用的是：
+      createdUtc / createdLocal（ISO，7 位小数秒）、
+      files = { totalFiles, totalBytes, entries, skipped }、mode、status。
+    老格式是扁平的 file_count / created_utc。两种都认。
+    """
+    if not isinstance(man, dict):
+        return None
+    fb = man.get("files")
+    files = bytes_ = None
+    if isinstance(fb, dict):
+        files = fb.get("totalFiles", fb.get("total_files"))
+        bytes_ = fb.get("totalBytes", fb.get("total_bytes"))
+    if files is None:
+        files = man.get("file_count") or man.get("count")
+    if bytes_ is None:
+        bytes_ = man.get("total_bytes") or man.get("bytes")
+    when = (man.get("createdUtc") or man.get("created_utc") or man.get("createdLocal")
+            or man.get("created_local") or man.get("created") or man.get("time")
+            or man.get("updated_utc"))
+    age_min, local_str = None, ""
+    dt = parse_iso(when)
+    if dt:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+        local_str = dt.astimezone().strftime("%m-%d %H:%M")   # 本机时区的绝对时间
+    return {
+        "ok": True,
+        "created": when,
+        "created_local": local_str,
+        "age_human": human_age(when),
+        "age_minutes": age_min,
+        "files": files,
+        "bytes": bytes_,
+        "mode": man.get("mode") or "",
+        "status": man.get("status") or "",
+        "stale": (age_min is not None and age_min > float(CONFIG.get("snapshot_stale_minutes") or 90)),
+    }
+
+
 def machine_detail(ip, online):
     """读单台机器的池角色 + 快照新鲜度 + 运行时长 + 归属账号。任何一项读不到就留空，不抛。"""
     detail = {"role": "", "role_source": "", "snapshot": None, "error": "",
@@ -614,26 +802,8 @@ def machine_detail(ip, online):
     except Exception as e:
         detail["error"] = "读角色失败：%s" % e
     try:
-        raw = read_remote_text(ip, "_snapshot/manifest.json")
-        man = json.loads(raw)
-        files = man.get("file_count") or man.get("files") or man.get("count")
-        when = man.get("created_utc") or man.get("created") or man.get("time") or man.get("updated_utc")
-        size = man.get("total_bytes") or man.get("bytes")
-        age_min = None
-        dt = parse_iso(when)
-        if dt:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
-        detail["snapshot"] = {
-            "ok": True,
-            "created": when,
-            "age_human": human_age(when),
-            "age_minutes": age_min,
-            "files": files,
-            "bytes": size,
-            "stale": (age_min is not None and age_min > float(CONFIG.get("snapshot_stale_minutes") or 90)),
-        }
+        man = json.loads(read_remote_text(ip, "_snapshot/manifest.json"))
+        detail["snapshot"] = parse_snapshot_manifest(man) or {"ok": False}
     except Exception:
         detail["snapshot"] = {"ok": False}
     # 运行时长：workflow 第 0a 步写入的 _state\job-start.txt（ISO-8601 UTC）→ now - 起点
@@ -666,7 +836,7 @@ def machine_detail(ip, online):
         repo_name = (str(CONFIG.get("repo") or "").split("/")[-1] or "cloud-rdp")
         cands = [r"D:\a\%s\%s\.git\config" % (repo_name, repo_name)]
         try:   # 兜底再兜底：扫 D:\a 下第一个非 _ 目录（仓库名变了也能兜住）
-            for name in sorted(os.listdir(_unc_abs(ip, r"D:\a"))):
+            for name in sorted(list_remote_dir(ip, r"D:\a")):
                 if not name.startswith("_"):
                     cands.append(r"D:\a\%s\%s\.git\config" % (name, name))
         except Exception:
@@ -680,7 +850,51 @@ def machine_detail(ip, online):
                 detail["pool_owner"] = owner
                 detail["owner_source"] = "runner 工作区 .git/config"
                 break
+    # 一键备份：机器上是否还挂着未处理的备份请求（保活循环取走后会删掉）
+    detail["backup_request"] = read_backup_request(ip)
     return detail
+
+
+def read_backup_request(ip):
+    """读机器上的 `_state/backup-request.txt`（一键备份请求）。无请求返回 pending=False。
+
+    文件由工作台经 SMB 写入，机器的保活循环每分钟轮询一次、取走后立即删除。
+    所以「pending=True」= 请求已下发、机器还没处理。
+    """
+    out = {"pending": False, "requested_at": "", "requested_by": ""}
+    try:
+        info = parse_pool_info(read_remote_text(ip, CONFIG.get("backup_request_file")
+                                               or "_state/backup-request.txt"))
+        if info:
+            out["pending"] = True
+            out["requested_at"] = info.get("requested_at", "")
+            out["requested_by"] = info.get("requested_by", "")
+    except Exception:
+        pass
+    return out
+
+
+def request_backup(ip, requested_by=""):
+    """下发「一键备份」：把请求文件写到机器上，保活循环取走后执行 sync-up + 快照推送。
+
+    为什么走文件而不是直接触发：机器是 GitHub Actions runner，没有对外命令通道；
+    但保活循环每分钟跑一次，写个请求文件让它自己捡走是最省事、也最稳的做法。
+    （需要机器跑的是支持该轮询的 workflow —— 见 .github/workflows/windows-rdp.yml 第 14 步。）
+    """
+    ip = (ip or "").strip()
+    if not ip:
+        return {"ok": False, "error": "缺少 ip"}
+    if not re.match(r"^[0-9A-Za-z_.\-]+$", ip):
+        return {"ok": False, "error": "IP 非法：%s" % ip}
+    rel = CONFIG.get("backup_request_file") or "_state/backup-request.txt"
+    body = ("requested_at=%s\nrequested_by=%s\nreason=manual\n"
+            % (now_iso(), requested_by or "workbench"))
+    try:
+        write_remote_text(ip, rel, body)
+    except Exception as e:
+        return {"ok": False, "error": "写备份请求失败：%s" % e, "file": rel}
+    return {"ok": True, "error": "", "file": rel, "ip": ip,
+            "note": "已下发备份请求：机器会在 ≤1 分钟内执行「同步数据到 139 + 快速快照推送」"}
 
 
 # ==================================================================== 账号池
@@ -1139,16 +1353,40 @@ def ensure_default_rdp_auth_level():
         return (False, "写 Default.rdp 失败：%s" % e)
 
 
+def _launch_rdp_linux(ip, rdp_path, mode):
+    """Linux：按配置的客户端命令唤起（xfreerdp / remmina 等）。"""
+    tmpl = str(CONFIG.get("rdp_client_cmd") or "").strip()
+    if not tmpl:   # 自动探测常见客户端
+        for exe, t in (("xfreerdp", "xfreerdp /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"),
+                       ("xfreerdp3", "xfreerdp3 /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"),
+                       ("remmina", "remmina -c {file}")):
+            if shutil.which(exe):
+                tmpl = t
+                break
+    if not tmpl:
+        return (False, "未找到 RDP 客户端：配置 rdp_client_cmd，或安装 xfreerdp / remmina",
+                mode, "已生成 .rdp 文件，可手动导入客户端")
+    cmd = (tmpl.replace("{ip}", ip).replace("{user}", str(CONFIG.get("rdp_user") or "a"))
+              .replace("{password}", str(CONFIG.get("rdp_password") or "a"))
+              .replace("{file}", rdp_path))
+    try:
+        subprocess.Popen(shlex.split(cmd))
+        return (True, "", mode, "已用 Linux RDP 客户端唤起：%s" % cmd.split()[0])
+    except Exception as e:
+        return (False, "唤起失败：%s" % e, mode, "")
+
+
 def launch_rdp(ip, rdp_path):
     """唤起远程桌面连接。返回 (launched, error, mode, note)。
 
     默认走 `mstsc /v:<ip>`：2026-04 KB5083769（CVE-2026-26151）之后，
     **只有打开 .rdp 文件**才会弹「远程桌面连接安全警告 / 资源勾选」阻断框，
     手动连接（命令行 /v:）不受影响；再把 Default.rdp 认证级别置 0，证书警告也没了。
+    Linux 上走 `rdp_client_cmd` / 自动探测 xfreerdp。
     """
     mode = str(CONFIG.get("rdp_launch_mode") or "mstsc").lower()
     if not IS_WINDOWS:
-        return (False, "非 Windows，已生成文件但未唤起客户端", mode, "")
+        return _launch_rdp_linux(ip, rdp_path, mode)
     if mode == "file":
         try:
             os.startfile(rdp_path)  # noqa: S606
@@ -1316,9 +1554,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        ck = getattr(self, "_set_cookie", "")
+        if ck:
+            self.send_header("Set-Cookie", ck)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _auth_ok(self, params):
+        """访问控制：配置了 access_token 就要求带 token（?token= / X-Workbench-Token / Cookie）。"""
+        want = str(CONFIG.get("access_token") or "")
+        if not want:
+            return True
+        given = (params.get("token") or [""])[0] or (self.headers.get("X-Workbench-Token") or "")
+        if not given:
+            m = re.search(r"(?:^|;\s*)wb_token=([^;]+)", self.headers.get("Cookie") or "")
+            if m:
+                given = urllib.parse.unquote(m.group(1))
+        if given != want:
+            return False
+        if params.get("token"):   # 用 ?token= 进来 → 种个 Cookie，后续请求免带
+            self._set_cookie = "wb_token=%s; Path=/; HttpOnly; SameSite=Lax" % urllib.parse.quote(given)
+        return True
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
@@ -1356,6 +1613,17 @@ class Handler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(query)
         lookup = "GET" if method == "HEAD" else method   # HEAD 复用 GET 的处理器，_send 不写 body
         try:
+            if not self._auth_ok(params):
+                if path.startswith("/api/"):
+                    return self._json(401, {"ok": False, "error":
+                                            "未授权：请用 ?token=<access_token> 打开，或带 X-Workbench-Token 头"})
+                return self._send(401, (
+                    "<!doctype html><meta charset=utf-8><title>401 需要访问令牌</title>"
+                    "<div style='font:15px/1.7 system-ui;max-width:640px;margin:12vh auto;padding:0 20px'>"
+                    "<h2>需要访问令牌</h2><p>这个工作台配置了 <code>access_token</code>，"
+                    "请在地址后加 <code>?token=你的令牌</code> 再打开一次（之后会记住）。</p>"
+                    "<p>例：<code>http://&lt;服务器&gt;:8787/?token=xxxx</code></p></div>"),
+                    "text/html; charset=utf-8")
             if not path.startswith("/api/"):
                 if lookup != "GET":
                     return self._json(405, {"ok": False, "error": "method not allowed"})
@@ -1603,6 +1871,13 @@ def api_rdp_default(h, params):
     return h._json(200, st)
 
 
+def api_backup(h, params):
+    """POST /api/backup {ip} —— 一键备份：下发请求文件，机器保活循环执行同步+快照。"""
+    body = h._read_body()
+    res = request_backup(body.get("ip") or "", requested_by=str(body.get("by") or "workbench"))
+    return h._json(200 if res.get("ok") else 400, res)
+
+
 ROUTES = {
     ("GET", "/api/health"): api_health,
     ("GET", "/api/overview"): api_overview,
@@ -1613,6 +1888,7 @@ ROUTES = {
     ("GET", "/api/runs"): api_runs,
     ("GET", "/api/pool-state"): api_pool_state,
     ("POST", "/api/dispatch"): api_dispatch,
+    ("POST", "/api/backup"): api_backup,
     ("POST", "/api/rdp"): api_rdp,
     ("GET", "/api/rdp/preview"): api_rdp_preview,
     ("GET", "/api/rdp/default"): api_rdp_default,

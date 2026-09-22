@@ -1,0 +1,32 @@
+[Unit]
+Description=GitHub 虚拟机管理工作台 (Cloud RDP Workbench)
+Documentation=file:/opt/cloud-rdp/DEPLOY-linux.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ⚠️ 改成你的实际部署路径（install.sh 会自动替换这一处）
+WorkingDirectory=/opt/cloud-rdp
+ExecStart=/usr/bin/python3 /opt/cloud-rdp/workbench/server.py --no-open
+
+# 监听地址/端口：默认读 workbench/config.json；这里再显式钉死一遍，防止配置漂移
+Environment=WORKBENCH_CONFIG=/opt/cloud-rdp/workbench/config.json
+Environment=WORKBENCH_HOST=0.0.0.0
+Environment=WORKBENCH_PORT=8787
+# GitHub Token（可选但强烈建议；不放只能匿名读少量接口）：
+# Environment=GITHUB_TOKEN=ghp_xxxxxxxx
+
+Restart=on-failure
+RestartSec=3
+# 日志走 journald：journalctl -u cloud-rdp-workbench -f
+
+# ---- 轻量加固（不影响正常功能）----
+NoNewPrivileges=true
+PrivateTmp=true
+# 说明：不启用 ProtectSystem=strict / ProtectHome，因为工作台需要：
+#   · 生成 .rdp 文件到 rdp_dir
+#   · 调 smbclient / tailscale / xfreerdp 等外部程序
+
+[Install]
+WantedBy=multi-user.target

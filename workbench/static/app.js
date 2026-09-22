@@ -94,10 +94,10 @@ function renderHead() {
   var errs = DATA.errors || [];
   function hasErr(kw) { return errs.some(function (e) { return e.indexOf(kw) === 0; }); }
 
-  pills.push('<span class="pill ' + (hasErr("GitHub") ? "bad" : "ok") + '"><i class="dot"></i>GitHub API</span>');
-  pills.push('<span class="pill ' + (hasErr("Tailscale") ? "bad" : "ok") + '"><i class="dot"></i>Tailscale</span>');
-  pills.push('<span class="pill ' + (hasErr("池状态") ? "warn" : "ok") + '"><i class="dot"></i>池状态</span>');
-  pills.push('<span class="pill ' + (hasErr("账号池") ? "warn" : "ok") + '"><i class="dot"></i>账号池配置</span>');
+  pills.push('<span class="pill ' + (hasErr("GitHub") ? "bad" : "ok") + '" data-tip="GitHub API：拉取运行记录 / Secrets / 账号信息。红点 = 本次拉取失败（详见页脚错误）"><i class="dot"></i>GitHub API</span>');
+  pills.push('<span class="pill ' + (hasErr("Tailscale") ? "bad" : "ok") + '" data-tip="Tailscale：发现组网内的机器节点（「机器运行实况」列表的来源）"><i class="dot"></i>Tailscale</span>');
+  pills.push('<span class="pill ' + (hasErr("池状态") ? "warn" : "ok") + '" data-tip="池状态：协调器发布的权威状态（账号角色 / 在跑机器）。黄点 = 暂无数据或读取失败"><i class="dot"></i>池状态</span>');
+  pills.push('<span class="pill ' + (hasErr("账号池") ? "warn" : "ok") + '" data-tip="账号池配置：scripts/pool-config.json（账号、Secret 名、目标台数）"><i class="dot"></i>账号池配置</span>');
   $("#link-pills").innerHTML = pills.join("");
 }
 
@@ -159,8 +159,31 @@ function renderMachines() {
       if (sn.age_human) parts.push(sn.age_human);
       if (sn.files !== null && sn.files !== undefined) parts.push(sn.files + " 文件");
       snap = (sn.stale ? badge(parts.join(" · "), "warn") : badge(parts.join(" · "), "ok"));
+      // 快照时间（绝对时间，本机时区）：后端把 manifest 的 createdUtc/createdLocal 归一成 created_local
+      if (sn.created_local) {
+        snap += '<div class="snap-time muted" data-tip="快照生成时间（本机时区）。原始 UTC：' +
+          esc(sn.created || "?") + (sn.mode ? "，模式 " + esc(sn.mode) : "") + '">' +
+          esc(sn.created_local) + "</div>";
+      }
     } else if (m.snapshot) {
       snap = '<span class="muted" title="未读到 _snapshot/manifest.json">无快照</span>';
+    }
+    // 快照栏附「一键备份」按钮（仅在线机器 —— 需经 SMB 把请求文件写到机器上）
+    if (online) {
+      var br = m.backup_request || {};
+      if (br.pending) {
+        snap += '<div class="backup-box">' +
+          '<button class="btn btn-mini btn-backup pending" disabled><i class="spin"></i> 备份中</button>' +
+          '<div class="muted backup-note" data-tip="请求已于 ' + esc(br.requested_at || "刚刚") +
+          ' 下发（by ' + esc(br.requested_by || "workbench") +
+          '）。机器保活循环每分钟取走执行，完成后此行会恢复为可点击">已下发，等待执行</div></div>';
+      } else {
+        snap += '<div class="backup-box">' +
+          '<button class="btn btn-mini btn-backup" data-backup="' + esc(m.ip) +
+          '" data-host="' + esc(m.hostname) +
+          '" data-tip="立即在机器上执行「同步数据到 139 云盘 + 快速快照推送」。机器保活循环每分钟取走一次，通常 ≤1 分钟开始，约 1~3 分钟完成">☁ 一键备份</button>' +
+          "</div>";
+      }
     }
     var lastSeen = online ? '<span class="muted">—</span>'
       : '<span class="muted">' + esc(m.last_seen_human || "未知") + "</span>";
@@ -442,6 +465,72 @@ function showConnInfo(ip, host) {
   });
 }
 
+/* ------------------------------------------------------------ 一键备份 */
+// 机器是 GitHub Actions runner，没有对外命令通道；工作台经 SMB 把请求文件写到机器上，
+// 机器的保活循环每分钟取走 → 执行「同步用户数据到 139 + 快速快照推送」。
+function doBackup(btn) {
+  var ip = btn.dataset.backup, host = btn.dataset.host || "";
+  if (!confirm("对「" + (host || ip) + "」执行一键备份？\n\n将在机器上：\n" +
+               "  · 同步用户数据到 139 云盘\n" +
+               "  · 抓一次快速快照并推送\n\n通常 1~3 分钟完成。")) return;
+  btn.disabled = true;
+  var old = btn.innerHTML;
+  btn.innerHTML = '<i class="spin"></i> 下发中';
+  api("/api/backup", { method: "POST", body: JSON.stringify({ ip: ip }) })
+    .then(function (res) {
+      toast("已下发备份请求" + (host ? "（" + esc(host) + "）" : "") +
+        "<br><span class='muted'>" + esc(res.note || "机器将在 ≤1 分钟内执行") + "</span>", "ok", 9000);
+      setTimeout(function () { load(true); }, 8000);   // 稍后刷新，让按钮切到「已下发」
+    })
+    .catch(function (err) {
+      toast("一键备份失败：" + esc(err.message), "bad", 10000);
+      btn.disabled = false;
+      btn.innerHTML = old;
+    });
+}
+
+/* ------------------------------------------------------------ 悬浮提示（data-tip） */
+// 任何带 data-tip="..." 的元素，鼠标停留时在它附近浮出一段说明（纯文本，\n 换行）。
+function initTips() {
+  var tip = $("#tip");
+  if (!tip) return;
+  var cur = null;
+  function place(el) {
+    tip.hidden = false;
+    var r = el.getBoundingClientRect();
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var left = r.left + r.width / 2 - tw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+    var top = r.top - th - 9;
+    if (top < 8) top = r.bottom + 9;            // 上方放不下 → 放到下面
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+  function show(el) {
+    var t = el.getAttribute("data-tip");
+    if (!t) return;
+    cur = el;
+    tip.innerHTML = esc(t).replace(/\n/g, "<br>");
+    place(el);
+  }
+  function hide() { cur = null; tip.hidden = true; }
+
+  document.addEventListener("mouseover", function (e) {
+    var el = e.target.closest && e.target.closest("[data-tip]");
+    if (el) { if (el !== cur) show(el); }
+    else if (cur) hide();
+  });
+  document.addEventListener("mouseout", function (e) {
+    if (!cur) return;
+    var to = e.relatedTarget;                    // 移到同一提示元素内部的子节点不算离开
+    if (to && to.closest && to.closest("[data-tip]") === cur) return;
+    hide();
+  });
+  document.addEventListener("scroll", hide, true);
+  window.addEventListener("blur", hide);
+  window.addEventListener("resize", hide);
+}
+
 /* ------------------------------------------------------------ 事件 */
 function bind() {
   $("#btn-refresh").addEventListener("click", function () { load(true); });
@@ -524,6 +613,7 @@ function bind() {
   $("#tbl-machines").addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (!b) return;
+    if (b.dataset.backup) { doBackup(b); return; }
     if (b.dataset.info) { showConnInfo(b.dataset.info, b.dataset.host || ""); return; }
     var ip = b.dataset.rdp || b.dataset.rdpfile;
     var host = b.dataset.host || "";
@@ -620,6 +710,9 @@ function bind() {
 
   // 卡片「缩略」按钮（日志板块等）
   initCollapse();
+
+  // 子词条悬浮说明（data-tip）
+  initTips();
 }
 
 /* ------------------------------------------------------------ 启动 */

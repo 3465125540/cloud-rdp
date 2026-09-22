@@ -1,0 +1,56 @@
+{
+  "_README": [
+    "Linux 服务器部署配置模板。复制为 workbench/config.json 后按需修改：",
+    "    cp deploy/config.linux.json workbench/config.json",
+    "留空的键 = 用 server.py 里的内置默认值。改完重启服务生效。",
+    "也可用环境变量覆盖（优先级高于本文件）：",
+    "    WORKBENCH_HOST / WORKBENCH_PORT / WORKBENCH_REPO / WORKBENCH_REF /",
+    "    WORKBENCH_TOKEN_FILE / WORKBENCH_PROXY / WORKBENCH_TAILSCALE_EXE"
+  ],
+
+  "host": "0.0.0.0",
+  "port": 8787,
+  "open_browser": false,
+  "auto_refresh_seconds": 30,
+
+  "repo": "3465125540/cloud-rdp",
+  "ref": "main",
+
+  "_token_file_说明": "写有 PAT 的单行文本文件；留空则依次找 env GH_TOKEN/GITHUB_TOKEN → gh auth token → .tools/gh_token.txt",
+  "token_file": "/etc/cloud-rdp/gh_token.txt",
+
+  "_proxy_说明": "Linux 服务器一般直连。若要走代理，改成 \"http://127.0.0.1:7890\" 之类",
+  "proxy": "none",
+
+  "pool_config": "scripts/pool-config.json",
+  "state_branch": "pool-state",
+  "state_path": "state/pool-state.json",
+
+  "tailscale_exe": "tailscale",
+  "machine_prefix": "github-rdp-server",
+
+  "_smb_说明": "读远端 Windows 机器的 _state/_snapshot 走 SMB。Linux 用 smbclient（apt install smbclient）",
+  "smb_mode": "smbclient",
+  "smbclient_exe": "smbclient",
+  "smb_timeout": 25,
+  "smb_share": "D$",
+  "smb_base": "D:\\cloudrdp-sys",
+  "snapshot_stale_minutes": 90,
+
+  "_一键备份_说明": "下发备份请求的文件路径（机器保活循环每分钟轮询取走）",
+  "backup_request_file": "_state/backup-request.txt",
+  "backup_done_file": "_state/backup-done.txt",
+
+  "_安全_说明": "公网部署务必设置 access_token！工作台 /api/conn-info 会返回 RDP 明文密码。",
+  "access_token": "请改成一串足够长的随机字符",
+
+  "rdp_user": "a",
+  "rdp_password": "a",
+  "rdp_dir": "",
+  "rdp_width": 1920,
+  "rdp_height": 1080,
+  "rdp_launch": true,
+
+  "_rdp_client_说明": "Linux 唤起 RDP 客户端。留空 = 自动探测 xfreerdp / remmina。占位符：{ip} {user} {password} {file}",
+  "rdp_client_cmd": "xfreerdp /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"
+}

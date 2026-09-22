@@ -433,6 +433,93 @@ def main():
             server.CONFIG["pool_config"] = real_pc
         server.clear_cache()
 
+    # ---------------- 快照 manifest 解析（新/旧字段兼容 + 快照时间） ----------------
+    print("[快照 manifest 解析]")
+    newman = {
+        "createdUtc": "2026-09-20T01:23:45.7302008Z",
+        "createdLocal": "2026-09-20T09:23:45.7302008+08:00",
+        "files": {"totalFiles": 1234, "totalBytes": 5678, "entries": 1, "skipped": 0},
+        "mode": "quick", "status": "OK",
+    }
+    sn = server.parse_snapshot_manifest(newman)
+    check("T80 新格式 files.totalFiles 解析", sn.get("files") == 1234, str(sn.get("files")))
+    check("T81 新格式 files.totalBytes 解析", sn.get("bytes") == 5678, str(sn.get("bytes")))
+    check("T82 生成 created_local（本机时区）", bool(sn.get("created_local")), repr(sn.get("created_local")))
+    check("T83 保留 mode/status", sn.get("mode") == "quick" and sn.get("status") == "OK", str(sn))
+    check("T84 age_human 非空", bool(sn.get("age_human")))
+    so = server.parse_snapshot_manifest({"file_count": 9, "created_utc": "2026-09-20T01:00:00Z"})
+    check("T85 老格式 file_count 兼容", so.get("files") == 9, str(so.get("files")))
+    check("T86 老格式 created_utc → created_local", bool(so.get("created_local")), repr(so.get("created_local")))
+    check("T87 非 dict 返回 None", server.parse_snapshot_manifest("x") is None)
+    st = server.parse_snapshot_manifest({"createdUtc": "2000-01-01T00:00:00Z", "files": {"totalFiles": 1}})
+    check("T88 超期快照 stale=True", st.get("stale") is True, str(st))
+
+    # ---------------- 一键备份（请求文件下发 / 读取） ----------------
+    print("[一键备份]")
+    real_write = server.write_remote_text
+    real_read = server.read_remote_text
+    store = {}
+
+    def fake_write(ip, rel, text):
+        store[(ip, rel)] = text
+
+    def fake_read(ip, rel):
+        return store.get((ip, rel), "")
+
+    server.write_remote_text = fake_write
+    server.read_remote_text = fake_read
+    try:
+        rb = server.request_backup("100.64.0.9", requested_by="tester")
+        check("T89 request_backup ok", rb.get("ok") is True, str(rb))
+        check("T90 请求文件路径正确", rb.get("file") == "_state/backup-request.txt", str(rb.get("file")))
+        body = store.get(("100.64.0.9", "_state/backup-request.txt"), "")
+        check("T91 请求体含 requested_at/by", "requested_at=" in body and "requested_by=tester" in body, body)
+        rq = server.read_backup_request("100.64.0.9")
+        check("T92 read_backup_request pending=True", rq.get("pending") is True, str(rq))
+        check("T93 requested_by 解析", rq.get("requested_by") == "tester", str(rq))
+        check("T94 无请求 pending=False", server.read_backup_request("100.64.0.8").get("pending") is False)
+        check("T95 非法 ip → ok=False", server.request_backup("bad ip!").get("ok") is False)
+        check("T96 缺 ip → ok=False", server.request_backup("").get("ok") is False)
+    finally:
+        server.write_remote_text = real_write
+        server.read_remote_text = real_read
+
+    # ---------------- SMB 后端选择（Windows UNC / Linux smbclient） ----------------
+    print("[SMB 后端]")
+    real_mode = server.CONFIG.get("smb_mode")
+    real_win = server.IS_WINDOWS
+    try:
+        server.CONFIG["smb_mode"] = "smbclient"
+        check("T101 smb_mode=smbclient → smbclient", server.smb_backend() == "smbclient", server.smb_backend())
+        server.CONFIG["smb_mode"] = "unc"
+        check("T102 smb_mode=unc → unc", server.smb_backend() == "unc", server.smb_backend())
+        server.CONFIG["smb_mode"] = "auto"
+        server.IS_WINDOWS = True
+        check("T103 auto + Windows → unc", server.smb_backend() == "unc", server.smb_backend())
+        server.IS_WINDOWS = False
+        check("T104 auto + Linux → smbclient", server.smb_backend() == "smbclient", server.smb_backend())
+    finally:
+        server.IS_WINDOWS = real_win
+        if real_mode is None:
+            server.CONFIG.pop("smb_mode", None)
+        else:
+            server.CONFIG["smb_mode"] = real_mode
+
+    # ---------------- 访问令牌（access_token 保护） ----------------
+    print("[访问令牌]")
+    server.CONFIG["access_token"] = "s3cr3t"
+    try:
+        code, _, _ = req(base, "/api/health")
+        check("T97 无 token → 401", code == 401, "code=%s" % code)
+        code, body, _ = req(base, "/api/health?token=s3cr3t")
+        check("T98 正确 token → 200", code == 200 and json.loads(body).get("ok") is True, "code=%s" % code)
+        code, _, _ = req(base, "/api/health?token=wrong")
+        check("T99 错误 token → 401", code == 401, "code=%s" % code)
+        code, _, _ = req(base, "/")
+        check("T100 无 token 访问首页 → 401", code == 401, "code=%s" % code)
+    finally:
+        server.CONFIG["access_token"] = ""
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

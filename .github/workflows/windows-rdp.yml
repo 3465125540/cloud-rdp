@@ -685,6 +685,40 @@ jobs:
                   else           { & .\scripts\backup-snapshot.ps1 -Quick }         # 备：本地完整快照，不碰 139
               }
 
+              # ---------- 一键备份请求（工作台「快照栏 → 一键备份」按钮下发）----------
+              # 工作台没有命令通道，改走文件：它经 SMB 写 _state\backup-request.txt，
+              # 这里每分钟取走（取走即删 —— 工作台靠「文件在不在」判断请求是否还在排队），
+              # 随即执行一次「同步用户数据到 139 + 快速快照推送」，最后写 backup-done.txt 留痕。
+              $bkReq = Join-Path $env:CLOUDRDP_SYS_DIR '_state\backup-request.txt'
+              if (Test-Path -LiteralPath $bkReq) {
+                  try {
+                      $bkRaw = (Get-Content -LiteralPath $bkReq -Raw)
+                      Remove-Item -LiteralPath $bkReq -Force -ErrorAction SilentlyContinue
+                      $bkBy = 'workbench'
+                      $mb = [regex]::Match($bkRaw, '(?m)^requested_by=(.+)$')
+                      if ($mb.Success -and -not [string]::IsNullOrWhiteSpace($mb.Groups[1].Value)) {
+                          $bkBy = $mb.Groups[1].Value.Trim()
+                      }
+                      Write-Host "[backup] 收到一键备份请求（by $bkBy）→ 执行 同步 + 快速快照"
+                      if ($isWriter) {
+                          & .\scripts\sync-up.ps1
+                          & .\scripts\backup-snapshot.ps1 -Quick -Push
+                      } else {
+                          Write-Host "[backup] 备机：只做本地快速快照，不写 139"
+                          & .\scripts\backup-snapshot.ps1 -Quick
+                      }
+                      @(
+                        "handled_at=$((Get-Date).ToUniversalTime().ToString('o'))"
+                        "requested_by=$bkBy"
+                        "role=$role"
+                        "status=OK"
+                      ) | Out-File -LiteralPath (Join-Path $env:CLOUDRDP_SYS_DIR '_state\backup-done.txt') -Encoding ascii
+                      Write-Host "[backup] 一键备份完成"
+                  } catch {
+                      Write-Host "[backup] 处理一键备份请求失败：$($_.Exception.Message)"
+                  }
+              }
+
               # ---------- 池角色核对：standby 读 hub 权威状态，主下线则自升为主 ----------
               # 权威状态由 hub 协调器每 10 分钟发布（primary = 最老的在跑机）。
               # 只「升主」不「降级」：协调器任一时刻只指定一个 primary，故不存在双主；
