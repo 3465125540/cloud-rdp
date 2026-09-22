@@ -214,9 +214,17 @@ html, body {
 .collapse-btn { white-space: nowrap; }
 .card.collapsed .card-body { display: none; }
 .card.collapsed .card-head { border-bottom: none; }
+/* 带 data-limit 的卡片：缩略 = 只显示前 N 行，卡片不隐藏（日志板块） */
+.card.rows-limited .card-head { border-bottom-color: var(--line-soft); }
 
 /* ---------------- 状态栏「运行时长」 ---------------- */
 .uptime { font-size: 11px; margin-top: 3px; white-space: nowrap; }
+
+/* ---------------- 主机列「归属账号」 ---------------- */
+.acct { font-size: 10.5px; margin-top: 2px; white-space: nowrap; }
+
+/* ---------------- 日志「缩略」提示行 ---------------- */
+.more-row td { text-align: center; padding: 8px 10px; font-style: italic; }
 
 /* ---------------- 连接信息弹窗 ---------------- */
 .modal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; }

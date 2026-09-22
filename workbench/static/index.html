@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>智能体工作台</title>
+<title>GitHub虚拟机管理工作台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#129302;</text></svg>" />
 <link rel="stylesheet" href="/styles.css" />
 </head>
@@ -15,7 +15,7 @@
     <div class="brand">
       <span class="brand-mark">&#129302;</span>
       <div>
-        <h1>智能体工作台</h1>
+        <h1>GitHub虚拟机管理工作台</h1>
         <p class="brand-sub" id="brand-sub">正在连接…</p>
       </div>
     </div>
@@ -144,8 +144,8 @@
             <button class="tab active" data-tab="keepalive">保活 windows-rdp.yml</button>
             <button class="tab" data-tab="coordinator">协调器 pool-coordinator.yml</button>
           </div>
-          <button class="btn btn-mini btn-ghost collapse-btn" data-collapse="runs"
-                  title="缩略 / 展开日志表格">缩略 &#9652;</button>
+          <button class="btn btn-mini btn-ghost collapse-btn" data-collapse="runs" data-limit="5"
+                  title="缩略为最近 5 条 / 展开全部">缩略 &#9652;</button>
         </div>
       </div>
       <div class="card-body">

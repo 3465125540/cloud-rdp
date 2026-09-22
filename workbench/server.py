@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""智能体工作台 —— 本地 Web 仪表盘（Python 标准库，零依赖）。
+"""GitHub 虚拟机管理工作台 —— 本地 Web 仪表盘（Python 标准库，零依赖）。
 
 四大面板
 --------
@@ -532,10 +532,38 @@ def read_remote_text(ip, rel):
     raise err
 
 
+def parse_pool_info(text):
+    """解析机器上 _state/pool-info.txt（`key=value` 行）→ dict。空文本/坏行都跳过。"""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def map_machine_accounts(machines, account_list):
+    """给每台机器补 account_id：机器自报的 pool_owner → 账号池里的 id（找不到留空）。
+
+    就地修改并返回 machines；owner 未知（老机器/单机）时 account_id 为空串。
+    """
+    owner2id = {}
+    for a in (account_list or []):
+        owner = str(a.get("owner") or "")
+        if owner:
+            owner2id[owner] = a.get("id") or ""
+    for m in machines:
+        m["account_id"] = owner2id.get(str(m.get("pool_owner") or ""), "")
+    return machines
+
+
 def machine_detail(ip, online):
-    """读单台机器的池角色 + 快照新鲜度 + 运行时长。任何一项读不到就留空，不抛。"""
+    """读单台机器的池角色 + 快照新鲜度 + 运行时长 + 归属账号。任何一项读不到就留空，不抛。"""
     detail = {"role": "", "role_source": "", "snapshot": None, "error": "",
-              "started_utc": "", "uptime_seconds": None, "uptime_human": ""}
+              "started_utc": "", "uptime_seconds": None, "uptime_human": "",
+              "pool_owner": "", "pool_id": "", "assigned_role": ""}
     if OFFLINE or not ip or not online:
         return detail
     try:
@@ -580,6 +608,14 @@ def machine_detail(ip, online):
                 detail["started_utc"] = raw
                 detail["uptime_seconds"] = int(up)
                 detail["uptime_human"] = human_duration(up)
+    except Exception:
+        pass
+    # 归属账号：机器上 _state\pool-info.txt 记录派发它的账号（pool_owner）—— 池模式才有
+    try:
+        info = parse_pool_info(read_remote_text(ip, "_state/pool-info.txt"))
+        detail["pool_owner"] = info.get("pool_owner", "")
+        detail["pool_id"] = info.get("pool_id", "")
+        detail["assigned_role"] = info.get("assigned_role", "")
     except Exception:
         pass
     return detail
@@ -1065,6 +1101,9 @@ def build_overview():
         for p, d in zip(peers, details):
             machines.append(dict(p, **d))
 
+    # 机器归属账号：pool_owner → 账号池 id（前端「主机」列展示「账号 · owner」）
+    map_machine_accounts(machines, accounts.get("accounts") or [])
+
     online = [m for m in machines if m.get("online")]
     primary = [m for m in machines if m.get("role") == "primary"]
     standby = [m for m in machines if m.get("role") == "standby"]
@@ -1420,7 +1459,7 @@ ROUTES = {
 # ==================================================================== main
 def main(argv=None):
     global OFFLINE, QUIET, CONFIG
-    ap = argparse.ArgumentParser(description="智能体工作台（本地 Web 仪表盘）")
+    ap = argparse.ArgumentParser(description="GitHub 虚拟机管理工作台（本地 Web 仪表盘）")
     ap.add_argument("--host", default=None)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--config", default=None, help="配置文件路径（默认 workbench/config.json）")
@@ -1445,7 +1484,7 @@ def main(argv=None):
     url = "http://%s:%d/" % (host, port)
 
     print("=" * 62)
-    print(" 智能体工作台  v%s" % VERSION)
+    print(" GitHub 虚拟机管理工作台  v%s" % VERSION)
     print("  地址    : %s" % url)
     print("  仓库    : %s (%s)" % (CONFIG.get("repo"), CONFIG.get("ref")))
     print("  Token   : %s" % ("已发现" if resolve_token() else "未发现（部分面板会降级）"))

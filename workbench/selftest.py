@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""智能体工作台 —— 离线自测（零依赖）。
+"""GitHub 虚拟机管理工作台 —— 离线自测（零依赖）。
 
 不联网、不碰真机：把 server.py 以 offline 模式在随机端口跑起来，
 逐个打 API，校验状态码与关键字段；再单测几个纯函数。
@@ -69,7 +69,7 @@ def main():
     print("[静态]")
     code, body, ctype = req(base, "/")
     check("T01 GET / → 200 html", code == 200 and "text/html" in ctype, "code=%s ctype=%s" % (code, ctype))
-    check("T02 index 含标题", "智能体工作台" in body)
+    check("T02 index 含标题", "GitHub虚拟机管理工作台" in body)
     code, body, ctype = req(base, "/app.js")
     check("T03 GET /app.js → 200 js", code == 200 and "javascript" in ctype, "code=%s" % code)
     code, body, ctype = req(base, "/styles.css")
@@ -178,6 +178,25 @@ def main():
     check("T83 machine_detail 含运行时长字段",
           all(k in server.machine_detail("100.1.2.3", False)
               for k in ("uptime_seconds", "uptime_human", "started_utc")))
+
+    # ---------------- 机器归属账号 + 日志缩略 ----------------
+    print("[机器归属 / 日志缩略]")
+    check("T84 index 日志缩略按钮带 data-limit=5",
+          'data-collapse="runs" data-limit="5"' in req(base, "/")[1])
+    check("T85 machine_detail 含归属账号字段",
+          all(k in server.machine_detail("100.1.2.3", False)
+              for k in ("pool_owner", "pool_id", "assigned_role")))
+    pi = server.parse_pool_info("pool_id=p1\npool_owner=alice\nassigned_role=primary\n")
+    check("T86 parse_pool_info 解析 key=value",
+          pi.get("pool_owner") == "alice" and pi.get("assigned_role") == "primary", str(pi))
+    check("T87 parse_pool_info 空文本/无等号行不炸",
+          server.parse_pool_info("") == {} and server.parse_pool_info("noeq\n\n  \n") == {})
+    ms = server.map_machine_accounts([{"pool_owner": "alice"}, {"pool_owner": "bob"}, {}],
+                                     [{"id": "acc-1", "owner": "alice"}])
+    check("T88 map_machine_accounts 映射 owner→id",
+          ms[0].get("account_id") == "acc-1", str(ms))
+    check("T89 未登记 owner / 无 owner → account_id 为空",
+          ms[1].get("account_id") == "" and ms[2].get("account_id") == "", str(ms))
 
     # ---------------- 路由健壮性 ----------------
     print("[路由]")

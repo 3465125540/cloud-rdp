@@ -1,8 +1,9 @@
-/* 智能体工作台 —— 前端逻辑（原生 JS，零依赖） */
+/* GitHub 虚拟机管理工作台 —— 前端逻辑（原生 JS，零依赖） */
 "use strict";
 
 var DATA = null;          // 最近一次 /api/overview 的结果
 var RUN_TAB = "keepalive"; // 运行日志当前 tab
+var RUNS_LIMIT = 0;        // 日志表格行数上限（0 = 不限；「缩略」时 = 5）
 var TIMER = null;
 var BUSY = false;
 
@@ -167,8 +168,14 @@ function renderMachines() {
       ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">一键登录</button>' +
         ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">查看信息</button>'
       : '<span class="muted">离线</span>';
+    // 主机列第二行：机器归属的账号（机器自己写的 pool_owner → 账号池 id）
+    var acct = "";
+    if (m.account_id || m.pool_owner) {
+      var label = [m.account_id, m.pool_owner].filter(function (x) { return !!x; }).join(" · ");
+      acct = '<div class="acct muted" title="该机器由这个账号派发">' + esc(label) + "</div>";
+    }
     return "<tr>" +
-      "<td class=\"strong\">" + esc(m.hostname || "-") + "</td>" +
+      "<td class=\"strong\">" + esc(m.hostname || "-") + acct + "</td>" +
       '<td class="mono">' + esc(m.ip || "-") + "</td>" +
       "<td>" + st + "</td>" +
       "<td>" + roleBadge(m.role) + "</td>" +
@@ -262,14 +269,20 @@ function renderAccounts() {
 
 function renderRuns() {
   var r = DATA.runs || {};
-  var rows = r[RUN_TAB] || [];
+  var all = r[RUN_TAB] || [];
   var tb = $("#tbl-runs tbody");
-  $("#runs-empty").hidden = rows.length > 0;
-  if (!r.ok && (!rows || !rows.length)) {
+  $("#runs-empty").hidden = all.length > 0;
+  if (!r.ok && !all.length) {
     tb.innerHTML = '<tr><td colspan="8" class="empty">' + esc(r.error || "读取失败") + "</td></tr>";
     return;
   }
-  tb.innerHTML = rows.map(function (x) {
+  // 「缩略」时只渲染最近 N 条，其余折叠成一行提示
+  var rows = all, hidden = 0;
+  if (RUNS_LIMIT > 0 && all.length > RUNS_LIMIT) {
+    rows = all.slice(0, RUNS_LIMIT);
+    hidden = all.length - RUNS_LIMIT;
+  }
+  var html = rows.map(function (x) {
     var st = badge(x.state || "-", x.in_progress ? "info" : (x.conclusion === "success" ? "ok" : (x.conclusion === "cancelled" ? "warn" : "bad")));
     var ev = x.event === "schedule" ? badge("定时", "mute") : badge(x.event || "-", "info");
     return "<tr>" +
@@ -283,6 +296,11 @@ function renderRuns() {
       '<td class="right">' + (x.url ? '<a href="' + esc(x.url) + '" target="_blank" rel="noopener">日志</a>' : '<span class="muted">—</span>') + "</td>" +
       "</tr>";
   }).join("");
+  if (hidden > 0) {
+    html += '<tr class="more-row"><td colspan="8" class="muted">已缩略：仅显示最近 ' +
+      RUNS_LIMIT + " 条，另有 " + hidden + " 条未显示 —— 点右上角「展开全部」查看</td></tr>";
+  }
+  tb.innerHTML = html;
 }
 
 function renderErrors() {
@@ -305,26 +323,39 @@ function setTimer() {
 }
 
 /* ------------------------------------------------------------ 卡片「缩略」 */
-// 任何带 data-collapse="<key>" 的按钮：点击后收起 / 展开所在 .card 的 body，
-// 状态记进 localStorage（刷新后保持）。
+// 任何带 data-collapse="<key>" 的按钮：点击切换所在 .card 的形态，状态记进 localStorage。
+//   * 普通卡片：收起 / 展开整个 card-body（.card.collapsed）
+//   * 带 data-limit="N" 的卡片：缩略 = 只显示表格前 N 行（不隐藏卡片）—— 日志板块用
 function initCollapse() {
   Array.prototype.forEach.call(document.querySelectorAll("[data-collapse]"), function (btn) {
     var key = "wb.collapse." + btn.dataset.collapse;
     var card = btn.closest(".card");
     if (!card) return;
-    function apply(collapsed) {
-      card.classList.toggle("collapsed", collapsed);
-      btn.innerHTML = collapsed ? "展开 &#9662;" : "缩略 &#9652;";
-      btn.title = collapsed ? "展开表格" : "缩略 / 展开表格";
-      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    var limit = parseInt(btn.dataset.limit, 10) || 0;
+    var collapsed = false;
+
+    function apply(c) {
+      collapsed = c;
+      if (limit > 0) {
+        RUNS_LIMIT = c ? limit : 0;
+        card.classList.toggle("rows-limited", c);
+        btn.innerHTML = c ? "展开全部 &#9662;" : "缩略 &#9652;";
+        btn.title = c ? "展开全部日志" : "缩略为最近 " + limit + " 条";
+      } else {
+        card.classList.toggle("collapsed", c);
+        btn.innerHTML = c ? "展开 &#9662;" : "缩略 &#9652;";
+        btn.title = c ? "展开表格" : "缩略 / 展开表格";
+      }
+      btn.setAttribute("aria-expanded", c ? "false" : "true");
+      if (limit > 0 && DATA) renderRuns();   // 立即按新的行数上限重渲染
     }
+
     var saved = null;
     try { saved = localStorage.getItem(key); } catch (e) {}
     apply(saved === "1");
     btn.addEventListener("click", function () {
-      var next = !card.classList.contains("collapsed");
-      apply(next);
-      try { localStorage.setItem(key, next ? "1" : "0"); } catch (e) {}
+      apply(!collapsed);
+      try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch (e) {}
     });
   });
 }
