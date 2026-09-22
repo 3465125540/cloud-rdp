@@ -158,7 +158,13 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
 ├── selftest.py           # 离线自测（109 项）
-├── start.cmd             # 双击启动
+├── start.cmd             # 双击启动（自动开浏览器）
+├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）
+├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器
+├── make-icon.py          # 零依赖生成 workbench.ico（标准库画图）
+├── make-shortcut.py      # 在桌面生成 .lnk（ctypes 直调 COM IShellLinkW）
+├── verify-shortcut.py    # 读回 .lnk 属性做校验
+├── workbench.ico         # 快捷方式图标（make-icon.py 产物）
 ├── config.example.json   # 配置样例（复制成 config.json 使用）
 ├── README.md
 └── static/
