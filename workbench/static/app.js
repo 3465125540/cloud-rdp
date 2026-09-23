@@ -123,6 +123,8 @@ function renderStats() {
       s: target ? ("目标 " + target + " 台") : "", cls: machinesCls },
     { k: "池角色", v: (s.machines_primary || 0) + " 主 · " + (s.machines_standby || 0) + " 备",
       s: "主唯一写 139，备只读热备", cls: "" },
+    { k: "恢复异常", v: (s.machines_data_bad || 0) + " 数据 · " + (s.machines_snapshot_bad || 0) + " 快照",
+      s: "未从 139 拉取成功的机器数", cls: (s.machines_data_bad || s.machines_snapshot_bad) ? "bad" : "good" },
     { k: "账号", v: (s.accounts_enabled || 0) + " / " + (s.accounts_total || 0),
       s: "已启用 / 总数", cls: "" },
     { k: "目标台数", v: target === null || target === undefined ? "—" : target,
@@ -139,6 +141,46 @@ function roleBadge(role) {
   if (role === "standby") return badge("备 standby", "info");
   if (role === "standalone") return badge("单机", "mute");
   return '<span class="muted">—</span>';
+}
+
+/* 数据/快照「恢复状态」徽章。
+   数据来自机器上的 _state\restore-status.json（脚本侧 remote-lib.ps1 的 Set-RestoreStatus 写入，
+   按 data / snapshot 两个作用域合并）。这是 acc-1 事故之后新增的一列 —— 那台机器没从 139 云盘
+   拉到数据，界面却显示「已同步」，所以这里把「没拉到 / 拉取失败 / 网络抖动待重试」直接摆到台面上。
+   口径与后端 server.py 的 restore_kind() 保持一致：
+     OK / PARTIAL      → ok   已还原（PARTIAL = 部分还原）
+     EMPTY / SKIPPED   → mute 139 上确无数据（终态，不是错误）
+     TRANSIENT/PENDING → warn 网络抖动 / 正在后台拉取，保活循环会自动重试
+     FAILED / AUTH     → bad  失败 / 鉴权异常，需要人工处理 */
+function restoreKind(st) {
+  st = String(st || "").toUpperCase();
+  if (st === "OK" || st === "PARTIAL") return "ok";
+  if (st === "EMPTY" || st === "SKIPPED") return "mute";
+  if (st === "TRANSIENT" || st === "PENDING") return "warn";
+  if (st === "FAILED" || st === "AUTH") return "bad";
+  return "mute";
+}
+
+function restoreLine(label, obj) {
+  var st = String((obj && obj.status) || "").toUpperCase();
+  if (!st) return "";
+  var reason = String((obj && obj.reason) || "").trim();
+  var when = bjTime((obj && obj.at_utc) || "");
+  var tip = label + "：" + st + (reason ? "　原因：" + reason : "") + (when ? "　记录于 " + when : "");
+  return '<span data-tip="' + esc(tip) + '">' + badge(label + " " + st, restoreKind(st)) + "</span>";
+}
+
+function restoreBadge(restore) {
+  restore = restore || {};
+  var d = restore.data || {}, s = restore.snapshot || {};
+  if (!d.status && !s.status) {
+    return '<span class="muted" data-tip="机器上还没有 _state\\restore-status.json' +
+      '（未运行新脚本，或 SMB 读不到机器上的状态文件）">—</span>';
+  }
+  var html = "";
+  if (d.status) html += '<div class="rs">' + restoreLine("数据", d) + "</div>";
+  if (s.status) html += '<div class="rs">' + restoreLine("快照", s) + "</div>";
+  return html;
 }
 
 function renderMachines() {
@@ -219,6 +261,7 @@ function renderMachines() {
       '<td class="mono">' + esc(m.ip || "-") + "</td>" +
       "<td>" + st + "</td>" +
       "<td>" + roleBadge(m.role) + "</td>" +
+      "<td>" + restoreBadge(m.restore) + "</td>" +
       "<td>" + snap + "</td>" +
       "<td>" + lastSeen + "</td>" +
       '<td class="right nowrap">' + ops + "</td>" +
@@ -267,7 +310,10 @@ function renderAccounts() {
   }
   tb.innerHTML = rows.map(function (a) {
     var secret;
-    if (a.secret_present === true) {
+    if (a.provisioning) {
+      // 刚添加、后台正在自动部署 —— 此刻 Secret 还没写完，别误报成红色「缺失」
+      secret = badge("部署中…", "info");
+    } else if (a.secret_present === true) {
       secret = badge("已配置", "ok");
       if (a.secret_via === "pool_tokens") secret += ' <span class="muted" title="token 来自 hub 仓库的 JSON Secret POOL_TOKENS">(JSON)</span>';
     } else if (a.secret_present === false) {
@@ -585,12 +631,12 @@ function bind() {
     var enabled = $("#acc-enabled").checked;
     var autoDeploy = $("#acc-autodeploy").checked;
     var msg = $("#acc-add-msg");
-    if (!owner || !repo || !secret) {
-      msg.textContent = "owner / repo / Secret 名都要填";
+    if (!owner || !repo) {
+      msg.textContent = "owner / repo 要填";
       return;
     }
-    if (autoDeploy && !pat) {
-      msg.textContent = "勾了「自动部署」就必须填 PAT（或取消勾选，改为手动部署）";
+    if (!pat) {
+      msg.textContent = "PAT 必填（该账号自己的 Personal Access Token，需 repo + workflow 权限）";
       return;
     }
     var btn = $("#btn-add-submit");
@@ -602,6 +648,7 @@ function bind() {
                              enabled: enabled, pat: pat, auto_deploy: autoDeploy })
     }).then(function (res) {
       toast("已添加账号 " + esc(owner) + "（" + esc(res.id) + "）", "ok");
+      if (res.secret_auto) toast("Secret 名已自动分配：" + esc(res.token_secret), "info", 8000);
       if (res.verify_note) toast(esc(res.verify_note), "warn", 8000);
       $("#form-add-account").reset();
       $("#acc-repo").value = "cloud-rdp";

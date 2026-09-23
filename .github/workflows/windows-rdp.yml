@@ -115,6 +115,55 @@ jobs:
       - name: 0. 拉取仓库
         # v5 = Node 24 runtime，消除 GitHub「Node.js 20 is deprecated」警告（v4 跑在 Node 20）
         uses: actions/checkout@v5
+      - name: 0p. 跟随上游 hub 同步脚本（fork 自愈，永不跑旧逻辑）
+        # ⚠️ 为什么必须有这一步：fork 的 scripts/ **不会**自动跟随上游。
+        #    acc-1 就是因为 fork 停在旧版，把「139 DNS 抖了几秒」误判成「远端没有数据」，
+        #    结果一个文件都没拉回来、还反手把空壳推回 139（详见 remote-lib.ps1 头部说明）。
+        #    这里在**任何业务脚本执行之前**，把 hub 的最新 scripts/ 覆盖进工作区 ——
+        #    以后改脚本只需改 hub，所有机器下次开机自动生效，不必逐个维护 fork。
+        # 无需 PAT：公开仓库可匿名下载。失败不影响开机（保留本地脚本继续跑）。
+        continue-on-error: true
+        shell: pwsh
+        env:
+          HUB_FROM_VAR: ${{ vars.CLOUDRDP_HUB }}
+        run: |
+          $hub = [string]$env:HUB_FROM_VAR
+          if ([string]::IsNullOrWhiteSpace($hub)) { $hub = [string]$env:POOL_HUB }
+          if ([string]::IsNullOrWhiteSpace($hub)) { $hub = '3465125540/cloud-rdp' }   # 默认 hub；可用仓库变量 CLOUDRDP_HUB 覆盖
+          $parts = $hub.Split('/')
+          if ($parts.Count -lt 2) { Write-Host "[upstream] hub 坐标非法：$hub —— 跳过"; exit 0 }
+          $hubOwner = $parts[0]; $hubRepo = $parts[1]
+
+          if ("$env:GITHUB_REPOSITORY" -ieq $hub) { Write-Host "[upstream] 本仓库就是 hub（$hub）—— 无需同步"; exit 0 }
+
+          # 优先本仓库所在分支名，其次 main/master（hub 上不一定有同名分支）
+          $refs = @($env:GITHUB_REF_NAME, 'main', 'master') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+          $zip  = Join-Path $env:RUNNER_TEMP 'hub-src.zip'
+          $ok   = $false
+          foreach ($ref in $refs) {
+              try {
+                  Invoke-WebRequest "https://codeload.github.com/$hubOwner/$hubRepo/zip/refs/heads/$ref" `
+                      -OutFile $zip -UseBasicParsing -ErrorAction Stop
+                  $ok = $true; Write-Host "[upstream] 已下载 hub 源码：$hub@$ref"; break
+              } catch { Write-Host "[upstream] 下载 $ref 失败：$($_.Exception.Message)" }
+          }
+          if (-not $ok) { Write-Host "[upstream] 无法下载 hub 源码 —— 保留本地脚本继续（不影响开机）"; exit 0 }
+
+          $dest = Join-Path $env:RUNNER_TEMP 'hub-src'
+          if (Test-Path -LiteralPath $dest) { Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue }
+          try { Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force -ErrorAction Stop }
+          catch { Write-Host "[upstream] 解压失败：$($_.Exception.Message) —— 保留本地脚本继续"; exit 0 }
+          $root = (Get-ChildItem -LiteralPath $dest -Directory | Select-Object -First 1).FullName
+          $srcScripts = Join-Path $root 'scripts'
+          if (-not (Test-Path -LiteralPath $srcScripts)) { Write-Host "[upstream] hub 包里没有 scripts/ —— 跳过"; exit 0 }
+
+          # /MIR = 镜像同步（含删除上游已移除的旧脚本），保证两边完全一致
+          $dstScripts = Join-Path $env:GITHUB_WORKSPACE 'scripts'
+          robocopy $srcScripts $dstScripts /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+          $copied = @(Get-ChildItem -LiteralPath $dstScripts -File -ErrorAction SilentlyContinue).Count
+          $hasLib = Test-Path -LiteralPath (Join-Path $dstScripts 'remote-lib.ps1')
+          Write-Host "[upstream] scripts/ 已同步自 $hub —— $copied 个文件，remote-lib.ps1=$hasLib"
+          if (-not $hasLib) { Write-Host "[upstream] ⚠️ 上游脚本里没有 remote-lib.ps1 —— 本次将退化为旧判定逻辑" }
       - name: 0a. 记录 job 起点 + 开启远程桌面 + 关闭 Windows 防火墙
         shell: pwsh
         run: |
@@ -360,9 +409,13 @@ jobs:
         shell: pwsh
         run: .\scripts\migrate-139.ps1
       - name: 7. 从 139 云盘拉取数据
+        # 脚本自身永不返回非 0；这一层是「万一抛异常」的兜底 —— 开机不能被拉数据卡死，
+        # 状态由 _state\restore-status.json 记录，保活循环会自愈重拉。
+        continue-on-error: true
         shell: pwsh
         run: .\scripts\sync-down.ps1
       - name: 8. 预还原（校验 → 规划 → 准备 → 驱动全量还原）
+        continue-on-error: true
         shell: pwsh
         run: .\scripts\pre-restore.ps1 -Pull
       # 预还原会导入 registry\user\HKCU-Software.reg（整棵 HKCU\Software），
@@ -412,27 +465,73 @@ jobs:
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
           Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
           Write-Host "  开机总耗时   : $totalMin 分钟（其中拿到 IP 后 $afterIpMin 分钟用于初始化）" -ForegroundColor DarkGray
-          $rs = $env:RESTORE_STATUS
-          if ([string]::IsNullOrWhiteSpace($rs)) { $rs = "UNKNOWN" }
-          $rc = "DarkGray"
-          if ($rs -eq "OK") { $rc = "Green" } elseif ($rs -eq "FAILED") { $rc = "Red" }
+          # ---- 数据/快照恢复状态：优先读 _state\restore-status.json（带 reason），env 作兜底 ----
+          $dataSt = [string]$env:RESTORE_STATUS
+          $dataRs = [string]$env:RESTORE_REASON
+          $snapSt = [string]$env:SNAPSHOT_STATUS
+          $snapRs = ''
+          try {
+            $stFile = Join-Path $sysDir '_state\restore-status.json'
+            if (Test-Path -LiteralPath $stFile) {
+              $o = (Get-Content -LiteralPath $stFile -Raw | ConvertFrom-Json)
+              if ($o.data)     { if ($o.data.status)     { $dataSt = [string]$o.data.status }
+                                 if ($o.data.reason)     { $dataRs = [string]$o.data.reason } }
+              if ($o.snapshot) { if ($o.snapshot.status) { $snapSt = [string]$o.snapshot.status }
+                                 if ($o.snapshot.reason) { $snapRs = [string]$o.snapshot.reason } }
+            }
+          } catch { }
+
           $dataDir = $env:CLOUDRDP_DATA_DIR
-          Write-Host "  数据恢复     : $rs   ($dataDir 已与 139 云盘同步)" -ForegroundColor $rc
-          if ($rs -eq "FAILED") {
-            Write-Host "  !! 恢复失败：139 Authorization 可能已过期，$dataDir 当前为空，别在上面存重要东西 !!" -ForegroundColor Red
+          if ([string]::IsNullOrWhiteSpace($dataSt)) { $dataSt = "UNKNOWN" }
+          $rc = switch ($dataSt) {
+            "OK"        { "Green" }
+            "EMPTY"     { "DarkGray" }
+            "TRANSIENT" { "Yellow" }
+            "PENDING"   { "Yellow" }
+            "UNKNOWN"   { "DarkGray" }
+            default     { "Red" }
           }
-          $ss = $env:SNAPSHOT_STATUS
-          if ([string]::IsNullOrWhiteSpace($ss)) { $ss = "UNKNOWN" }
-          $sc = "DarkGray"
-          if ($ss -eq "OK") { $sc = "Green" } elseif ($ss -eq "PARTIAL") { $sc = "Yellow" } elseif ($ss -eq "FAILED") { $sc = "Red" }
+          $dataNote = switch ($dataSt) {
+            "OK"        { "（$dataDir 已与 139 云盘同步）" }
+            "EMPTY"     { "（139 上还没有数据 —— 首次运行正常）" }
+            "TRANSIENT" { "（139 暂时不可达，本次未拉取；保活循环会自动重试）" }
+            "PENDING"   { "（恢复中；保活循环会自动重试）" }
+            "UNKNOWN"   { "（未取得恢复状态）" }
+            default     { "（恢复失败：$dataDir 当前为空）" }
+          }
+          Write-Host "  数据恢复     : $dataSt   $dataNote" -ForegroundColor $rc
+          if (-not [string]::IsNullOrWhiteSpace($dataRs)) {
+            Write-Host "                 原因：$dataRs" -ForegroundColor DarkGray
+          }
+          if ($dataSt -ne "OK" -and $dataSt -ne "EMPTY" -and $dataSt -ne "UNKNOWN") {
+            Write-Host "  !! 别在 $dataDir 上存重要东西：恢复没成功，本地是空壳；保活循环每 10 分钟会自动重试 !!" -ForegroundColor Red
+          }
+
+          if ([string]::IsNullOrWhiteSpace($snapSt)) { $snapSt = "UNKNOWN" }
+          $sc = switch ($snapSt) {
+            "OK"        { "Green" }
+            "PARTIAL"   { "Yellow" }
+            "EMPTY"     { "DarkGray" }
+            "SKIPPED"   { "DarkGray" }
+            "TRANSIENT" { "Yellow" }
+            "PENDING"   { "Yellow" }
+            "UNKNOWN"   { "DarkGray" }
+            default     { "Red" }
+          }
           $rd = $env:SNAPSHOT_RESTORED_DIRS
           if ([string]::IsNullOrWhiteSpace($rd)) { $rdTxt = "个人配置在首次登录时自动还原" }
           else { $rdTxt = "$rd 个目录已还原；个人配置在首次登录时自动还原" }
-          Write-Host "  整机还原     : $ss   ($rdTxt)" -ForegroundColor $sc
-          if ($ss -eq "EMPTY") {
+          Write-Host "  整机还原     : $snapSt   ($rdTxt)" -ForegroundColor $sc
+          if (-not [string]::IsNullOrWhiteSpace($snapRs)) {
+            Write-Host "                 原因：$snapRs" -ForegroundColor DarkGray
+          }
+          if ($snapSt -eq "EMPTY") {
             Write-Host "  (139 上还没有整机快照 —— 首次运行正常，本次关机前会自动生成第一份)" -ForegroundColor DarkGray
           }
-          if ($ss -eq "FAILED") {
+          if ($snapSt -eq "TRANSIENT" -or $snapSt -eq "PENDING") {
+            Write-Host "  !! 整机快照本次没还原：本次是全新环境，保活循环会自动重试（快照未成功前不会推送，避免覆盖 139 上的好快照）!!" -ForegroundColor Yellow
+          }
+          if ($snapSt -eq "FAILED") {
             Write-Host "  !! 整机还原失败：本次是全新环境，之前装的软件/设置不会自动回来 !!" -ForegroundColor Red
           }
           $pgN = $env:SNAPSHOT_PROGRAMS
@@ -590,8 +689,8 @@ jobs:
               "Password     : $env:RDP_PASSWORD"
               "开机总耗时   : $totalMin 分钟"
               ""
-              "数据恢复     : $env:RESTORE_STATUS"
-              "整机还原     : $env:SNAPSHOT_STATUS"
+              "数据恢复     : $dataSt"
+              "整机还原     : $snapSt"
               "中文环境     : $env:CHINESE_STATUS"
             ) | Out-File -LiteralPath $readyMark -Encoding UTF8
             if (Test-Path -LiteralPath $upMarker) { Remove-Item -LiteralPath $upMarker -Force -ErrorAction SilentlyContinue }
@@ -692,8 +791,39 @@ jobs:
               Write-Host "[$n] server running... 剩余 $left 分钟  (role=$role)"
 
               if ($n % 10 -eq 0) {
-                  if ($isWriter) { & .\scripts\sync-up.ps1 }     # 主：推用户数据到 139
-                  else           { & .\scripts\sync-down.ps1 }   # 备：重拉，保持与主一致
+                  # ---------- 自愈：数据/快照没恢复成功就重拉（acc-1 事故的兜底）----------
+                  # 事故回顾：开机时 139 的 DNS 抖了几秒 → 旧逻辑把 rclone 退出码 3 误判成 EMPTY
+                  # → 整机 6 小时一个文件都没拉回来。现在只要状态不是 OK/EMPTY，每 10 分钟再试一次，
+                  # 网络一恢复就自动补齐，不需要人工干预。
+                  $rsFile = Join-Path $env:CLOUDRDP_SYS_DIR '_state\restore-status.json'
+                  $dataSt = ''
+                  try {
+                      if (Test-Path -LiteralPath $rsFile) {
+                          $o = (Get-Content -LiteralPath $rsFile -Raw | ConvertFrom-Json)
+                          if ($o.data) { $dataSt = [string]$o.data.status }
+                      }
+                  } catch { }
+
+                  if ($dataSt -in @('TRANSIENT', 'FAILED', 'PENDING')) {
+                      Write-Host "[self-heal] 数据恢复状态=$dataSt → 重拉（sync-down -Repull）"
+                      & .\scripts\sync-down.ps1 -Repull
+                      try {
+                          $o2 = (Get-Content -LiteralPath $rsFile -Raw | ConvertFrom-Json)
+                          if ($o2.data) { $dataSt = [string]$o2.data.status }
+                          Write-Host "[self-heal] 重拉后数据恢复状态=$dataSt"
+                      } catch { }
+                  }
+
+                  $snapPend = Join-Path $env:CLOUDRDP_SYS_DIR '_state\snapshot-restore-pending.txt'
+                  if (Test-Path -LiteralPath $snapPend) {
+                      # 前台跑：天然串行、不会叠多个并发还原；成功时 pre-restore 会自己删掉这个标记
+                      Write-Host "[self-heal] 检测到快照待重试标记 → 重跑预还原（pre-restore -Pull）"
+                      & .\scripts\pre-restore.ps1 -Pull
+                  }
+
+                  # 常规：主推用户数据 / 备重拉保持与主一致
+                  if ($isWriter) { & .\scripts\sync-up.ps1 }
+                  else           { & .\scripts\sync-down.ps1 }
               }
               if ($n % 30 -eq 0) { & .\scripts\disk-guard.ps1 -Enforce }  # 每 30 分钟：C 盘守卫
               if ($n % 60 -eq 0) {

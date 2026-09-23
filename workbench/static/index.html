@@ -94,6 +94,7 @@
               <th data-tip="Tailscale 组网 IP。远程桌面（RDP）与 SMB 读机器状态都走这个地址">Tailscale IP</th>
               <th data-tip="在线 = Tailscale 上能 ping 到；「活跃」= 最近有数据变动。下方显示本次作业已运行多久">状态</th>
               <th data-tip="池角色：primary 主（唯一负责写 139 云盘）、standby 备（只读热备）、单机 = 未入池">角色</th>
+              <th data-tip="开机时从 139 云盘拉取「数据」与「快照」的结果（机器上 _state\restore-status.json）。OK=已还原；EMPTY=139 上确无数据（正常终态）；TRANSIENT=网络抖动/后台拉取中，保活循环会自动重试；FAILED/AUTH=失败需人工处理。上方小字=数据，下方=快照">恢复</th>
               <th data-tip="机器上 D:\cloudrdp-sys\_snapshot 快照的新鲜度：多久之前 / 多少文件。点「一键备份」可立即同步到 139 云盘并刷新快照">快照</th>
               <th data-tip="离线机器最后一次出现在 Tailscale 的时间">最后在线</th>
               <th class="right" data-tip="对在线机器：一键登录远程桌面 / 查看连接信息">操作</th>
@@ -119,10 +120,11 @@
           <div class="add-acc-grid">
             <label>owner（GitHub 用户名）<input type="text" id="acc-owner" placeholder="例如 octocat" /></label>
             <label>repo（仓库名）<input type="text" id="acc-repo" value="cloud-rdp" /></label>
-            <label>Secret 名<input type="text" id="acc-secret" placeholder="例如 POOL_TOKEN_3" /></label>
+            <label data-tip="可留空：新账号通常还没建仓库，谈不上已有 Secret；留空则自动分配一个没被占用的 POOL_TOKEN_N">Secret 名（可留空，自动分配）
+              <input type="text" id="acc-secret" placeholder="留空 = 自动分配 POOL_TOKEN_N" /></label>
             <label>id（可留空自动）<input type="text" id="acc-id" placeholder="acc-N" /></label>
-            <label class="span-2">PAT（该账号的 Personal Access Token，需 repo + workflow 权限）
-              <input type="password" id="acc-pat" autocomplete="new-password"
+            <label class="span-2 req">PAT（必填 · 该账号的 Personal Access Token，需 repo + workflow 权限）
+              <input type="password" id="acc-pat" required autocomplete="new-password"
                      placeholder="ghp_… / github_pat_…（只存本机 .tools/pool/，不进 git）" /></label>
           </div>
           <div class="add-acc-foot">
@@ -134,9 +136,10 @@
             <button type="button" class="btn btn-ghost btn-mini" id="btn-add-cancel">取消</button>
             <button type="submit" class="btn btn-primary btn-mini" id="btn-add-submit">添加</button>
           </div>
-          <p class="muted add-acc-tip">填了 PAT 才能「自动部署」（建 fork / 开 Actions / 写 Secret 都要它）。
-            PAT 只落在本机 <code>.tools/pool/&lt;owner&gt;.token</code>，不会写进 pool-config.json，也不会进 git。
-            不填 PAT 时只写配置，需你手动部署。</p>
+          <p class="muted add-acc-tip">必填只有 <b>PAT</b>（该账号自己的 Personal Access Token，需 repo + workflow 权限）。
+            <b>Secret 名可留空</b> —— 新账号连仓库都可能还没建，留空会自动分配 <code>POOL_TOKEN_N</code>，
+            自动部署时再把 PAT 写进 hub 的这个 Secret 名。
+            PAT 只落在本机 <code>.tools/pool/&lt;owner&gt;.token</code>，不会写进 pool-config.json，也不会进 git。</p>
         </form>
         <div class="prov-panel" id="prov-panel" hidden>
           <div class="prov-head">
@@ -150,7 +153,7 @@
           <thead>
             <tr>
               <th data-tip="GitHub 账号（owner）与它在账号池里的 id（acc-N）">账号</th>
-              <th data-tip="该账号 PAT 存放的仓库 Secret 名（值 GitHub 永不回显，只能看名字）">Secret</th>
+              <th data-tip="该账号 PAT 存放的仓库 Secret 名（值 GitHub 永不回显，只能看名字）；新增时留空会自动分配 POOL_TOKEN_N">Secret</th>
               <th data-tip="协调器发布的角色：主账号（派 primary 机器）/ 备账号">角色</th>
               <th data-tip="协调器巡检结果：凭证是否正常、当前在跑几台机器、最近一次运行状态">实时监测</th>
               <th class="right" data-tip="停用后协调器不再给该账号派发机器">启用</th>

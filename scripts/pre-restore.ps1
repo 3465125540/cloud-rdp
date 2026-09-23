@@ -27,14 +27,25 @@ param(
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "a" }),
     [string]$DataDir    = $(if ($env:CLOUDRDP_DATA_DIR) { $env:CLOUDRDP_DATA_DIR } else { "D:\a\cloud-rdp" }),
     [string]$PortableDir= $(if ($env:CLOUDRDP_PORTABLE_DIR) { $env:CLOUDRDP_PORTABLE_DIR } else { "D:\a\cloud-rdp\_portable" }),
+    [string]$RemoteRoot = "",
+    [int]$ProbeAttempts  = 3,
+    [int]$ProbeDelaySec  = 6,
+    [int]$ProbeTimeoutSec= 25,
     [switch]$Pull,
     [switch]$SkipRestore,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Background
 )
 
 $ErrorActionPreference = "Continue"
 $SysDir    = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys" } else { "C:\cloudrdp-sys" }
 $RcloneExe = Join-Path $SysDir "rclone\rclone.exe"
+
+# 远端判定 / 状态落盘共享库（与 sync-down.ps1 / sync-up.ps1 同源，保证口径一致）
+$remoteLib    = Join-Path $PSScriptRoot "remote-lib.ps1"
+$hasRemoteLib = Test-Path -LiteralPath $remoteLib
+if ($hasRemoteLib) { . $remoteLib }
+else { Write-Warning "[pre-restore] 未找到 remote-lib.ps1 —— 远端判定退化为「凭 rclone 退出码」，无法区分「空」与「网络抖动」" }
 
 # 安装型程序共享库（用于记录「镜像自带程序」基线，供关机时做增量判定）
 $programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
@@ -71,6 +82,44 @@ $doRollback  = [bool](Get-Cfg $preCfg 'recordRollback' $true)
 
 Say "===== 预还原开始（Stage=$Stage）====="
 
+# ---------------------------------------------------------------- 后台模式：拉起自身后立刻返回
+# 为什么：快照拉取 + 全量还原可能耗时数分钟，会拖慢「连接就绪」。
+#         后台化后连接先可用，还原在后台继续；结论写 _state\restore-status.json。
+if ($Background) {
+    $exe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+    if (-not $exe) { $exe = (Get-Command powershell.exe -ErrorAction Stop).Source }
+    $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Stage "{1}" -Remote "{2}" -ConfigPath "{3}" -RdpUser "{4}" -DataDir "{5}" -PortableDir "{6}"' -f `
+        $PSCommandPath, $Stage, $Remote, $ConfigPath, $RdpUser, $DataDir, $PortableDir
+    if ($Pull)        { $argStr += ' -Pull' }
+    if ($SkipRestore) { $argStr += ' -SkipRestore' }
+    if ($DryRun)      { $argStr += ' -DryRun' }
+    if (-not [string]::IsNullOrWhiteSpace($RemoteRoot)) { $argStr += (' -RemoteRoot "{0}"' -f $RemoteRoot) }
+
+    $bgDir = Join-Path $SysDir "_state"
+    try { New-Item -ItemType Directory -Force -Path $bgDir | Out-Null } catch { }
+    $bgLog = Join-Path $bgDir "pre-restore-bg.log"
+    Say "后台模式：已在后台启动预还原，本次立即返回（不阻塞连接）"
+    Say "后台日志: $bgLog"
+    $bgOk = $false
+    try {
+        Start-Process -FilePath $exe -ArgumentList $argStr -WindowStyle Hidden `
+            -RedirectStandardOutput $bgLog -RedirectStandardError ($bgLog + ".err") -ErrorAction Stop | Out-Null
+        $bgOk = $true
+    } catch {
+        Warn "后台拉起自身失败：$_ —— 改为前台继续执行"
+    }
+    if ($bgOk) {
+        # 让上层（workflow）知道「已转后台、尚无结论」，避免被误判为 EMPTY
+        if ($hasRemoteLib) {
+            Set-RestoreStatus -Status 'PENDING' -Reason '已转后台执行（快照拉取+还原中）' -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage
+        } else {
+            Set-GhEnv "SNAPSHOT_STATUS=PENDING"
+        }
+        Say "===== 预还原（后台已接管）====="
+        exit 0
+    }
+}
+
 # ---------------------------------------------------------------- 0. 记录「镜像自带程序」基线
 # 必须在任何还原动作之前执行：基线里的程序一律不备份，
 # 否则镜像自带的约 120GB 工具链（VS / Android SDK / 缓存）会被传上云盘。
@@ -102,14 +151,78 @@ try {
 } catch { Warn "记录程序基线失败：$_" }
 
 # ---------------------------------------------------------------- 1. 拉取
+$pullStatus = ''   # OK | EMPTY | TRANSIENT | FAILED（用于最后统一落盘）
 if ($Pull) {
     if (-not (Test-Path -LiteralPath $RcloneExe)) {
         Warn "未找到 rclone，无法拉取快照"
         Set-GhEnv "SNAPSHOT_PREVALIDATE=FAILED"
+        $pullStatus = 'FAILED'
+        if ($hasRemoteLib) {
+            Set-RestoreStatus -Status 'FAILED' -Reason ("未找到 rclone：{0}" -f $RcloneExe) -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage
+        } else {
+            Set-GhEnv "SNAPSHOT_STATUS=FAILED"
+        }
         exit 0
     }
     New-Item -ItemType Directory -Force -Path $Stage | Out-Null
     Say "拉取快照: $Remote  ->  $Stage"
+
+    # ---- ① 先判定远端到底有没有（关键：区分「真的没有」和「网络抽风」）----
+    # 旧逻辑直接 copy，把 rclone 退出码 3/4 一律当 EMPTY —— 但 DNS 抖动时 AList 会对
+    # PROPFIND 回 404，rclone 同样报 3。于是「网络抽风」被误判成「远端没有快照」，
+    # 本机既不还原、还反过来把自己当空覆盖上云（acc-1 事故根因）。
+    $verdict = $null
+    if ($hasRemoteLib) {
+        $verdict = Resolve-RemoteVerdict -RcloneExe $RcloneExe -Remote $Remote -Root $RemoteRoot `
+                     -Attempts $ProbeAttempts -DelaySec $ProbeDelaySec -TimeoutSec $ProbeTimeoutSec
+        Say ("远端判定：{0} —— {1}" -f $verdict.Verdict, $verdict.Message)
+    }
+    $vKind = if ($verdict) { [string]$verdict.Verdict } else { '' }
+    $vMsg  = if ($verdict) { [string]$verdict.Message } else { '' }
+
+    # 写「待重试」标记：保活循环见到它会用 -Background 重跑本脚本
+    $writePending = {
+        param([string]$why)
+        try {
+            $pend = Join-Path $stateDir 'snapshot-restore-pending.txt'
+            ("{0}  TRANSIENT: {1}" -f (Get-Date).ToUniversalTime().ToString('o'), $why) | Out-File -LiteralPath $pend -Encoding UTF8
+        } catch { }
+    }
+    $clearPending = {
+        try {
+            $pend = Join-Path $stateDir 'snapshot-restore-pending.txt'
+            if (Test-Path -LiteralPath $pend) { [System.IO.File]::Delete($pend) }
+        } catch { }
+    }
+
+    if ($vKind -eq 'EMPTY') {
+        Say "远端尚无快照（首次运行正常）"
+        Set-GhEnv "SNAPSHOT_PREVALIDATE=EMPTY"
+        $pullStatus = 'EMPTY'
+        if ($hasRemoteLib) { Set-RestoreStatus -Status 'EMPTY' -Reason $vMsg -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+        else { Set-GhEnv "SNAPSHOT_STATUS=EMPTY" }
+        exit 0
+    }
+    if ($vKind -eq 'AUTH') {
+        Warn "139 云盘鉴权失败，无法拉取快照"
+        Set-GhEnv "SNAPSHOT_PREVALIDATE=FAILED"
+        $pullStatus = 'FAILED'
+        if ($hasRemoteLib) { Set-RestoreStatus -Status 'FAILED' -Reason $vMsg -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+        else { Set-GhEnv "SNAPSHOT_STATUS=FAILED" }
+        exit 0
+    }
+    if ($vKind -eq 'TRANSIENT') {
+        # ⚠️ 网络/服务抖动 —— 远端可能有数据，绝不能当 EMPTY，更不能写远端。
+        Warn "139 云盘暂时不可达，本次不拉取（保活循环稍后重试）"
+        Set-GhEnv "SNAPSHOT_PREVALIDATE=TRANSIENT"
+        $pullStatus = 'TRANSIENT'
+        if ($hasRemoteLib) { Set-RestoreStatus -Status 'TRANSIENT' -Reason $vMsg -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+        else { Set-GhEnv "SNAPSHOT_STATUS=TRANSIENT" }
+        & $writePending $vMsg
+        exit 0
+    }
+
+    # ---- ② 判定通过（OK 或库缺失退化为空串），正式拷贝（带重试）----
     $code = 0
     for ($i = 1; $i -le 3; $i++) {
         & $RcloneExe copy $Remote $Stage `
@@ -119,21 +232,40 @@ if ($Pull) {
             --stats-one-line -v
         $code = $LASTEXITCODE
         if ($code -eq 0) { break }
-        if ($code -eq 3 -or $code -eq 4) { break }
         if ($i -lt 3) { Warn "第 $i/3 次拉取失败（码 $code），8 秒后重试"; Start-Sleep -Seconds 8 }
     }
-    if ($code -eq 3 -or $code -eq 4) {
-        Say "远端尚无快照（首次运行正常）"
-        Set-GhEnv "SNAPSHOT_PREVALIDATE=EMPTY"
-        Set-GhEnv "SNAPSHOT_STATUS=EMPTY"
-        exit 0
-    }
     if ($code -ne 0) {
-        Warn "快照拉取失败（rclone 码 $code）"
-        Set-GhEnv "SNAPSHOT_PREVALIDATE=FAILED"
-        Set-GhEnv "SNAPSHOT_STATUS=FAILED"
+        # 拷贝失败：再判定一次，把「网络问题」和「真的没有」分开
+        $reVerdict = $null
+        if ($hasRemoteLib) {
+            $reVerdict = Resolve-RemoteVerdict -RcloneExe $RcloneExe -Remote $Remote -Root $RemoteRoot `
+                           -Attempts $ProbeAttempts -DelaySec $ProbeDelaySec -TimeoutSec $ProbeTimeoutSec
+        }
+        $reKind = if ($reVerdict) { [string]$reVerdict.Verdict } else { '' }
+        $reason = if ($reVerdict) { [string]$reVerdict.Message } else { "rclone 退出码 $code" }
+        Warn "快照拉取失败（rclone 码 $code；复判 $reKind）：$reason"
+        if ($reKind -eq 'EMPTY') {
+            Set-GhEnv "SNAPSHOT_PREVALIDATE=EMPTY"
+            $pullStatus = 'EMPTY'
+            if ($hasRemoteLib) { Set-RestoreStatus -Status 'EMPTY' -Reason $reason -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+            else { Set-GhEnv "SNAPSHOT_STATUS=EMPTY" }
+        } elseif ($reKind -eq 'TRANSIENT' -or $reKind -eq '') {
+            Set-GhEnv "SNAPSHOT_PREVALIDATE=TRANSIENT"
+            $pullStatus = 'TRANSIENT'
+            if ($hasRemoteLib) { Set-RestoreStatus -Status 'TRANSIENT' -Reason $reason -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+            else { Set-GhEnv "SNAPSHOT_STATUS=TRANSIENT" }
+            & $writePending $reason
+        } else {
+            Set-GhEnv "SNAPSHOT_PREVALIDATE=FAILED"
+            $pullStatus = 'FAILED'
+            if ($hasRemoteLib) { Set-RestoreStatus -Status 'FAILED' -Reason $reason -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+            else { Set-GhEnv "SNAPSHOT_STATUS=FAILED" }
+        }
         exit 0
     }
+    $pullStatus = 'OK'
+    & $clearPending
+    Say "快照拉取完成"
 }
 
 # ---------------------------------------------------------------- 2. 校验
@@ -422,18 +554,61 @@ if ($preCommands.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------- 7. 驱动全量还原
+$restoreOutcome = ''   # restore-snapshot.ps1 的结论（OK|PARTIAL|...），供第 8 步落盘
 if ($SkipRestore) {
     Say "已指定 -SkipRestore，跳过实际还原"
+    $restoreOutcome = 'SKIPPED'
 } else {
     $rs = Join-Path $PSScriptRoot "restore-snapshot.ps1"
     if (-not (Test-Path -LiteralPath $rs)) {
         Warn "找不到 restore-snapshot.ps1，无法驱动还原"
+        $restoreOutcome = 'FAILED'
     } elseif ($DryRun) {
         Say "(dry-run) 跳过调用 restore-snapshot.ps1"
+        $restoreOutcome = 'SKIPPED'
     } else {
         Say "驱动全量还原：restore-snapshot.ps1 -Scope machine"
         & $rs -Scope machine -Stage $Stage -ConfigPath $ConfigPath -RdpUser $RdpUser
+        # restore-snapshot.ps1 只写 GITHUB_ENV（不写 _state json）；**立刻**回读，
+        # 免得被后续（保活里的 backup 等）写入的 SNAPSHOT_STATUS 污染。
+        if ($hasRemoteLib) { $restoreOutcome = [string](Get-GhEnvValue 'SNAPSHOT_STATUS') }
     }
+}
+
+# ---------------------------------------------------------------- 8. 统一状态落盘
+# restore-snapshot.ps1 只写 GITHUB_ENV（SNAPSHOT_STATUS=OK|PARTIAL），不写
+# _state\restore-status.json。这里把「最终结论」同时补进 json，供工作台展示。
+# 判定优先级：还原脚本结论 > 拉取阶段结论（终态时才用）。
+if ($hasRemoteLib) {
+    $finalStatus = $restoreOutcome
+    if ([string]::IsNullOrWhiteSpace($finalStatus)) {
+        if ($pullStatus -in @('EMPTY', 'TRANSIENT', 'FAILED')) { $finalStatus = $pullStatus }
+        elseif ($pullStatus -eq 'OK') { $finalStatus = 'OK' }
+        else { $finalStatus = 'FAILED' }   # 没拉、没还原、也没结论 —— 不能报 OK
+    }
+
+    $finalReason = ''
+    switch ($finalStatus) {
+        'OK'        { $finalReason = '快照已拉取并完成还原' }
+        'PARTIAL'   { $finalReason = ("还原完成，但有 {0} 个问题项（详见日志）" -f $problems.Count) }
+        'EMPTY'     { $finalReason = '远端尚无快照（首次运行正常）' }
+        'TRANSIENT' { $finalReason = '139 云盘暂时不可达，稍后由保活循环重试' }
+        'FAILED'    { $finalReason = '快照拉取或还原失败（详见日志）' }
+        'SKIPPED'   { $finalReason = '本次跳过还原（-SkipRestore / -DryRun）' }
+        default     { $finalReason = '' }
+    }
+    try {
+        Set-RestoreStatus -Status $finalStatus -Reason $finalReason -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage
+    } catch { }
+
+    # 还原成功（或部分成功）→ 清掉「待重试」标记，避免保活循环反复重跑
+    if ($finalStatus -in @('OK', 'PARTIAL')) {
+        try {
+            $pend = Join-Path $stateDir 'snapshot-restore-pending.txt'
+            if (Test-Path -LiteralPath $pend) { [System.IO.File]::Delete($pend) }
+        } catch { }
+    }
+    Say ("快照最终状态：{0} —— {1}" -f $finalStatus, $finalReason)
 }
 
 Say "===== 预还原结束 ====="

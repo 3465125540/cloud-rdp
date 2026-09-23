@@ -14,6 +14,10 @@ on:
         description: '只打印决策不真派发（true/false）'
         required: false
         default: 'false'
+      force:
+        description: '在 fork 里也强制执行协调（默认 false —— fork 的定时运行会自动跳过）'
+        required: false
+        default: 'false'
 
 # 协调器自己串行，避免两轮重叠导致状态互相覆盖
 concurrency:
@@ -31,7 +35,26 @@ jobs:
       - name: 0. 拉取仓库
         uses: actions/checkout@v5
 
+      - name: 0b. hub 守卫（fork 的定时运行直接跳过，避免多头指挥）
+        # 为什么：fork 会连同本文件一起继承，而部署流程会在 fork 里启用 Actions。
+        # 若不拦，每个 fork 的定时器都会来「协调」同一个账号池 → 多头指挥、互相覆盖 pool-state。
+        # 判定：本仓库必须等于 scripts/pool-config.json 里写的 hub（owner/repo）。
+        # 读不到配置时 fail-open（=当作 hub）——保证 hub 自己永远不会因为配置读不到而停摆。
+        id: hubcheck
+        continue-on-error: true
+        run: |
+          HUB=$(jq -r '.hub.owner + "/" + .hub.repo' scripts/pool-config.json 2>/dev/null | tr -d '\r\n ' || echo "")
+          FORCE='${{ inputs.force }}'
+          echo "hub=[$HUB]  self=[$GITHUB_REPOSITORY]  event=$GITHUB_EVENT_NAME  force=[$FORCE]"
+          if [ -n "$HUB" ] && [ "$GITHUB_REPOSITORY" != "$HUB" ] && [ "$FORCE" != "true" ]; then
+            echo "is_hub=false" >> "$GITHUB_OUTPUT"
+            echo "本仓库不是 hub（$GITHUB_REPOSITORY ≠ $HUB）→ 跳过协调器。需要强制执行请手动触发并填 force=true"
+          else
+            echo "is_hub=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 1. 取上一轮池状态（防重复派发用，取不到就算了）
+        if: steps.hubcheck.outputs.is_hub == 'true'
         continue-on-error: true
         run: |
           mkdir -p .pool-prev
@@ -45,6 +68,7 @@ jobs:
           fi
 
       - name: 2. 巡检 + 决策 + 派发
+        if: steps.hubcheck.outputs.is_hub == 'true'
         continue-on-error: true
         shell: pwsh
         env:
@@ -67,6 +91,7 @@ jobs:
           pwsh -NoProfile -File ./scripts/pool-coordinator.ps1 @args
 
       - name: 3. 发布权威状态到 pool-state 分支
+        if: steps.hubcheck.outputs.is_hub == 'true'
         continue-on-error: true
         run: |
           set -e

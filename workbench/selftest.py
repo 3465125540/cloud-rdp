@@ -111,7 +111,8 @@ def main():
         accs = d.get("accounts") or []
         check("T18 accounts 列表字段完整",
               all(all(k in a for k in ("id", "owner", "enabled", "token_secret", "alive", "role",
-                                       "token_state", "alive_count", "last_run", "source"))
+                                       "token_state", "alive_count", "last_run", "source",
+                                       "provisioning"))
                   for a in accs))
         check("T18b accounts 带监测元信息",
               all(k in d for k in ("monitor_available", "state_updated", "state_age_human", "state_via")))
@@ -422,7 +423,8 @@ def main():
         # ---------------- 新增账号 API ----------------
         print("[API accounts/add]")
         code, body, _ = req(base, "/api/accounts/add", "POST",
-                            {"owner": "acct3", "repo": "cloud-rdp", "token_secret": "POOL_TOKEN_3"})
+                            {"owner": "acct3", "repo": "cloud-rdp", "token_secret": "POOL_TOKEN_3",
+                             "pat": "ghp_dummy", "auto_deploy": False})
         d = json.loads(body)
         check("T69 add 200/ok", code == 200 and d.get("ok") is True, body[:200])
         check("T70 add 自动生成 id", (d.get("id") or "").startswith("acc-"), str(d.get("id")))
@@ -431,18 +433,42 @@ def main():
         check("T71 已写回配置文件", any(a.get("owner") == "acct3" for a in saved.get("accounts") or []))
         check("T72 add 返回 Secret 提示", "POOL_TOKENS" in (d.get("hint") or ""))
 
+        # 新规则：必填只有 PAT；Secret 名可留空 → 自动分配 POOL_TOKEN_N
+        code, body, _ = req(base, "/api/accounts/add", "POST",
+                            {"owner": "acct4", "repo": "cloud-rdp", "pat": "ghp_dummy",
+                             "auto_deploy": False})
+        d4 = json.loads(body)
+        check("T72a 不填 Secret 名也能加（200/ok）", code == 200 and d4.get("ok") is True, body[:200])
+        check("T72b Secret 名自动分配 POOL_TOKEN_4（跳过已占用的 1/2/3）",
+              d4.get("token_secret") == "POOL_TOKEN_4" and d4.get("secret_auto") is True,
+              str(d4.get("token_secret")))
+        with open(tmpcfg, encoding="utf-8") as f:
+            saved4 = json.load(f)
+        check("T72c 自动分配的 Secret 名已写回配置",
+              any(a.get("owner") == "acct4" and a.get("token_secret") == "POOL_TOKEN_4"
+                  for a in saved4.get("accounts") or []))
+        code, body, _ = req(base, "/api/accounts/add", "POST",
+                            {"owner": "acct5", "repo": "cloud-rdp"})
+        check("T72d 不填 PAT → 400（PAT 必填）", code == 400, "code=%s" % code)
+
         code, _, _ = req(base, "/api/accounts/add", "POST",
-                         {"owner": "acct3", "repo": "cloud-rdp", "token_secret": "X"})
+                         {"owner": "acct3", "repo": "cloud-rdp", "token_secret": "X",
+                          "pat": "ghp_dummy"})
         check("T73 重复 owner → 409", code == 409, "code=%s" % code)
         code, _, _ = req(base, "/api/accounts/add", "POST",
-                         {"owner": "", "repo": "r", "token_secret": "S"})
+                         {"owner": "", "repo": "r", "token_secret": "S", "pat": "ghp_dummy"})
         check("T74 空 owner → 400", code == 400, "code=%s" % code)
         code, _, _ = req(base, "/api/accounts/add", "POST",
-                         {"owner": "acct9", "repo": "r", "token_secret": "1bad"})
+                         {"owner": "acct9", "repo": "r", "token_secret": "1bad", "pat": "ghp_dummy"})
         check("T75 非法 Secret 名 → 400", code == 400, "code=%s" % code)
         code, _, _ = req(base, "/api/accounts/add", "POST",
-                         {"owner": "acct9", "repo": "r", "token_secret": "OK_NAME", "id": "acc-1"})
+                         {"owner": "acct9", "repo": "r", "token_secret": "OK_NAME", "id": "acc-1",
+                          "pat": "ghp_dummy"})
         check("T76 重复 id → 409", code == 409, "code=%s" % code)
+        code, _, _ = req(base, "/api/accounts/add", "POST",
+                         {"owner": "acct9", "repo": "r", "token_secret": "POOL_TOKEN_1",
+                          "pat": "ghp_dummy"})
+        check("T78 重复 Secret 名 → 409", code == 409, "code=%s" % code)
     finally:
         server.get_pool_state = real_pool
         server.get_secret_names = real_secrets
@@ -625,6 +651,18 @@ def main():
               str(dj["job"].get("summary")))
         code, _, _ = req(base, "/api/accounts/provision?id=nope-123")
         check("T129 未知部署任务 → 404", code == 404, "code=%s" % code)
+
+        # 部署中的 owner 判定：只有 status=running 才算（前端据此显示「部署中…」而非「缺失」）
+        with server._PROVISION_LOCK:
+            server._PROVISION_JOBS["prov-fake-run"] = {"owner": "acctRun", "status": "running"}
+            server._PROVISION_JOBS["prov-fake-done"] = {"owner": "acctDone", "status": "done"}
+        try:
+            po = server._provisioning_owners()
+            check("T131b 只有 running 的 owner 算「部署中」", po == {"acctRun"}, str(po))
+        finally:
+            with server._PROVISION_LOCK:
+                server._PROVISION_JOBS.pop("prov-fake-run", None)
+                server._PROVISION_JOBS.pop("prov-fake-done", None)
     finally:
         if real_pc2 is None:
             server.CONFIG.pop("pool_config", None)
@@ -727,6 +765,89 @@ def main():
           "后台重装软件 + 恢复 Edge/WorkBuddy 用户数据" in wf_txt)
     check("T152 ENV READY 汇总读 USERDATA_RESTORE / _DETAIL",
           "USERDATA_RESTORE" in wf_txt and "USERDATA_RESTORE_DETAIL" in wf_txt)
+
+    # ---------------- 数据/快照还原可靠性（acc-1 事故） ----------------
+    # 背景：acc-1（100.77.250.79）开机后没有从 139 云盘拉取数据，界面却显示「已同步」。
+    # 根因：sync-down.ps1 只凭 rclone 退出码 3/4 就判定「远端为空」→ 一次 5 秒 DNS 抖动
+    # （AList 把 PROPFIND 打成 404，rclone 同样映射成 3）也会被当成 EMPTY，机器空着手起来，
+    # 随后自己的 sync-up 还会在 139 根目录 mkdir 出一个幽灵目录、并可能覆盖好快照。
+    # 修复：新增共享分类库 remote-lib.ps1（OK / EMPTY / TRANSIENT / AUTH），
+    # 一律「先探后拉」，探不通绝不写远端。以下断言把这条铁律钉死。
+    print("[数据还原可靠性 remote-lib]")
+    rl = os.path.join(repo_dir, "scripts", "remote-lib.ps1")
+    check("T153 存在共享分类库 remote-lib.ps1", os.path.isfile(rl))
+    rl_txt = open(rl, encoding="utf-8-sig").read() if os.path.isfile(rl) else ""
+    for fn in ("Get-RcloneErrorKind", "Get-RemoteProbe", "Resolve-RemoteVerdict",
+               "Test-AlistRemoteReachable", "Set-RestoreStatus", "Get-RestoreStatusValue"):
+        check("T154 remote-lib 导出 %s" % fn, ("function %s" % fn) in rl_txt)
+    check("T155 remote-lib 四态判定 OK/EMPTY/TRANSIENT/AUTH 齐全",
+          all(("'%s'" % k) in rl_txt for k in ("OK", "EMPTY", "TRANSIENT", "AUTH")))
+    check("T156 Set-RestoreStatus 按作用域合并（data/snapshot 不互相覆盖）",
+          "$obj[$Scope]" in rl_txt and "[System.IO.File]::Move" in rl_txt)
+
+    sd_txt = open(os.path.join(repo_dir, "scripts", "sync-down.ps1"),
+                  encoding="utf-8-sig").read()
+    check("T157 sync-down dot-source remote-lib.ps1", "remote-lib.ps1" in sd_txt)
+    check("T158 sync-down 用 Resolve-RemoteVerdict 分类（不再只看退出码）",
+          "Resolve-RemoteVerdict" in sd_txt)
+    check("T159 sync-down 区分 TRANSIENT（网络抖动绝不写本地）", "TRANSIENT" in sd_txt)
+    check("T160 sync-down 支持 -Repull（保活循环自愈重拉）", "[switch]$Repull" in sd_txt)
+
+    su_txt = open(os.path.join(repo_dir, "scripts", "sync-up.ps1"),
+                  encoding="utf-8-sig").read()
+    check("T161 sync-up 守卫 A：远端不可达则拒绝 mkdir/copy（防 139 根幽灵目录）",
+          "Test-AlistRemoteReachable" in su_txt and "exit 0" in su_txt)
+    check("T162 sync-up 守卫 B：读 data 恢复状态，TRANSIENT/FAILED/PENDING 不推送（-Force 可覆盖）",
+          "Get-RestoreStatusValue" in su_txt and "TRANSIENT" in su_txt and "-Force" in su_txt)
+
+    bs_txt = open(os.path.join(repo_dir, "scripts", "backup-snapshot.ps1"),
+                  encoding="utf-8-sig").read()
+    check("T163 backup-snapshot -Push 有守卫 A/B（防 sync 覆盖 139 上的好快照）",
+          "Test-AlistRemoteReachable" in bs_txt and "Get-RestoreStatusValue" in bs_txt
+          and "SNAPSHOT_PUSH" in bs_txt)
+
+    check("T164 工作流有「跟随上游 hub 同步脚本」步骤（fork 自愈，永不跑旧逻辑）",
+          "跟随上游 hub 同步脚本" in wf_txt and "codeload.github.com" in wf_txt)
+    check("T165 工作流保活循环含自愈（restore-status.json → -Repull / 快照 pending）",
+          "restore-status.json" in wf_txt and "-Repull" in wf_txt
+          and "snapshot-restore-pending.txt" in wf_txt)
+    check("T166 ENV READY 打印「数据恢复 / 整机还原」状态",
+          "数据恢复" in wf_txt and "整机还原" in wf_txt)
+
+    co_txt = open(os.path.join(repo_dir, ".github", "workflows", "pool-coordinator.yml"),
+                  encoding="utf-8").read()
+    check("T167 协调器有 hub-only 守卫（fork 的定时运行跳过，避免多头指挥）",
+          "is_hub" in co_txt and "GITHUB_REPOSITORY" in co_txt)
+
+    # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
+    print("[工作台恢复状态]")
+    check("T168 server.py 版本 1.5.0", server.VERSION == "1.5.0", server.VERSION)
+    check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
+    check("T170 restore_kind 口径与脚本侧一致",
+          (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
+           and server.restore_kind("EMPTY") == "empty" and server.restore_kind("SKIPPED") == "empty"
+           and server.restore_kind("TRANSIENT") == "bad" and server.restore_kind("PENDING") == "bad"
+           and server.restore_kind("FAILED") == "bad" and server.restore_kind("AUTH") == "bad"
+           and server.restore_kind("") == "none"),
+          server.restore_kind("TRANSIENT"))
+    check("T171 machine_restore_summary：坏状态优先于好状态",
+          server.machine_restore_summary(
+              {"restore": {"data": {"status": "OK"},
+                           "snapshot": {"status": "TRANSIENT"}}})["kind"] == "bad")
+    check("T172 machine_detail 返回含 restore 字段（默认空也带）",
+          "restore" in server.machine_detail("0.0.0.0", False))
+
+    code, body, _ = req(base, "/api/overview")
+    stats_d = (json.loads(body).get("stats") or {})
+    check("T173 /api/overview stats 含 machines_data_bad / machines_snapshot_bad",
+          "machines_data_bad" in stats_d and "machines_snapshot_bad" in stats_d,
+          str(sorted(stats_d.keys())))
+
+    idx_txt = open(os.path.join(wb_dir, "static", "index.html"), encoding="utf-8").read()
+    check("T174 index.html 机器表新增「恢复」列", ">恢复</th>" in idx_txt)
+    app_txt = open(os.path.join(wb_dir, "static", "app.js"), encoding="utf-8").read()
+    check("T175 app.js 有 restoreBadge 并渲染进机器表",
+          "function restoreBadge" in app_txt and "restoreBadge(m.restore)" in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

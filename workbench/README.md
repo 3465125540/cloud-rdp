@@ -146,8 +146,10 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 
 ## 6. 新增账号「一键自动部署」
 
-在「GitHub 账号管理」面板点 **＋ 新增**，填 `owner` / `repo` / `Secret 名`，贴上**该账号自己的 PAT**
-（需 `repo` + `workflow` 权限），勾选「新增后自动部署仓库 + 接入账号池」，点「添加」。
+在「GitHub 账号管理」面板点 **＋ 新增**，**必填只有 PAT** —— 贴上**该账号自己的 PAT**
+（需 `repo` + `workflow` 权限），`owner` / `repo` 按需填，**`Secret 名` 可留空**（新账号通常连仓库
+都还没建，谈不上已有 Secret；留空会自动分配一个没被占用的 `POOL_TOKEN_N`，部署时再把 PAT 写进去），
+勾选「新增后自动部署仓库 + 接入账号池」，点「添加」。
 工作台随即在后台跑完下面 9 步，并把进度实时画在**部署进度**卡片里（逐步 ✓/✕ + 北京时间）：
 
 | 步骤 | 做什么 | 用什么 token |
@@ -168,7 +170,7 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 
 **前置条件**：① 本机有 `gh` CLI（没有也能用仓库自带的 `.tools/bin/gh.exe`）；② hub 仓库已配好
 机器密钥；③ 新账号 PAT 有 `repo` + `workflow`。**任一步失败**会标红并给原因，修好后重跑即可
-（已成功步骤幂等）。**不填 PAT** 则退化为「只写配置」，其余步骤手动完成。
+（已成功步骤幂等）。**取消勾选「新增后自动部署」** 则只写配置，其余步骤手动完成（PAT 仍必填）。
 
 > 整个过程几分钟（主要在等那个临时 workflow），所以走后台任务，HTTP 立刻返回 `job_id`，
 > 前端每 2.5 秒轮询 `GET /api/accounts/provision?id=<job_id>` 直到 `done` / `failed`。
@@ -180,12 +182,12 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务与各链路健康状态 |
-| GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存 |
+| GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存。`stats` 含 `machines_data_bad` / `machines_snapshot_bad`（**未从 139 成功拉取数据的机器数**，acc-1 事故后新增，概览页「恢复异常」卡片直接读它） |
 | GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
-| POST | `/api/accounts/add` | `{owner, repo, token_secret, id?, enabled?, pat?, auto_deploy?}` 新增账号（校验后原子写回 pool-config.json，**不写 PAT 明文**）。带 `pat` + `auto_deploy=true` 时顺带**自动部署**并返回 `job_id` |
+| POST | `/api/accounts/add` | `{owner, repo, pat, token_secret?, id?, enabled?, auto_deploy?}` 新增账号（校验后原子写回 pool-config.json，**不写 PAT 明文**）。**必填只有 `pat`**；`token_secret` 留空则自动分配 `POOL_TOKEN_N`（响应里 `secret_auto=true` + `token_secret` 回传）。带 `pat` + `auto_deploy=true`（默认）时顺带**自动部署**并返回 `job_id` |
 | GET | `/api/accounts/provision?id=<job_id>` | 查询自动部署任务进度（`job.steps[]` 逐步 ✓/✕，`job.status` = running/done/failed） |
-| GET | `/api/machines` | 机器实况（含 `uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），以及 `backup_request`（一键备份是否在排队）） |
+| GET | `/api/machines` | 机器实况（含 `uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），`restore`（**数据/快照恢复状态**：`{data:{status,reason,at_utc}, snapshot:{...}, source}`），以及 `backup_request`（一键备份是否在排队）） |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录（`created_beijing` / `updated_beijing` 为北京时区绝对时间，形如 `2026/9/22-20:16`） |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
 | POST | `/api/dispatch` | `{target:"coordinator"\|"keepalive", inputs:{...}}` 触发 workflow |
@@ -201,7 +203,7 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（190 项）
+├── selftest.py           # 离线自测（224 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
@@ -225,6 +227,20 @@ workbench/
 A：这两项是经 SMB 读远端 `D:\cloudrdp-sys\_state\pool-role.txt` 与 `_snapshot\manifest.json` 得到的。
 如果那台机器跑的是**账号池功能上线前**的旧版本（`pool-role.txt` 不存在），或者还没到第一次快照时间点（保活第 60 分钟才做首份），就会是空的。在线状态本身仍然准确。
 
+**Q：机器表里的「恢复」列是什么？为什么会有 `TRANSIENT` / `EMPTY`？**
+A：它读的是机器上的 `D:\cloudrdp-sys\_state\restore-status.json`（脚本侧 `remote-lib.ps1` 写入），
+反映**这台机器本次开机时从 139 云盘拉取「数据」与「快照」的结果**（上排=数据，下排=快照）：
+
+| 徽章 | 含义 |
+|------|------|
+| `OK` / `PARTIAL`（绿） | 已还原（`PARTIAL` = 部分还原） |
+| `EMPTY` / `SKIPPED`（灰） | 139 上**确认**没有数据（终态，不是错误） |
+| `TRANSIENT` / `PENDING`（黄） | 网络抖动 / 正在后台拉取 —— 保活循环会自动重试，**不用管** |
+| `FAILED` / `AUTH`（红） | 拉取失败 / 鉴权过期，需要人工处理（鼠标悬停看 `reason`） |
+
+为什么要有这一列：`acc-1` 那次事故里，机器其实**没拉到数据**，界面却因为只看 rclone 退出码而显示
+「已同步」。现在把「没拉到」直接摆到台面上 —— 概览页也会同步显示「恢复异常 N 数据 · M 快照」。
+
 **Q：机器列表里有 30 多台？**
 A：Tailscale 里累积的历史节点都还在。默认勾了「**只看在线**」，取消勾选可以看到全部。
 
@@ -235,7 +251,7 @@ A：读 Actions Secret **名字**列表需要仓库 admin 权限的 Token。Toke
 A：说明 hub 仓库配了 **JSON 通道** Secret `POOL_TOKENS`（值形如 `{"账号登录名": "ghp_..."}`），而本账号没有同名的独立 Secret。GitHub 的 Secret **值永不回显**，工作台无法确认那个 JSON 里到底有没有这个 owner，所以既不敢标「已配置」、也不误报「缺失」。**以「凭证」列的协调器巡检结果为准** —— 协调器是真的拿 token 去调 API 了，最权威。若该列显示 `ok`，说明 token 已就位（只是来自 JSON 通道）。
 
 **Q：新增账号时能填 PAT 吗？会不会写进配置文件？**
-A：**可以填，且现在正是靠它做「一键自动部署」** —— 但 PAT **绝不写进 `pool-config.json`、也绝不进 git**：它只落在本机 `.tools/pool/<owner>.token`（权限 0600）。填了 PAT 并勾选「新增后自动部署」后，工作台会用它在后台完成：校验 PAT → 建 fork → 开 Actions → **借道 hub 的临时 workflow 把机器密钥复制进 fork**（GitHub Secret 值读不回来，只能这么复制）→ 写 hub Secret → 推送配置 → 触发协调器。**不填 PAT** 时只写配置，需你手动完成 fork / Secrets 等步骤（`pool-config.json` 里依旧只有 owner / repo / Secret 名）。
+A：**可以填，且现在正是靠它做「一键自动部署」—— 新增账号必填的就是它** —— 但 PAT **绝不写进 `pool-config.json`、也绝不进 git**：它只落在本机 `.tools/pool/<owner>.token`（权限 0600）。填了 PAT 并勾选「新增后自动部署」后，工作台会用它在后台完成：校验 PAT → 建 fork → 开 Actions → **借道 hub 的临时 workflow 把机器密钥复制进 fork**（GitHub Secret 值读不回来，只能这么复制）→ 写 hub Secret → 推送配置 → 触发协调器。**取消勾选自动部署**时只写配置，需你手动完成 fork / Secrets 等步骤（`pool-config.json` 里依旧只有 owner / repo / Secret 名）。**Secret 名可留空**：留空自动分配 `POOL_TOKEN_N`。
 
 **Q：实时监测的「在跑机数 / 最近 run」从哪来？**
 A：两条来源合并：① 协调器每 10 分钟巡检，把**每个账号**的明细（凭证状态 / 在跑机数 / 最近 run）发布到 `pool-state` 分支 —— 覆盖全部账号；② hub 账号本机有 token 时，工作台额外轮询 `/actions/runs` 做**实时**探测（更新鲜）。卡片底部会标数据新鲜度（如「2 分钟前 · 协调器」或「实时」）。刚新增的账号在下一次协调器巡检前，明细可能为空属正常。

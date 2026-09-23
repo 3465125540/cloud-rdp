@@ -40,8 +40,13 @@ param(
     [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "a" }),
+    [string]$RemoteRoot = "",
+    [int]$ProbeAttempts   = 3,
+    [int]$ProbeDelaySec   = 6,
+    [int]$ProbeTimeoutSec = 25,
     [switch]$Push,
-    [switch]$Quick
+    [switch]$Quick,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Continue"
@@ -80,6 +85,12 @@ $lockcopyLib = Join-Path $PSScriptRoot "lockcopy-lib.ps1"
 $script:HasLockcopyLib = $false
 if (Test-Path -LiteralPath $lockcopyLib) { . $lockcopyLib; $script:HasLockcopyLib = $true }
 else { Write-Warning "[snapshot] 未找到 lockcopy-lib.ps1，被占用文件将无法补写" }
+
+# 远端判定共享库（推送守卫用；与 sync-down / sync-up / pre-restore 同源）
+$remoteLib    = Join-Path $PSScriptRoot "remote-lib.ps1"
+$script:HasRemoteLib = $false
+if (Test-Path -LiteralPath $remoteLib) { . $remoteLib; $script:HasRemoteLib = $true }
+else { Write-Warning "[snapshot] 未找到 remote-lib.ps1，推送守卫退化为「不检查可达性」" }
 
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
@@ -1084,6 +1095,37 @@ if ($Push) {
         Set-GhEnv "SNAPSHOT_PUSH=SKIPPED"
         exit 0
     }
+
+    # ---------- 守卫 A：139 根必须可列（否则绝不 mkdir / sync）----------
+    # 与 sync-up.ps1 同一道守卫：探不到就整段跳过，避免在 139 根造出幽灵「AI文件库」。
+    if ($script:HasRemoteLib) {
+        $rootOk = [bool](Test-AlistRemoteReachable -RcloneExe $RcloneExe -Remote $Remote -Root $RemoteRoot `
+                     -Attempts $ProbeAttempts -DelaySec $ProbeDelaySec -TimeoutSec $ProbeTimeoutSec -Quiet)
+        if (-not $rootOk) {
+            Warn "139 根目录不可达（网络抖动或鉴权过期）—— 跳过推送（本地快照仍在 $Stage，下次再传）"
+            Set-GhEnv "SNAPSHOT_PUSH=SKIPPED-UNREACHABLE"
+            exit 0
+        }
+    }
+
+    # ---------- 守卫 B：本机快照没还原成功时，拒绝用「空壳」覆盖 139 ----------
+    # 下面元数据用 rclone sync（远端镜像本地）—— 若本机开机时快照压根没拉下来/没还原，
+    # 本地 Stage 就是一台**全新机器**的抓取结果，sync 上去会把 139 上好的快照元数据抹掉。
+    # （acc-1 事故的另一半：误判 EMPTY → 没还原 → 反手把空壳 sync 上云。）
+    if (-not $Force -and $script:HasRemoteLib) {
+        $snapStatus = ''
+        try { $snapStatus = [string](Get-RestoreStatusValue -Scope snapshot -SysDir $SysDir) } catch { }
+        if ($snapStatus -in @('TRANSIENT', 'FAILED', 'PENDING')) {
+            Warn "本机快照恢复状态 = $snapStatus（未成功）—— 拒绝推送，以免用未还原的空壳覆盖 139 上的好快照。确认无误请加 -Force"
+            Set-GhEnv "SNAPSHOT_PUSH=SKIPPED-UNRESTORED"
+            exit 0
+        }
+        if ([string]::IsNullOrWhiteSpace($snapStatus)) {
+            Warn "无本机快照恢复状态记录（非标准开机流程？）—— 继续推送，但请留意远端是否被覆盖"
+            Set-GhEnv "SNAPSHOT_PUSH=WARN-NO-RESTORE-STATUS"
+        }
+    }
+
     Say "推送到 $Remote ..."
     & $RcloneExe mkdir $Remote --timeout 0 --contimeout 0 2>&1 | Out-Null
 

@@ -160,16 +160,26 @@
 - 云主机里用 **`D:\a\cloud-rdp`** 存数据（**公共桌面已放 `CloudData` 快捷方式**，双击即达）
 - **开机自动恢复**：每次启动自动把 139 云盘的 `/AI文件库/CloudRDP` 拉回 `D:\a\cloud-rdp`
 - 运行中每 10 分钟推送到 139 云盘；关闭会话后还会做一次全量推送
-- 恢复结果会显示在 **「13. 环境就绪汇总（ENV READY）」** 步骤里：
+- 恢复结果会显示在 **「13. 环境就绪汇总（ENV READY）」** 步骤里，也会写进机器上的
+  `D:\cloudrdp-sys\_state\restore-status.json`（工作台「机器运行实况」表的**「恢复」列**直接读它）：
 
   | 状态 | 含义 |
   |------|------|
   | `OK` | 恢复成功（日志打印文件数 / 大小） |
-  | `EMPTY` | 远端还没有数据（首次运行正常） |
+  | `EMPTY` | **确认**远端还没有数据（139 上父目录可列、里面确实没有该目录 —— 首次运行正常） |
+  | `TRANSIENT` | 139 暂时不可达（DNS/网络抖动、5xx）—— **不是**「远端为空」；本次不拉取，保活循环每 10 分钟自动重试 |
   | `FAILED` | 恢复失败 —— 多半是 139 Authorization 过期；`D:\a\cloud-rdp` 是空的，**别在上面存重要东西** |
+
+  > **为什么区分 `EMPTY` 与 `TRANSIENT`（acc-1 事故的根因）**：rclone 对「目录不存在」返回码
+  > 3/4，但对「DNS 解析失败 / 后端 404」**也**返回 3。旧版 `sync-down.ps1` 只看退出码，于是一次
+  > **5 秒 DNS 抖动**就被误判成「远端为空」，机器空着手起来、界面却显示「已同步」。现在统一由
+  > 共享库 `scripts/remote-lib.ps1` 判定（`OK`/`EMPTY`/`TRANSIENT`/`AUTH`），铁律是
+  > **先探后拉**：先把 139 根目录列出来，再逐级下探；探不通一律 `TRANSIENT`，**绝不写本地、绝不写远端**。
 
 - 恢复失败时会在 `D:\a\cloud-rdp` 留一个 `_RESTORE_FAILED.txt` 标记，并**红色高亮**警告
 - 恢复失败**不会**挡住 RDP 启动（脚本永远返回 0），保证机器始终可用
+- **保活循环自愈**：每 10 分钟读一次 `restore-status.json`，只要是 `TRANSIENT`/`FAILED`/`PENDING`
+  就自动 `sync-down.ps1 -Repull` 重拉；快照没还原成功前**不会推送**（避免用空壳覆盖 139 上的好快照）
 
 #### ② 整机快照管线（文件 / 注册表 / 设置，低频）
 
@@ -643,7 +653,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（166 项）
+python workbench\selftest.py   :: 离线自测（224 项）
 ```
 
 | 面板 | 内容 |
@@ -665,7 +675,9 @@ python workbench\selftest.py   :: 离线自测（166 项）
 
 ### 9. 新增账号「一键自动部署」（工作台）
 
-在「GitHub 账号管理」面板点 **＋ 新增**，填 `owner` / `repo` / `Secret 名`，贴上**该账号自己的 PAT**，
+在「GitHub 账号管理」面板点 **＋ 新增**，**必填只有 PAT** —— 贴上**该账号自己的 PAT**
+（需 `repo` + `workflow` 权限）；`owner` / `repo` 按需填，**`Secret 名` 可留空**
+（新账号通常连仓库都还没建，留空会自动分配一个没被占用的 `POOL_TOKEN_N`），
 勾选「新增后自动部署仓库 + 接入账号池」，点「添加」后工作台会自动：
 
 1. **写入配置** —— 把账号写进 `scripts/pool-config.json`（PAT 不写进该文件）。
@@ -687,6 +699,35 @@ python workbench\selftest.py   :: 离线自测（166 项）
 > `repo` + `workflow` 权限；③ hub 仓库已配好机器密钥（第三节）。
 > **不填 PAT** 时只写配置、不做部署，需你手动完成上面 5~8 步。
 
+### 10. 数据还原可靠性：先探后拉 + fork 自愈（acc-1 事故复盘）
+
+**事故**：账号 `acc-1 · yc1966asgf`（`100.77.250.79`）开机后**没有从 139 云盘拉取数据**，界面却显示
+「已同步」。机器空着手起来，随后它自己的 `sync-up.ps1` 还在 139 根目录 `mkdir` 出一个**幽灵
+`AI文件库`** 目录（真实的是 `/cloudrdp/AI文件库`），把「空」这个假象固化下来。
+
+**根因**：旧 `sync-down.ps1` 只凭 rclone 退出码 3/4 就判定「远端为空」。但 AList 在 DNS 抖动时会把
+WebDAV `PROPFIND` 打成 `404`，rclone **同样**映射成码 3 —— 于是「远端为空」和「网络抖动」无法区分。
+日志证据：`03:02` 有 12 次 `lookup personal-kd-njs.yun.139.com: no such host` + 4 次 `404`，
+而 `03:02:54` DNS 一恢复，同一个 `PROPFIND` 立刻返回 `207`。
+
+**修复**（本次改动）：
+
+| 改动 | 文件 | 作用 |
+|------|------|------|
+| 新增共享分类库 | `scripts/remote-lib.ps1` | 统一判定 `OK`/`EMPTY`/`TRANSIENT`/`AUTH`；`Get-RemoteProbe` **先探根目录再逐级下探**；`Set-RestoreStatus` 按 `data`/`snapshot` **分键合并**写状态 |
+| 拉取侧 | `scripts/sync-down.ps1` | 先探后拉；`EMPTY` 才留空；`TRANSIENT`/`AUTH` **不拉取**并落状态；新增 `-Repull` 供保活自愈 |
+| 快照拉取侧 | `scripts/pre-restore.ps1` | 快照拉取同样分类 + 重试；新增 `-Background`（不阻塞连接）；快照未就绪时写 `snapshot-restore-pending.txt` |
+| **防污染守卫** | `scripts/sync-up.ps1`、`scripts/backup-snapshot.ps1` | 守卫 A：139 根目录不可达 → 拒绝 `mkdir`/`copy`（不再留幽灵目录）；守卫 B：本次数据/快照恢复**未成功**（`TRANSIENT`/`FAILED`/`PENDING`）→ **拒绝推送**，避免用空壳覆盖 139 上的好快照（`-Force` 可强制） |
+| 工作流自愈 | `.github/workflows/windows-rdp.yml` | ① 新增步骤 **0p**：每次开机从 hub 下载最新 `scripts/` 覆盖（**fork 自愈，永不跑旧逻辑，无需 PAT**）；② 保活循环每 10 分钟自愈重拉；③ ENV READY 打印「数据恢复 / 整机还原」状态 |
+| 协调器防多头 | `.github/workflows/pool-coordinator.yml` | fork 里的定时运行直接跳过（只有 hub 才指挥），避免两个机器同时写同一份 `_snapshot` |
+| 工作台透出 | `workbench/server.py`、`static/*` | 新增 `/api/overview` 统计 `machines_data_bad`/`machines_snapshot_bad`；机器表新增**「恢复」列**（数据 / 快照两行徽章，`data-tip` 带失败原因） |
+
+**为什么把判定放进共享库**：`sync-down` / `sync-up` / `pre-restore` / `backup-snapshot` 四处都要用同
+一套口径。放共享库能保证**判定不漂移** —— 改一处，四处同时生效。
+
+> **运维提醒**：139 根目录下若已存在那个幽灵 `AI文件库`（与 `/cloudrdp/AI文件库` 并存），需**手动删除**；
+> 老 fork（如 acc-1）不必再手工同步脚本 —— 步骤 0p 每次开机都会拉 hub 的最新 `scripts/` 覆盖。
+
 ## 五、目录结构
 
 ```
@@ -694,7 +735,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（166 项）
+│   ├── selftest.py                     #   离线自测（224 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -702,6 +743,7 @@ cloud-rdp/
     ├── setup-rclone.ps1                # 安装并配置 rclone
     ├── setup-alist.ps1                 # 部署 AList，挂载 139 云盘
     ├── migrate-139.ps1                 # 【新】139 老路径 → AI文件库（一次性、幂等、只 copy）
+    ├── remote-lib.ps1                  # 【新】远端可达性分类器：OK/EMPTY/TRANSIENT/AUTH + 先探后拉 + 状态落盘
     ├── sync-down.ps1                   # 139 → D:\a\cloud-rdp（数据恢复，含排除仓库）
     ├── sync-up.ps1                     # D:\a\cloud-rdp → 139（数据备份，含排除仓库）
     ├── pre-restore.ps1                 # 预还原：记录程序基线→拉取→校验→规划→准备→回滚记录→preCommands→驱动还原

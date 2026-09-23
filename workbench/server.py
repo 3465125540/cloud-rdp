@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -109,6 +109,7 @@ DEFAULT_CONFIG = {
     "machine_prefix": "github-rdp-server",   # 只把以此开头的 Tailscale 节点当「我们的机器」
     "smb_share": "D$",
     "smb_base": r"D:\cloudrdp-sys",          # 远端系统目录（含 _state / _snapshot）
+    "data_dir": r"D:\a\cloud-rdp",           # 远端数据目录（与 139 云盘同步；读旧标记文件时用）
     "snapshot_stale_minutes": 90,            # 快照超过这么久没更新 → 标记为「陈旧」
     # 读远端文件的方式：auto=Windows 用 UNC 直读、Linux 用 smbclient；
     # 也可强制 "unc" / "smbclient"。Linux 上 smbclient 需 `apt install smbclient`。
@@ -813,7 +814,8 @@ def machine_detail(ip, online):
     """读单台机器的池角色 + 快照新鲜度 + 运行时长 + 归属账号。任何一项读不到就留空，不抛。"""
     detail = {"role": "", "role_source": "", "snapshot": None, "error": "",
               "started_utc": "", "uptime_seconds": None, "uptime_human": "",
-              "pool_owner": "", "pool_id": "", "assigned_role": "", "owner_source": ""}
+              "pool_owner": "", "pool_id": "", "assigned_role": "", "owner_source": "",
+              "restore": {"data": {}, "snapshot": {}, "source": ""}}
     if OFFLINE or not ip or not online:
         return detail
     try:
@@ -874,6 +876,8 @@ def machine_detail(ip, online):
                 break
     # 一键备份：机器上是否还挂着未处理的备份请求（保活循环取走后会删掉）
     detail["backup_request"] = read_backup_request(ip)
+    # 数据/快照恢复状态（acc-1 事故后新增：让「没拉取到数据」一眼可见）
+    detail["restore"] = read_restore_status(ip)
     return detail
 
 
@@ -894,6 +898,92 @@ def read_backup_request(ip):
     except Exception:
         pass
     return out
+
+
+def read_restore_status(ip):
+    """读机器上的 `_state/restore-status.json`（数据/快照恢复状态）。
+
+    结构（由脚本侧的 remote-lib.ps1 Set-RestoreStatus 写入，按作用域合并）：
+        { "data": {"status","reason","at_utc"}, "snapshot": {...} }
+    兼容旧的扁平结构 `{status,reason}`。再读不到就回退到旧标记文件
+    （`<数据目录>\\_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）。
+
+    返回 {"data": {...}, "snapshot": {...}, "source": "..."}；任何异常都不抛。
+    """
+    out = {"data": {}, "snapshot": {}, "source": ""}
+
+    def _norm(v):
+        if not isinstance(v, dict):
+            return {}
+        return {"status": str(v.get("status") or "").upper(),
+                "reason": str(v.get("reason") or ""),
+                "at_utc": str(v.get("at_utc") or "")}
+
+    try:
+        raw = read_remote_text(ip, "_state/restore-status.json")
+        if raw and raw.strip():
+            o = json.loads(raw)
+            if isinstance(o, dict):
+                out["data"] = _norm(o.get("data"))
+                out["snapshot"] = _norm(o.get("snapshot"))
+                if not out["data"] and o.get("status"):
+                    out["data"] = _norm(o)      # 旧扁平结构
+                if out["data"] or out["snapshot"]:
+                    out["source"] = "_state/restore-status.json"
+                    return out
+    except Exception:
+        pass
+
+    # 回退：旧标记文件（老机器/老脚本留下的）
+    data_dir = str(CONFIG.get("data_dir") or r"D:\a\cloud-rdp").rstrip("\\/")
+    for fname, st in (("_RESTORE_FAILED.txt", "FAILED"), ("_RESTORE_EMPTY.txt", "EMPTY")):
+        try:
+            read_remote_abs(ip, data_dir + "\\" + fname)
+            out["data"] = {"status": st, "reason": "（旧标记文件 %s）" % fname, "at_utc": ""}
+            out["source"] = "标记文件"
+            break
+        except Exception:
+            continue
+    return out
+
+
+# 恢复状态 → 展示类别（前端与统计共用一套口径，避免两边判色不一致）
+RESTORE_OK = ("OK", "PARTIAL")
+RESTORE_EMPTY = ("EMPTY", "SKIPPED")
+RESTORE_BAD = ("TRANSIENT", "FAILED", "AUTH", "PENDING")
+
+
+def restore_kind(status):
+    """把恢复状态字符串归成 ok / empty / bad / none 四类。"""
+    s = str(status or "").upper()
+    if s in RESTORE_OK:
+        return "ok"
+    if s in RESTORE_EMPTY:
+        return "empty"
+    if s in RESTORE_BAD:
+        return "bad"
+    return "none"
+
+
+def machine_restore_summary(m):
+    """从一台机器的 restore 字段里取最该被关注的那条状态（bad 优先于 ok）。"""
+    r = (m or {}).get("restore") or {}
+    picks = []
+    for scope in ("data", "snapshot"):
+        st = str((r.get(scope) or {}).get("status") or "")
+        if st:
+            picks.append((scope, st))
+    if not picks:
+        return {"kind": "none", "scope": "", "status": ""}
+    # 任一作用域 bad → bad；否则任一 empty → empty；否则 ok
+    for scope, st in picks:
+        if restore_kind(st) == "bad":
+            return {"kind": "bad", "scope": scope, "status": st}
+    for scope, st in picks:
+        if restore_kind(st) == "empty":
+            return {"kind": "empty", "scope": scope, "status": st}
+    scope, st = picks[0]
+    return {"kind": "ok", "scope": scope, "status": st}
 
 
 def request_backup(ip, requested_by=""):
@@ -1077,6 +1167,7 @@ def get_accounts():
             by_owner.setdefault(str(st.get("owner") or ""), dict(st, role="standby"))
 
     accounts = []
+    prov_owners = _provisioning_owners()
     for a in (cfg.get("accounts") or []):
         owner = str(a.get("owner") or "")
         secret = str(a.get("token_secret") or "")
@@ -1140,6 +1231,9 @@ def get_accounts():
             "last_run": last_run,
             "report_note": str(rep.get("note") or ""),
             "source": source,
+            # 正在自动部署中（后台任务 status=running）—— 前端据此显示「部署中…」，
+            # 避免刚添加、Secret 还没写完时被误报成红色的「缺失」
+            "provisioning": owner in prov_owners,
         })
 
     return {"ok": True, "error": "", "path": pc["path"],
@@ -1532,6 +1626,15 @@ def build_overview():
     primary = [m for m in machines if m.get("role") == "primary"]
     standby = [m for m in machines if m.get("role") == "standby"]
 
+    # 数据/快照恢复：把「没拉取到数据」计入统计，让概览页一眼可见（acc-1 事故后新增）
+    def _scope_bad(scope):
+        n = 0
+        for m in machines:
+            st = str(((m.get("restore") or {}).get(scope) or {}).get("status") or "")
+            if restore_kind(st) == "bad":
+                n += 1
+        return n
+
     return {
         "ok": True,
         "version": VERSION,
@@ -1553,6 +1656,8 @@ def build_overview():
             "machines_total": len(machines),
             "machines_primary": len(primary),
             "machines_standby": len(standby),
+            "machines_data_bad": _scope_bad("data"),
+            "machines_snapshot_bad": _scope_bad("snapshot"),
             "accounts_total": len(accounts.get("accounts") or []),
             "accounts_enabled": len([a for a in (accounts.get("accounts") or []) if a.get("enabled")]),
             "target_machines": accounts.get("target_machines"),
@@ -1773,6 +1878,13 @@ def verify_repo_exists(owner, repo):
 
 _PROVISION_JOBS = {}
 _PROVISION_LOCK = threading.Lock()
+
+
+def _provisioning_owners():
+    """正在自动部署中（status=running）的 owner 集合。"""
+    with _PROVISION_LOCK:
+        return set(str(j.get("owner") or "") for j in _PROVISION_JOBS.values()
+                   if j.get("status") == "running")
 
 # 需要从 hub 复制到新 fork 的机器密钥（hub 里没有的会自动跳过）
 _SYNC_SECRETS = [
@@ -2212,7 +2324,10 @@ def api_accounts_provision_status(h, params):
 
 def api_accounts_add(h, params):
     """新增账号：写回 pool-config.json（原子写）。PAT 绝不进本文件。
-    若带上 pat + auto_deploy，则顺带在后台「自动部署仓库 + 接入账号池」。"""
+
+    必填只有 **PAT**（该账号的 Personal Access Token，需 repo + workflow 权限）——
+    新账号往往连仓库都还没有，所以 Secret 名可留空，由本接口自动分配 `POOL_TOKEN_N`。
+    若再带 auto_deploy（默认：给了 PAT 就开），则后台顺带「自动部署仓库 + 接入账号池」。"""
     body = h._read_body()
     owner = str(body.get("owner") or "").strip()
     repo = str(body.get("repo") or "cloud-rdp").strip()
@@ -2235,9 +2350,10 @@ def api_accounts_add(h, params):
         errs.append("repo（仓库名）必填")
     elif not _RE_REPO.match(repo):
         errs.append("repo 名不合法")
-    if not secret:
-        errs.append("token_secret（Secret 名）必填")
-    elif not _RE_SECRET.match(secret):
+    # 新账号（仓库可能还没建）只需要 PAT —— Secret 名可留空，自动分配
+    if not pat:
+        errs.append("PAT 必填（该账号的 Personal Access Token，需 repo + workflow 权限）")
+    if secret and not _RE_SECRET.match(secret):
         errs.append("token_secret 必须是合法 Secret 名（字母/下划线开头，仅含字母数字下划线）")
     if acc_id and not _RE_ACCID.match(acc_id):
         errs.append("id 不合法（字母数字与 . _ -）")
@@ -2261,13 +2377,29 @@ def api_accounts_add(h, params):
             if str(a.get("id") or "") == acc_id:
                 return h._json(409, {"ok": False, "error": "id %s 已存在" % acc_id})
 
+    # Secret 名留空 = 自动分配一个没被占用的 POOL_TOKEN_N（新账号常见：仓库还没建，
+    # 谈不上已有 Secret，等自动部署时再由本工作台把 PAT 写进 hub 的这个名字）
+    secret_auto = False
+    if not secret:
+        used = set(str(a.get("token_secret") or "") for a in accs)
+        n = 1
+        while ("POOL_TOKEN_%d" % n) in used:
+            n += 1
+        secret = "POOL_TOKEN_%d" % n
+        secret_auto = True
+    else:
+        for a in accs:
+            if str(a.get("token_secret") or "") == secret:
+                return h._json(409, {"ok": False, "error": "Secret 名 %s 已被账号 %s 占用"
+                                     % (secret, a.get("owner"))})
+
     # 仓库校验：明确 404 才拦；但若开了「自动部署」，404 正是要 fork 的场景 → 放行
     v_state, v_note = verify_repo_exists(owner, repo)
     if v_state == "missing":
         if auto_deploy and pat:
             v_note = "仓库尚不存在 —— 自动部署会从 hub fork 出来"
         else:
-            return h._json(400, {"ok": False, "error": v_note})
+            return h._json(400, {"ok": False, "error": "%s（可勾选「自动部署」由 PAT 自动 fork）" % v_note})
 
     if not acc_id:
         existing = set(str(a.get("id") or "") for a in accs)
@@ -2286,17 +2418,19 @@ def api_accounts_add(h, params):
     clear_cache()
 
     resp = {"ok": True, "id": acc_id, "account": entry, "path": pc["path"],
-            "verified": v_state, "verify_note": v_note, "auto_deploy": False}
+            "verified": v_state, "verify_note": v_note, "auto_deploy": False,
+            "token_secret": secret, "secret_auto": secret_auto}
 
     if auto_deploy and pat:
         cfg_step = {"step": "config", "ok": True, "ts": now_iso(), "note": "",
-                    "detail": "已写入 %s（id=%s）" % (os.path.basename(pc["path"]), acc_id)}
+                    "detail": "已写入 %s（id=%s%s）" % (os.path.basename(pc["path"]), acc_id,
+                                                      "，Secret 名自动分配为 %s" % secret if secret_auto else "")}
         job = start_provision(owner, repo, secret, pat, config_step=cfg_step)
         resp["auto_deploy"] = True
         resp["job_id"] = job["id"]
         resp["steps"] = list(job["steps"])
         resp["hint"] = ("已开始自动部署：建 fork → 开 Actions → 复制机器密钥 → "
-                        "写 hub Secret → 推送配置 → 触发协调器。可在下方查看进度。")
+                        "写 hub Secret（%s）→ 推送配置 → 触发协调器。可在下方查看进度。" % secret)
     else:
         resp["hint"] = ("PAT 不会写进本文件。请到 GitHub 仓库 Secrets 配置其一："
                         "① 推荐 —— Secret 名 POOL_TOKENS，值是 JSON，加一项 \"%s\": \"ghp_...\"；"
