@@ -43,7 +43,7 @@ function notJsonError(ct, text) {
   var head = String(text || "").trim().replace(/\s+/g, " ").slice(0, 60);
   return new Error("后端没有返回 JSON（Content-Type=" + (ct || "未知") +
     "，开头是「" + head + "…」）。这说明当前页面不是由工作台后端在提供：请用浏览器直接打开 " +
-    "http://127.0.0.1:8787 （不要用静态预览面板，也不要直接双击 index.html）。");
+    "http://127.0.0.1:8899 （不要用静态预览面板，也不要直接双击 index.html）。");
 }
 function api(path, opts) {
   opts = opts || {};
@@ -77,8 +77,8 @@ function load(force) {
       $("#errors").innerHTML =
         '<div class="err-line">' + esc(e.message) + "</div>" +
         '<div class="err-line">当前页面：' + esc(location.href) + "</div>" +
-        '<div class="err-line">正确入口：<a href="http://127.0.0.1:8787" target="_blank">' +
-        "http://127.0.0.1:8787</a>（用浏览器直接打开；不要用应用内预览面板）</div>";
+        '<div class="err-line">正确入口：<a href="http://127.0.0.1:8899" target="_blank">' +
+        "http://127.0.0.1:8899</a>（用浏览器直接打开；不要用应用内预览面板）</div>";
     }
   }).then(function () {
     BUSY = false;

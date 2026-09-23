@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -557,6 +558,16 @@ def main():
             ok = False
             why = "含非 ASCII 字节@%d：Windows 按 ANSI/GBK 解码会吞引号/括号 → 0x800A0401" % e.start
         check("T113 %s 纯 ASCII" % fn, ok, why)
+
+    # 端口一致性：.vbs 写死的 PORT/URL 必须与后端默认端口一致（防止两边漂移）
+    vbs_txt = open(os.path.join(wb_dir, "open-workbench.vbs"), encoding="ascii").read()
+    m = re.search(r"Const PORT\s*=\s*(\d+)", vbs_txt)
+    vbs_port = int(m.group(1)) if m else -1
+    srv_port = int(server.CONFIG.get("port", -1))
+    check("T114 open-workbench.vbs 端口与后端默认一致(%d)" % srv_port, vbs_port == srv_port,
+          "vbs=%s server=%s" % (vbs_port, srv_port))
+    check("T114b open-workbench.vbs URL 含 127.0.0.1:%d" % srv_port,
+          ("127.0.0.1:%d" % srv_port) in vbs_txt, "URL 里没有该端口")
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

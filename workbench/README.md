@@ -29,7 +29,7 @@
 workbench\start.cmd
 
 :: 或者命令行
-python workbench\server.py                 :: http://127.0.0.1:8787
+python workbench\server.py                 :: http://127.0.0.1:8899
 python workbench\server.py --port 9000     :: 换端口
 python workbench\server.py --no-open       :: 不自动开浏览器
 python workbench\server.py --offline       :: 离线模式（不联网，自测用）
@@ -43,7 +43,7 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **147 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **149 项**，应全绿。不联网、不碰真机、不写你的桌面。
 
 > **启动脚本必须保持纯 ASCII**（`open-workbench.vbs` / `serve.cmd` / `start.cmd`）。
 > Windows 脚本宿主与 `cmd.exe` 按 ANSI（zh-CN 即 GBK）解码 `.vbs`/`.cmd`；若存成
@@ -169,7 +169,7 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（147 项）
+├── selftest.py           # 离线自测（149 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

@@ -13,7 +13,7 @@ ExecStart=/usr/bin/python3 /opt/cloud-rdp/workbench/server.py --no-open
 # 监听地址/端口：默认读 workbench/config.json；这里再显式钉死一遍，防止配置漂移
 Environment=WORKBENCH_CONFIG=/opt/cloud-rdp/workbench/config.json
 Environment=WORKBENCH_HOST=0.0.0.0
-Environment=WORKBENCH_PORT=8787
+Environment=WORKBENCH_PORT=8899
 # GitHub Token（可选但强烈建议；不放只能匿名读少量接口）：
 # Environment=GITHUB_TOKEN=ghp_xxxxxxxx
 

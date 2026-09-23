@@ -1,6 +1,6 @@
 ' GitHub RDP workbench - launcher target of the desktop shortcut.
 ' Logic mirrors 9router's open-dashboard.vbs:
-'   already running (port 8787 listening) -> just open the browser;
+'   already running (port 8899 listening) -> just open the browser;
 '   not running -> start the server hidden, wait for the port (max 20s), then open browser.
 '
 ' NOTE: this file MUST stay pure ASCII. Windows Script Host reads .vbs as ANSI
@@ -8,8 +8,8 @@
 ' quote character -> "Statement expected" (0x800A0401). Keep it ASCII-only.
 Option Explicit
 
-Const PORT = 8787
-Const URL  = "http://127.0.0.1:8787"
+Const PORT = 8899
+Const URL  = "http://127.0.0.1:8899"
 
 Dim oWS, fso, here
 Set oWS = CreateObject("WScript.Shell")

@@ -126,7 +126,7 @@ def main():
     out_dir = a.dir or os.path.join(os.path.expanduser("~"), "Desktop")
     lnk = os.path.join(out_dir, a.name + ".lnk")
     create_shortcut(lnk, target, here, icon,
-                    "GitHub虚拟机管理工作台 (http://127.0.0.1:8787)")
+                    "GitHub虚拟机管理工作台 (http://127.0.0.1:8899)")
     print("OK created", lnk)
 
 

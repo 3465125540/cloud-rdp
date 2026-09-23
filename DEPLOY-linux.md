@@ -21,7 +21,7 @@
 
 - **Python**：3.8+（只用标准库）。
 - **网络**：能访问 `api.github.com`、`raw.githubusercontent.com`，并能到 Tailscale 内网（100.x）。
-- **端口**：默认 `8787`。
+- **端口**：默认 `8899`。
 
 > ⚠️ **安全第一**：工作台的 `/api/conn-info` 会返回机器的 **RDP 明文密码**。
 > 只要这台服务器不是完全隔离的内网，就**必须**设置 `access_token`（见第 5 节）。
@@ -37,7 +37,7 @@
 unzip cloud-rdp-workbench-linux-v1.1.0.zip -d /tmp/cloud-rdp-src
 cd /tmp/cloud-rdp-src
 
-# 2) 跑安装脚本（默认装到 /opt/cloud-rdp，端口 8787）
+# 2) 跑安装脚本（默认装到 /opt/cloud-rdp，端口 8899）
 sudo GH_TOKEN=ghp_你的PAT bash deploy/install.sh
 
 #    自定义路径/端口：
@@ -50,9 +50,9 @@ sudo GH_TOKEN=ghp_你的PAT bash deploy/install.sh
 完成后终端会打印访问地址与令牌：
 
 ```
-访问地址 : http://<服务器IP>:8787/
+访问地址 : http://<服务器IP>:8899/
 访问令牌 : xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-首次打开 : http://<服务器IP>:8787/?token=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+首次打开 : http://<服务器IP>:8899/?token=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 ### 方式 B：手动跑（前台，便于调试）
@@ -62,7 +62,7 @@ cd /path/to/cloud-rdp
 cp deploy/config.linux.json workbench/config.json
 # 编辑 workbench/config.json：至少设置 access_token；有 PAT 就设 token_file
 python3 workbench/server.py --no-open
-# 浏览器打开 http://<服务器IP>:8787/?token=你的access_token
+# 浏览器打开 http://<服务器IP>:8899/?token=你的access_token
 ```
 
 常用参数：
@@ -70,7 +70,7 @@ python3 workbench/server.py --no-open
 | 参数 | 说明 |
 |---|---|
 | `--host 0.0.0.0` | 监听所有网卡（默认 `127.0.0.1` 仅本机） |
-| `--port 8787` | 端口 |
+| `--port 8899` | 端口 |
 | `--config <路径>` | 指定配置文件（等价于环境变量 `WORKBENCH_CONFIG`） |
 | `--no-open` | 不自动打开浏览器（服务器上必加） |
 | `--offline` | 离线自测模式（不联网） |
@@ -85,7 +85,7 @@ python3 workbench/server.py --no-open
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `host` / `port` | `127.0.0.1` / `8787` | 监听地址与端口 |
+| `host` / `port` | `127.0.0.1` / `8899` | 监听地址与端口 |
 | `open_browser` | `true` | 服务器上设 `false` |
 | `repo` / `ref` | `3465125540/cloud-rdp` / `main` | 池 hub 仓库 |
 | `token_file` | `""` | 存 PAT 的单行文本文件（见下） |
@@ -150,7 +150,7 @@ python3 -c 'import secrets;print(secrets.token_urlsafe(32))'
 
 开启后，**所有**请求都要带令牌，三种方式任一即可：
 
-- 打开 `http://<服务器IP>:8787/?token=<令牌>`（会种一个 Cookie，之后免带）；
+- 打开 `http://<服务器IP>:8899/?token=<令牌>`（会种一个 Cookie，之后免带）；
 - 请求头 `X-Workbench-Token: <令牌>`；
 - Cookie `wb_token=<令牌>`。
 
@@ -159,7 +159,7 @@ python3 -c 'import secrets;print(secrets.token_urlsafe(32))'
 ### 5.2 更稳妥：只监听内网 / 走反向代理 + HTTPS
 
 - 能内网访问就**别暴露公网**：`host` 设为内网 IP，或 `127.0.0.1` + SSH 隧道
-  （`ssh -L 8787:127.0.0.1:8787 user@server` 后本地开 `http://127.0.0.1:8787/?token=...`）。
+  （`ssh -L 8899:127.0.0.1:8899 user@server` 后本地开 `http://127.0.0.1:8899/?token=...`）。
 - 必须公网访问时，**用 Nginx/Caddy 反代 + TLS**，并只放行可信 IP：
 
 ```nginx
@@ -170,7 +170,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/workbench.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8899;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         # 工作台自身也开了 access_token，双保险
@@ -178,11 +178,11 @@ server {
 }
 ```
 
-- 防火墙只放行 443（或你改的端口），**不要**把 8787 直接对公网开放：
+- 防火墙只放行 443（或你改的端口），**不要**把 8899 直接对公网开放：
 
 ```bash
 sudo ufw allow 443/tcp
-sudo ufw deny 8787/tcp
+sudo ufw deny 8899/tcp
 ```
 
 ---
@@ -258,7 +258,7 @@ systemctl status  cloud-rdp-workbench         # 状态
 
 ```bash
 cd /opt/cloud-rdp && python3 workbench/selftest.py
-# 期望输出： 结果：147 PASS / 0 FAIL
+# 期望输出： 结果：149 PASS / 0 FAIL
 ```
 
 ---

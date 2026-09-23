@@ -19,7 +19,7 @@
 
 启动
 ----
-    python workbench/server.py                 # 默认 http://127.0.0.1:8787
+    python workbench/server.py                 # 默认 http://127.0.0.1:8899
     python workbench/server.py --port 9000     # 换端口
     python workbench/server.py --no-open       # 不自动开浏览器
     python workbench/server.py --offline       # 离线模式（自测用，不联网）
@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -66,7 +66,7 @@ QUIET = False
 DEFAULT_CONFIG = {
     # ---- 服务 ----
     "host": "127.0.0.1",
-    "port": 8787,
+    "port": 8899,
     "open_browser": True,
     "auto_refresh_seconds": 30,
 
@@ -1648,7 +1648,7 @@ class Handler(BaseHTTPRequestHandler):
                     "<div style='font:15px/1.7 system-ui;max-width:640px;margin:12vh auto;padding:0 20px'>"
                     "<h2>需要访问令牌</h2><p>这个工作台配置了 <code>access_token</code>，"
                     "请在地址后加 <code>?token=你的令牌</code> 再打开一次（之后会记住）。</p>"
-                    "<p>例：<code>http://&lt;服务器&gt;:8787/?token=xxxx</code></p></div>"),
+                    "<p>例：<code>http://&lt;服务器&gt;:8899/?token=xxxx</code></p></div>"),
                     "text/html; charset=utf-8")
             if not path.startswith("/api/"):
                 if lookup != "GET":

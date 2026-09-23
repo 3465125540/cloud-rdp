@@ -6,7 +6,7 @@
   ],
 
   "host": "127.0.0.1",
-  "port": 8787,
+  "port": 8899,
   "auto_refresh_seconds": 30,
 
   "repo": "3465125540/cloud-rdp",

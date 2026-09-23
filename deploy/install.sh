@@ -2,7 +2,7 @@
 # ============================================================================
 #  GitHub 虚拟机管理工作台 —— Linux 一键部署脚本
 #  用法（需要 root）：
-#      sudo bash deploy/install.sh                 # 装到 /opt/cloud-rdp，端口 8787
+#      sudo bash deploy/install.sh                 # 装到 /opt/cloud-rdp，端口 8899
 #      sudo bash deploy/install.sh --dir /srv/cloud-rdp --port 9000
 #      sudo GH_TOKEN=ghp_xxx bash deploy/install.sh   # 顺带写入 GitHub Token
 #
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/cloud-rdp"
-PORT="8787"
+PORT="8899"
 SERVICE_NAME="cloud-rdp-workbench"
 TOKEN_FILE="/etc/cloud-rdp/gh_token.txt"
 
