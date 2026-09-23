@@ -637,8 +637,8 @@ env:
 把上面这些运维动作收进**一个跑在本机的网页**，不用再翻 GitHub 或敲命令。
 
 ```bat
-workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8787
-python workbench\selftest.py   :: 离线自测（149 项）
+workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
+python workbench\selftest.py   :: 离线自测（166 项）
 ```
 
 | 面板 | 内容 |
@@ -656,6 +656,32 @@ python workbench\selftest.py   :: 离线自测（149 项）
 
 ---
 
+---
+
+### 9. 新增账号「一键自动部署」（工作台）
+
+在「GitHub 账号管理」面板点 **＋ 新增**，填 `owner` / `repo` / `Secret 名`，贴上**该账号自己的 PAT**，
+勾选「新增后自动部署仓库 + 接入账号池」，点「添加」后工作台会自动：
+
+1. **写入配置** —— 把账号写进 `scripts/pool-config.json`（PAT 不写进该文件）。
+2. **校验 PAT** —— 调 `GET /user` 确认 PAT 属于所填 `owner`。
+3. **留存 PAT** —— 存到本机 `.tools/pool/<owner>.token`（不进 git）。
+4. **写 hub Secret** —— 用本机 `gh` 把该 PAT 写进 hub 仓库的 `Secret 名`（协调器据此派发该账号）。
+5. **建 fork** —— 仓库不存在则从 hub fork 到该账号名下。
+6. **开 Actions** —— fork 默认关 Actions，自动开启并启用各 workflow。
+7. **复制机器密钥** —— 在 hub 里跑一个**临时 workflow**，把 hub 的 `TAILSCALE_AUTHKEY` /
+   `ALIST_139_AUTHORIZATION` / `GH_RELAY_TOKEN` / `GH_BILLING_TOKEN` / `MAIL_*` 写进 fork
+   （GitHub 的 Secret 值**读不回来**，只能这样「借道 hub」复制；跑完自动删除临时 workflow）。
+8. **推送配置** —— 把 `pool-config.json` 提交到 hub（协调器读的是 hub 上的这份）。
+9. **触发协调器** —— 立刻巡检，随后自动补机 / 主挂备顶。
+
+进度实时显示在面板里的**部署进度**卡片（逐步 ✓/✕ + 北京时间）。任一步失败会标红并给出原因，
+修好后重跑一次即可（已成功的步骤是幂等的）。
+
+> **前置条件**：① 本机装了 `gh` CLI（或用仓库自带的 `.tools/bin/gh.exe`）；② 新账号的 PAT 有
+> `repo` + `workflow` 权限；③ hub 仓库已配好机器密钥（第三节）。
+> **不填 PAT** 时只写配置、不做部署，需你手动完成上面 5~8 步。
+
 ## 五、目录结构
 
 ```
@@ -663,7 +689,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（149 项）
+│   ├── selftest.py                     #   离线自测（166 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

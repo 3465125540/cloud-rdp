@@ -12,7 +12,7 @@
 
 | 面板 | 数据来源 | 能做什么 |
 | --- | --- | --- |
-| **GitHub 账号管理** | `scripts/pool-config.json` + 仓库 Actions Secrets 列表 + `pool-state` 分支 | 看每个账号的 Secret 是否就位、当前是主还是备、有没有在跑机；**一键启用/停用**账号（直接改 pool-config.json）。顶部「监测数据」时间按**实时北京时间**（UTC+8，形如 `2026/9/22-20:16`）展示 |
+| **GitHub 账号管理** | `scripts/pool-config.json` + 仓库 Actions Secrets 列表 + `pool-state` 分支 | 看每个账号的 Secret 是否就位、当前是主还是备、有没有在跑机；**一键启用/停用**账号（直接改 pool-config.json）；**＋ 新增**可贴该账号 PAT **一键自动部署**（建 fork → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器），进度实时展示。顶部「监测数据」时间按**实时北京时间**（UTC+8，形如 `2026/9/22-20:16`）展示 |
 | **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` / `job-start.txt` / `pool-info.txt` / `backup-request.txt` + runner 工作区 `D:\a\<repo>\<repo>\.git\config` + `_snapshot\manifest.json` | 看哪些机器在线、Tailscale IP、**归属账号**、角色（主/备/单机）、**已运行时长**、快照新鲜度 + **快照绝对时间**、最后在线时间；**一键登录** / **查看信息**（弹窗显示 Tailscale IP / 用户名 / 密码，可一键复制）；快照栏还有 **☁ 一键备份**（增量同步数据到 139 + 快速快照推送） |
 | **定时计划运行日志** | GitHub Actions API（`windows-rdp.yml` / `pool-coordinator.yml`） | 两个 workflow 的最近 25 次运行：状态、触发方式（定时/手动）、开始时间（**实时北京时间**，UTC+8，形如 `2026/9/22-20:16`）、用时、SHA，点「日志」跳 GitHub；右上角**「缩略」只显示最近 5 条**，再点「展开全部」看全量 |
 | **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`（Windows）；Linux 上唤起 `xfreerdp`/`remmina` | 点一下直接连上在线机器，免手输密码 |
@@ -43,7 +43,7 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **149 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **166 项**，应全绿。不联网、不碰真机、不写你的桌面。
 
 > **启动脚本必须保持纯 ASCII**（`open-workbench.vbs` / `serve.cmd` / `start.cmd`）。
 > Windows 脚本宿主与 `cmd.exe` 按 ANSI（zh-CN 即 GBK）解码 `.vbs`/`.cmd`；若存成
@@ -144,7 +144,38 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 
 ---
 
-## 6. HTTP 接口
+## 6. 新增账号「一键自动部署」
+
+在「GitHub 账号管理」面板点 **＋ 新增**，填 `owner` / `repo` / `Secret 名`，贴上**该账号自己的 PAT**
+（需 `repo` + `workflow` 权限），勾选「新增后自动部署仓库 + 接入账号池」，点「添加」。
+工作台随即在后台跑完下面 9 步，并把进度实时画在**部署进度**卡片里（逐步 ✓/✕ + 北京时间）：
+
+| 步骤 | 做什么 | 用什么 token |
+| --- | --- | --- |
+| `config` | 把账号写进 `scripts/pool-config.json`（**PAT 不进该文件**） | — |
+| `verify_pat` | 调 `GET /user` 确认 PAT 属于所填 `owner` | 新账号 PAT |
+| `save_pat` | 存到本机 `.tools/pool/<owner>.token`（0600，不进 git） | — |
+| `hub_secret` | 用本机 `gh` 把 PAT 写进 hub 仓库的 `Secret 名` | hub token |
+| `fork` | 仓库不存在则从 hub fork 到该账号名下（fork 落 token 主人 = 新账号） | 新账号 PAT |
+| `actions` | fork 默认关 Actions，自动开启 + 允许所有 action + 启用各 workflow | 新账号 PAT |
+| `secrets_sync` | 在 hub 跑**临时 workflow**，把机器密钥复制进 fork（跑完自动删除） | hub token + 新账号 PAT |
+| `push_config` | 把 `pool-config.json` 合并后提交到 hub（协调器读的是 hub 上这份） | hub token |
+| `dispatch` | 触发协调器巡检 → 自动补机 / 主挂备顶 | hub token |
+
+**为什么「复制机器密钥」要绕这一圈？** GitHub 的 Actions Secret **只能写、永远读不回** ——
+没有任何 API 能拿到 `TAILSCALE_AUTHKEY` 等的值。唯一可行办法就是让 hub 里的一个临时 workflow
+用 `${{ secrets.X }}` 把值取到内存，再用**目标账号的 PAT** 执行 `gh secret set --repo <fork>` 写进去。
+
+**前置条件**：① 本机有 `gh` CLI（没有也能用仓库自带的 `.tools/bin/gh.exe`）；② hub 仓库已配好
+机器密钥；③ 新账号 PAT 有 `repo` + `workflow`。**任一步失败**会标红并给原因，修好后重跑即可
+（已成功步骤幂等）。**不填 PAT** 则退化为「只写配置」，其余步骤手动完成。
+
+> 整个过程几分钟（主要在等那个临时 workflow），所以走后台任务，HTTP 立刻返回 `job_id`，
+> 前端每 2.5 秒轮询 `GET /api/accounts/provision?id=<job_id>` 直到 `done` / `failed`。
+
+---
+
+## 7. HTTP 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -152,7 +183,8 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 | GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存 |
 | GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
-| POST | `/api/accounts/add` | `{owner, repo, token_secret, id?, enabled?}` 新增账号（校验后原子写回 pool-config.json，不写 PAT 明文） |
+| POST | `/api/accounts/add` | `{owner, repo, token_secret, id?, enabled?, pat?, auto_deploy?}` 新增账号（校验后原子写回 pool-config.json，**不写 PAT 明文**）。带 `pat` + `auto_deploy=true` 时顺带**自动部署**并返回 `job_id` |
+| GET | `/api/accounts/provision?id=<job_id>` | 查询自动部署任务进度（`job.steps[]` 逐步 ✓/✕，`job.status` = running/done/failed） |
 | GET | `/api/machines` | 机器实况（含 `uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），以及 `backup_request`（一键备份是否在排队）） |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录（`created_beijing` / `updated_beijing` 为北京时区绝对时间，形如 `2026/9/22-20:16`） |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
@@ -164,12 +196,12 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 
 ---
 
-## 7. 目录结构
+## 8. 目录结构
 
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（149 项）
+├── selftest.py           # 离线自测（166 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
@@ -187,7 +219,7 @@ workbench/
 
 ---
 
-## 8. 常见问题
+## 9. 常见问题
 
 **Q：机器面板里「角色」和「快照」都是空的？**
 A：这两项是经 SMB 读远端 `D:\cloudrdp-sys\_state\pool-role.txt` 与 `_snapshot\manifest.json` 得到的。
@@ -202,8 +234,8 @@ A：读 Actions Secret **名字**列表需要仓库 admin 权限的 Token。Toke
 **Q：Secret 那一列显示「可能已配置」？**
 A：说明 hub 仓库配了 **JSON 通道** Secret `POOL_TOKENS`（值形如 `{"账号登录名": "ghp_..."}`），而本账号没有同名的独立 Secret。GitHub 的 Secret **值永不回显**，工作台无法确认那个 JSON 里到底有没有这个 owner，所以既不敢标「已配置」、也不误报「缺失」。**以「凭证」列的协调器巡检结果为准** —— 协调器是真的拿 token 去调 API 了，最权威。若该列显示 `ok`，说明 token 已就位（只是来自 JSON 通道）。
 
-**Q：新增账号时能填 PAT 吗？**
-A：不能，也不该填。账号池里一账号 = 一个 fork，token 只以 **GitHub Actions Secret** 的形式存在（名字如 `POOL_TOKEN_<ID>`），值永不通过 API 返回、也永不写进 `pool-config.json`。新增账号表单只需填 owner / repo / Secret 名，之后去对应仓库配好同名 Secret 即可。
+**Q：新增账号时能填 PAT 吗？会不会写进配置文件？**
+A：**可以填，且现在正是靠它做「一键自动部署」** —— 但 PAT **绝不写进 `pool-config.json`、也绝不进 git**：它只落在本机 `.tools/pool/<owner>.token`（权限 0600）。填了 PAT 并勾选「新增后自动部署」后，工作台会用它在后台完成：校验 PAT → 建 fork → 开 Actions → **借道 hub 的临时 workflow 把机器密钥复制进 fork**（GitHub Secret 值读不回来，只能这么复制）→ 写 hub Secret → 推送配置 → 触发协调器。**不填 PAT** 时只写配置，需你手动完成 fork / Secrets 等步骤（`pool-config.json` 里依旧只有 owner / repo / Secret 名）。
 
 **Q：实时监测的「在跑机数 / 最近 run」从哪来？**
 A：两条来源合并：① 协调器每 10 分钟巡检，把**每个账号**的明细（凭证状态 / 在跑机数 / 最近 run）发布到 `pool-state` 分支 —— 覆盖全部账号；② hub 账号本机有 token 时，工作台额外轮询 `/actions/runs` 做**实时**探测（更新鲜）。卡片底部会标数据新鲜度（如「2 分钟前 · 协调器」或「实时」）。刚新增的账号在下一次协调器巡检前，明细可能为空属正常。

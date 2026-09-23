@@ -121,17 +121,31 @@
             <label>repo（仓库名）<input type="text" id="acc-repo" value="cloud-rdp" /></label>
             <label>Secret 名<input type="text" id="acc-secret" placeholder="例如 POOL_TOKEN_3" /></label>
             <label>id（可留空自动）<input type="text" id="acc-id" placeholder="acc-N" /></label>
+            <label class="span-2">PAT（该账号的 Personal Access Token，需 repo + workflow 权限）
+              <input type="password" id="acc-pat" autocomplete="new-password"
+                     placeholder="ghp_… / github_pat_…（只存本机 .tools/pool/，不进 git）" /></label>
           </div>
           <div class="add-acc-foot">
             <label class="chk"><input type="checkbox" id="acc-enabled" checked /> 启用</label>
+            <label class="chk" data-tip="勾选后自动：建 fork → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器">
+              <input type="checkbox" id="acc-autodeploy" checked /> 新增后自动部署仓库 + 接入账号池</label>
             <span class="add-acc-msg" id="acc-add-msg"></span>
             <span class="spacer"></span>
             <button type="button" class="btn btn-ghost btn-mini" id="btn-add-cancel">取消</button>
             <button type="submit" class="btn btn-primary btn-mini" id="btn-add-submit">添加</button>
           </div>
-          <p class="muted add-acc-tip">PAT 不会写进配置文件；添加后请到仓库 Secrets 里配置
-            <code>POOL_TOKENS</code>（JSON）或对应的 Secret。</p>
+          <p class="muted add-acc-tip">填了 PAT 才能「自动部署」（建 fork / 开 Actions / 写 Secret 都要它）。
+            PAT 只落在本机 <code>.tools/pool/&lt;owner&gt;.token</code>，不会写进 pool-config.json，也不会进 git。
+            不填 PAT 时只写配置，需你手动部署。</p>
         </form>
+        <div class="prov-panel" id="prov-panel" hidden>
+          <div class="prov-head">
+            <span id="prov-title">部署进度</span>
+            <span class="spacer"></span>
+            <span class="muted" id="prov-status"></span>
+          </div>
+          <ol class="prov-steps" id="prov-steps"></ol>
+        </div>
         <table class="tbl" id="tbl-accounts">
           <thead>
             <tr>

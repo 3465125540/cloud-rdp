@@ -16,6 +16,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -568,6 +569,77 @@ def main():
           "vbs=%s server=%s" % (vbs_port, srv_port))
     check("T114b open-workbench.vbs URL 含 127.0.0.1:%d" % srv_port,
           ("127.0.0.1:%d" % srv_port) in vbs_txt, "URL 里没有该端口")
+
+    # ---------------- 新增账号：自动部署仓库 + 接入账号池（provision） ----------------
+    print("[自动部署 provision]")
+    html = open(os.path.join(wb_dir, "static", "index.html"), encoding="utf-8").read()
+    appjs = open(os.path.join(wb_dir, "static", "app.js"), encoding="utf-8").read()
+    check("T115 表单含 PAT 密码框", 'id="acc-pat"' in html and 'type="password"' in html)
+    check("T116 表单含「自动部署」开关", 'id="acc-autodeploy"' in html)
+    check("T117 页面含部署进度面板", 'id="prov-panel"' in html and 'id="prov-steps"' in html)
+    check("T118 前端提交带 pat/auto_deploy", "pat: pat" in appjs and "auto_deploy: autoDeploy" in appjs)
+    check("T119 路由 GET /api/accounts/provision", ("GET", "/api/accounts/provision") in server.ROUTES)
+    check("T120 后端具备 provision 关键函数",
+          all(hasattr(server, n) for n in ("start_provision", "_prov_run", "sync_secrets_to_fork",
+                                           "push_pool_config_to_hub", "ensure_fork", "enable_actions",
+                                           "gh_secret_set", "verify_token_owner")))
+    tdir = server.pool_token_dir()
+    check("T121 PAT 存放目录在 .tools/pool 下",
+          tdir.replace("\\", "/").endswith("/.tools/pool"), tdir)
+
+    # PAT 绝不写进 pool-config.json / 响应体
+    tmpcfg2 = os.path.join(tmpdir, "pool-cfg2.json")
+    with open(tmpcfg2, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "accounts": []}, f)
+    real_pc2 = server.CONFIG.get("pool_config")
+    server.CONFIG["pool_config"] = tmpcfg2
+    try:
+        code, body, _ = req(base, "/api/accounts/add", "POST",
+                            {"owner": "acctP", "repo": "cloud-rdp", "token_secret": "POOL_TOKEN_9",
+                             "pat": "ghp_SUPERSECRET_XYZ", "auto_deploy": False})
+        d = json.loads(body)
+        check("T122 add(带 PAT, 不自动部署) 200/ok", code == 200 and d.get("ok") is True, body[:200])
+        check("T123 未自动部署 → 无 job_id",
+              not d.get("auto_deploy") and not d.get("job_id"), str(d.get("job_id")))
+        raw = open(tmpcfg2, encoding="utf-8").read()
+        check("T124 PAT 未写入 pool-config.json", "ghp_SUPERSECRET_XYZ" not in raw)
+        check("T125 PAT 未出现在响应体里", "ghp_SUPERSECRET_XYZ" not in body)
+
+        # 自动部署：offline 下 PAT 校验必然失败 → 任务快速失败，但接口仍 200 且带 job_id
+        code, body, _ = req(base, "/api/accounts/add", "POST",
+                            {"owner": "acctQ", "repo": "cloud-rdp", "token_secret": "POOL_TOKEN_10",
+                             "pat": "ghp_FAKE", "auto_deploy": True})
+        d = json.loads(body)
+        check("T126 add(自动部署) 200 且带 job_id",
+              code == 200 and d.get("auto_deploy") and bool(d.get("job_id")), body[:200])
+        jid = d.get("job_id") or ""
+        code, body, _ = req(base, "/api/accounts/provision?id=" + jid)
+        dj = json.loads(body)
+        check("T127 部署进度可查", code == 200 and dj.get("ok") is True and dj["job"]["id"] == jid)
+        time.sleep(0.8)
+        code, body, _ = req(base, "/api/accounts/provision?id=" + jid)
+        dj = json.loads(body)
+        check("T128 offline 下任务失败且记录了 verify_pat 步骤",
+              dj["job"]["status"] == "failed"
+              and any(s["step"] == "verify_pat" for s in dj["job"]["steps"]),
+              str(dj["job"].get("summary")))
+        code, _, _ = req(base, "/api/accounts/provision?id=nope-123")
+        check("T129 未知部署任务 → 404", code == 404, "code=%s" % code)
+    finally:
+        if real_pc2 is None:
+            server.CONFIG.pop("pool_config", None)
+        else:
+            server.CONFIG["pool_config"] = real_pc2
+        server.clear_cache()
+
+    wf_yaml = server._sync_wf_yaml("acctZ/cloud-rdp", "POOL_TOKEN_1")
+    check("T130 _sync_wf_yaml 含目标仓库与 PAT Secret 引用",
+          "TARGET: acctZ/cloud-rdp" in wf_yaml
+          and "GH_TOKEN: ${{ secrets.POOL_TOKEN_1 }}" in wf_yaml
+          and all(("S_%s: ${{ secrets.%s }}" % (s, s)) in wf_yaml for s in server._SYNC_SECRETS))
+    check("T131 _prov_summary 统计失败步",
+          "失败" in server._prov_summary({"steps": [{"step": "fork", "ok": False}]})
+          and "成功" in server._prov_summary({"steps": [{"step": "fork", "ok": True}]}))
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

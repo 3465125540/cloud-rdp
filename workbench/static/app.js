@@ -581,32 +581,107 @@ function bind() {
     var repo = ($("#acc-repo").value || "").trim();
     var secret = ($("#acc-secret").value || "").trim();
     var id = ($("#acc-id").value || "").trim();
+    var pat = ($("#acc-pat").value || "").trim();
     var enabled = $("#acc-enabled").checked;
+    var autoDeploy = $("#acc-autodeploy").checked;
     var msg = $("#acc-add-msg");
     if (!owner || !repo || !secret) {
       msg.textContent = "owner / repo / Secret 名都要填";
       return;
     }
+    if (autoDeploy && !pat) {
+      msg.textContent = "勾了「自动部署」就必须填 PAT（或取消勾选，改为手动部署）";
+      return;
+    }
     var btn = $("#btn-add-submit");
     btn.disabled = true;
-    msg.textContent = "添加中…";
+    msg.textContent = autoDeploy ? "添加并开始自动部署…" : "添加中…";
     api("/api/accounts/add", {
       method: "POST",
-      body: JSON.stringify({ owner: owner, repo: repo, token_secret: secret, id: id, enabled: enabled })
+      body: JSON.stringify({ owner: owner, repo: repo, token_secret: secret, id: id,
+                             enabled: enabled, pat: pat, auto_deploy: autoDeploy })
     }).then(function (res) {
       toast("已添加账号 " + esc(owner) + "（" + esc(res.id) + "）", "ok");
       if (res.verify_note) toast(esc(res.verify_note), "warn", 8000);
-      if (res.hint) toast(esc(res.hint), "info", 12000);
       $("#form-add-account").reset();
       $("#acc-repo").value = "cloud-rdp";
       $("#acc-enabled").checked = true;
+      $("#acc-autodeploy").checked = true;
       msg.textContent = "";
       $("#form-add-account").hidden = true;
       load(true);
+      if (res.auto_deploy && res.job_id) {
+        startProvisionView(res.job_id, owner);
+      } else if (res.hint) {
+        toast(esc(res.hint), "info", 12000);
+      }
     }).catch(function (err) {
       msg.textContent = "失败：" + err.message;
     }).then(function () { btn.disabled = false; });
   });
+
+  // ---------------- 自动部署进度（轮询后台任务） ----------------
+  var PROV_TIMER = null, PROV_JOB = "";
+  var PROV_STEP_NAMES = {
+    config: "写入配置", verify_pat: "校验 PAT", save_pat: "留存 PAT",
+    hub_secret: "写 hub Secret", fork: "建 fork", actions: "开 Actions",
+    secrets_sync: "复制机器密钥", push_config: "推送配置", dispatch: "触发协调器",
+    error: "异常"
+  };
+  function provStepName(k) { return PROV_STEP_NAMES[k] || k; }
+
+  function renderProvision(job) {
+    $("#prov-panel").hidden = false;
+    var running = job.status === "running";
+    $("#prov-title").textContent = "部署进度 · " + job.owner;
+    $("#prov-status").textContent = running ? "进行中…"
+      : (job.status === "done" ? (job.summary || "完成") : ("失败 —— " + (job.summary || "")));
+    $("#prov-status").className = "muted";
+    var steps = job.steps || [];
+    var html = steps.map(function (s) {
+      var cls = s.ok ? "ok" : "bad";
+      var ico = s.ok ? "✓" : "✕";
+      var extra = s.note ? ' <span class="ps-note">（' + esc(s.note) + "）</span>" : "";
+      var ts = s.ts ? bjTime(s.ts) : "";
+      return '<li class="' + cls + '"><span class="ps-ico">' + ico + "</span>" +
+        '<span class="ps-name">' + esc(provStepName(s.step)) + "</span>" +
+        '<span class="ps-detail">' + esc(s.detail || "") + extra + "</span>" +
+        (ts ? '<span class="ps-ts">' + esc(ts) + "</span>" : "") + "</li>";
+    }).join("");
+    if (running) {
+      html += '<li class="run"><span class="ps-ico">⋯</span><span class="ps-name">处理中</span>' +
+        '<span class="ps-detail">正在执行下一步（复制密钥那步要等几分钟）…</span></li>';
+    }
+    $("#prov-steps").innerHTML = html;
+  }
+
+  function pollProvision(jobId) {
+    api("/api/accounts/provision?id=" + encodeURIComponent(jobId)).then(function (res) {
+      var job = res.job || {};
+      renderProvision(job);
+      if (job.status === "running") {
+        PROV_TIMER = setTimeout(function () { pollProvision(jobId); }, 2500);
+      } else {
+        PROV_TIMER = null;
+        if (job.status === "done") {
+          toast("自动部署完成：" + esc(job.summary || ""), "ok", 9000);
+        } else {
+          toast("自动部署有步骤失败：" + esc(job.summary || ""), "bad", 12000);
+        }
+        load(true);
+      }
+    }).catch(function (err) {
+      $("#prov-status").textContent = "读取进度失败：" + err.message;
+      PROV_TIMER = null;
+    });
+  }
+
+  function startProvisionView(jobId, owner) {
+    if (PROV_TIMER) { clearTimeout(PROV_TIMER); PROV_TIMER = null; }
+    PROV_JOB = jobId;
+    renderProvision({ owner: owner, status: "running", steps: [] });
+    pollProvision(jobId);
+  }
 
   // 账号启用/停用
   $("#tbl-accounts").addEventListener("change", function (e) {

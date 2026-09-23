@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.3"
+VERSION = "1.3.0"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1746,13 +1746,471 @@ def verify_repo_exists(owner, repo):
         return "unknown", "仓库校验未完成：%s: %s" % (type(e).__name__, e)
 
 
+# ================================================= 账号自动部署（provision，一键）
+# 目标：在「GitHub 账号管理」里新增账号后，自动把这个账号的仓库部署好、
+#       并接入账号池（协调器随后会自动补机 / 主挂备顶），让机器不间断。
+#
+# 三个绕不开的事实（决定了实现方式）：
+#   ① GitHub 的 Actions Secret **只能写、永远读不回** → 无法「复制」hub 的机器密钥。
+#      唯一可行办法：在 hub 里跑一个**临时 workflow**，它用 `${{ secrets.X }}` 取到值，
+#      再用目标账号的 PAT 执行 `gh secret set --repo <fork>` 写进 fork。
+#      （本仓库 .tmp-lint/sync-secrets.py 已验证过这条链路。）
+#   ② 因此部署新账号**必须**拿到该账号自己的 PAT：建 fork / 开 Actions / 写 Secret 都要它。
+#   ③ PAT 只落在本机 .tools/pool/<owner>.token，**绝不**进 pool-config.json、绝不进 git。
+#
+# 整个流程要跑几分钟（等临时 workflow），所以走**后台任务 + 轮询**，不阻塞 HTTP。
+
+_PROVISION_JOBS = {}
+_PROVISION_LOCK = threading.Lock()
+
+# 需要从 hub 复制到新 fork 的机器密钥（hub 里没有的会自动跳过）
+_SYNC_SECRETS = [
+    "TAILSCALE_AUTHKEY", "ALIST_139_AUTHORIZATION", "GH_RELAY_TOKEN", "GH_BILLING_TOKEN",
+    "MAIL_SMTP_HOST", "MAIL_SMTP_PORT", "MAIL_SECURITY", "MAIL_USER", "MAIL_PASS",
+    "MAIL_FROM", "MAIL_FROM_NAME", "MAIL_TO", "MAIL_CC",
+]
+
+
+class _ProvStop(Exception):
+    """provision 流程遇到「必须中止」的错误（后续步骤无意义）。"""
+
+
+def pool_token_dir():
+    """本机账号 PAT 存放目录（与 hub token 同级，都在 .tools/ 下，不进 git）。"""
+    return os.path.abspath(os.path.join(REPO_ROOT, "..", ".tools", "pool"))
+
+
+def save_account_token(owner, token):
+    d = pool_token_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    p = os.path.join(d, "%s.token" % owner)
+    with open(p, "w", encoding="utf-8", newline="\n") as f:
+        f.write(str(token).strip() + "\n")
+    try:
+        os.chmod(p, 0o600)
+    except Exception:
+        pass
+    return p
+
+
+def load_account_token(owner):
+    p = os.path.join(pool_token_dir(), "%s.token" % owner)
+    if os.path.isfile(p):
+        try:
+            return open(p, encoding="utf-8-sig").read().strip() or None
+        except Exception:
+            return None
+    return None
+
+
+def gh_api_as(token, path, method="GET", body=None, params=None, timeout=None):
+    """用「指定 token」（而非本机 hub token）调 GitHub API。"""
+    if OFFLINE:
+        return {}
+    url = "https://api.github.com" + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    headers = {"Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28",
+               "Authorization": "Bearer " + str(token)}
+    return http_json(url, method=method, headers=headers, body=body, timeout=timeout)
+
+
+def _http_err_body(e):
+    try:
+        return e.read().decode("utf-8", "replace")[:300]
+    except Exception:
+        return ""
+
+
+def gh_cli_path():
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if gh:
+        return gh
+    for cand in (os.path.join(REPO_ROOT, "..", ".tools", "bin", "gh.exe"),
+                 os.path.join(REPO_ROOT, ".tools", "bin", "gh.exe")):
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+    return None
+
+
+def gh_secret_set(repo, name, value, token=None):
+    """用本机 gh CLI 写仓库 Secret（值只能写不能读）。返回 (ok, detail)。"""
+    gh = gh_cli_path()
+    if not gh:
+        return False, "本机找不到 gh CLI，无法写 Secret（可手动到仓库 Settings→Secrets 添加）"
+    env = dict(os.environ)
+    tk = token or resolve_token()
+    if tk:
+        env["GH_TOKEN"] = tk
+    try:
+        out = subprocess.run([gh, "secret", "set", name, "--repo", repo, "--body", value],
+                             capture_output=True, timeout=90, env=env, creationflags=NO_WINDOW)
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+    if out.returncode == 0:
+        return True, "已写入 Secret %s" % name
+    msg = (out.stderr or out.stdout or b"").decode("utf-8", "replace").strip()
+    return False, (msg[:300] or "gh 返回非零（%s）" % out.returncode)
+
+
+def verify_token_owner(token):
+    """校验 PAT 有效并返回其登录名（无效则抛异常）。"""
+    d = gh_api_as(token, "/user", timeout=15)
+    return str((d or {}).get("login") or "")
+
+
+def ensure_fork(owner, repo, token):
+    """确保 owner/repo 存在；不存在则把 hub fork 到 owner 名下。
+    返回 (state, detail, note)：state ∈ {'exists','forked','error'}。"""
+    hub = CONFIG.get("repo") or ""
+    try:
+        gh_api_as(token, "/repos/%s/%s" % (owner, repo), timeout=20)
+        return "exists", "仓库已存在（跳过 fork）", ""
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return "error", "查询仓库失败：HTTP %s %s" % (e.code, _http_err_body(e)), ""
+    except Exception as e:
+        return "error", "查询仓库异常：%s: %s" % (type(e).__name__, e), ""
+
+    # 404 → 用该账号的 PAT 建 fork（fork 会落到 token 主人名下 = 新账号）
+    try:
+        gh_api_as(token, "/repos/%s/forks" % hub, method="POST", body={}, timeout=60)
+    except urllib.error.HTTPError as e:
+        return "error", "创建 fork 失败：HTTP %s %s" % (e.code, _http_err_body(e)), ""
+    except Exception as e:
+        return "error", "创建 fork 异常：%s: %s" % (type(e).__name__, e), ""
+
+    for _ in range(12):          # fork 是异步的，最多等 60s
+        time.sleep(5)
+        try:
+            gh_api_as(token, "/repos/%s/%s" % (owner, repo), timeout=20)
+            return "forked", "已从 %s fork 出 %s/%s" % (hub, owner, repo), ""
+        except Exception:
+            continue
+    return "forked", "已发起 fork，仓库仍在生成中", "fork 尚未就绪：可稍后在界面重跑一次部署"
+
+
+def enable_actions(owner, repo, token):
+    """在 fork 里开启 Actions（fork 默认是关的）+ 允许所有 action + 启用各 workflow。"""
+    notes = []
+    try:
+        gh_api_as(token, "/repos/%s/%s/actions/permissions" % (owner, repo), method="PUT",
+                  body={"enabled": True, "allowed_actions": "all"}, timeout=25)
+        notes.append("Actions 已启用")
+    except urllib.error.HTTPError as e:
+        return False, "开启 Actions 失败：HTTP %s %s" % (e.code, _http_err_body(e))
+    except Exception as e:
+        return False, "开启 Actions 异常：%s: %s" % (type(e).__name__, e)
+
+    for wf in sorted(set((CONFIG.get("workflows") or {}).values())):
+        try:
+            gh_api_as(token, "/repos/%s/%s/actions/workflows/%s/enable" % (owner, repo, wf),
+                      method="PUT", timeout=25)
+            notes.append("启用 %s" % wf)
+        except Exception:
+            notes.append("启用 %s 跳过（可能不存在）" % wf)
+    return True, "；".join(notes)
+
+
+def _sync_wf_yaml(target_full, secret_name):
+    """生成一次性「把 hub 密钥写进 fork」的临时 workflow。"""
+    lines = [
+        "name: _tmp sync secrets (auto, one-shot)",
+        "on:",
+        "  workflow_dispatch:",
+        "permissions: {}",
+        "jobs:",
+        "  sync:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - name: copy hub secrets to %s" % target_full,
+        "        env:",
+        "          GH_TOKEN: ${{ secrets.%s }}" % secret_name,
+        "          TARGET: %s" % target_full,
+    ]
+    for s in _SYNC_SECRETS:
+        lines.append("          S_%s: ${{ secrets.%s }}" % (s, s))
+    run = [
+        "set -euo pipefail",
+        "gh --version | head -1",
+        'set_one() { name="$1"; val="$2"; if [ -z "$val" ]; then echo "skip $name (empty)"; '
+        'return 0; fi; gh secret set "$name" --repo "$TARGET" --body "$val" >/dev/null '
+        '&& echo "set $name -> ok"; }',
+    ]
+    for s in _SYNC_SECRETS:
+        run.append('set_one %s "$S_%s"' % (s, s))
+    run.append('echo "--- target secret names ---"')
+    run.append('gh secret list --repo "$TARGET"')
+    lines.append("        run: |")
+    for r in run:
+        lines.append("          " + r)
+    return "\n".join(lines) + "\n"
+
+
+def sync_secrets_to_fork(owner, repo, secret_name):
+    """在 hub 跑临时 workflow，把 hub 的机器密钥写进 owner/repo（fork）。返回 (ok, detail)。"""
+    hub = CONFIG.get("repo") or ""
+    ref = CONFIG.get("ref") or "main"
+    path = ".github/workflows/_tmp-sync-secrets.yml"
+    yml = _sync_wf_yaml("%s/%s" % (owner, repo), secret_name)
+    content = base64.b64encode(yml.encode("utf-8")).decode()
+
+    # 1) 建/更新临时 workflow
+    sha = None
+    try:
+        d = gh_api("/repos/%s/contents/%s" % (hub, path), params={"ref": ref}, timeout=30)
+        sha = d.get("sha")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return False, "读取临时 workflow 失败：HTTP %s" % e.code
+    body = {"message": "chore(tmp): 一次性 Secret 同步（跑完自动删除）",
+            "content": content, "branch": ref}
+    if sha:
+        body["sha"] = sha
+    try:
+        gh_api("/repos/%s/contents/%s" % (hub, path), method="PUT", body=body, timeout=60)
+    except urllib.error.HTTPError as e:
+        return False, "创建临时 workflow 失败：HTTP %s %s" % (e.code, _http_err_body(e))
+
+    # 2) 派发（文件刚建，稍等 + 重试）
+    dispatched = False
+    for _ in range(10):
+        time.sleep(4)
+        try:
+            gh_api("/repos/%s/actions/workflows/%s/dispatches" % (hub, "_tmp-sync-secrets.yml"),
+                   method="POST", body={"ref": ref}, timeout=30)
+            dispatched = True
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 422):
+                continue
+            return False, "派发临时 workflow 失败：HTTP %s" % e.code
+        except Exception:
+            continue
+    if not dispatched:
+        return False, "派发临时 workflow 失败（重试 10 次仍未成功）"
+
+    # 3) 等 run 完成（最多 ~3 分钟）
+    ok, detail = False, "临时 workflow 未在 3 分钟内完成（可稍后在 Actions 里查看）"
+    for _ in range(36):
+        time.sleep(5)
+        try:
+            d = gh_api("/repos/%s/actions/workflows/%s/runs" % (hub, "_tmp-sync-secrets.yml"),
+                       params={"per_page": 1}, timeout=20)
+        except Exception:
+            continue
+        runs = (d or {}).get("workflow_runs") or []
+        if not runs:
+            continue
+        r0 = runs[0]
+        if r0.get("status") == "completed":
+            cc = r0.get("conclusion")
+            ok = (cc == "success")
+            detail = "机器密钥同步 %s（run #%s）" % (
+                "成功" if ok else "失败：%s" % cc, r0.get("run_number") or r0.get("id"))
+            break
+
+    # 4) 删除临时 workflow（无论成败，避免留在仓库里）
+    try:
+        d = gh_api("/repos/%s/contents/%s" % (hub, path), params={"ref": ref}, timeout=30)
+        gh_api("/repos/%s/contents/%s" % (hub, path), method="DELETE", timeout=30,
+               body={"message": "chore(tmp): 删除一次性 Secret 同步 workflow",
+                     "sha": d.get("sha"), "branch": ref})
+    except Exception:
+        pass
+    return ok, detail
+
+
+def push_pool_config_to_hub(local_cfg):
+    """把账号清单合并进 hub 仓库的 pool-config.json 并提交（协调器读的是 hub 上的这份）。
+    返回 (ok, detail)。"""
+    hub = CONFIG.get("repo") or ""
+    rel = CONFIG.get("pool_config") or "scripts/pool-config.json"
+    ref = CONFIG.get("ref") or "main"
+    sha, hub_cfg = None, {}
+    try:
+        d = gh_api("/repos/%s/contents/%s" % (hub, rel), params={"ref": ref}, timeout=30)
+        sha = d.get("sha")
+        try:
+            hub_cfg = json.loads(base64.b64decode(d.get("content") or "").decode("utf-8"))
+        except Exception:
+            hub_cfg = {}
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return False, "读取 hub 配置失败：HTTP %s" % e.code
+    except Exception as e:
+        return False, "读取 hub 配置异常：%s: %s" % (type(e).__name__, e)
+
+    # 合并：非 accounts 字段以本地为准；accounts 以 owner 为键并集（本地覆盖 hub）
+    merged = dict(hub_cfg or {})
+    for k, v in (local_cfg or {}).items():
+        if k != "accounts":
+            merged[k] = v
+    by_owner = {}
+    for a in (hub_cfg.get("accounts") or []) + (local_cfg.get("accounts") or []):
+        if not isinstance(a, dict):
+            continue
+        o = str(a.get("owner") or "").lower()
+        if o:
+            by_owner[o] = a
+    merged["accounts"] = list(by_owner.values())
+
+    text = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
+    body = {"message": "chore(pool): 新增/更新账号（工作台自动部署）",
+            "content": base64.b64encode(text.encode("utf-8")).decode(), "branch": ref}
+    if sha:
+        body["sha"] = sha
+    try:
+        gh_api("/repos/%s/contents/%s" % (hub, rel), method="PUT", body=body, timeout=60)
+    except urllib.error.HTTPError as e:
+        return False, "提交 hub 配置失败：HTTP %s %s" % (e.code, _http_err_body(e))
+    except Exception as e:
+        return False, "提交 hub 配置异常：%s: %s" % (type(e).__name__, e)
+    try:
+        save_pool_config(merged)     # 本地同步成合并后的版本，避免两边漂移
+    except Exception:
+        pass
+    return True, "已提交到 %s@%s" % (hub, ref)
+
+
+def _prov_add(job, step, ok, detail="", note=""):
+    job["steps"].append({"step": step, "ok": bool(ok), "detail": detail,
+                         "note": note, "ts": now_iso()})
+
+
+def _prov_run(job, owner, repo, secret_name, pat):
+    """后台跑完整套远程部署步骤，逐步把结果追加到 job['steps']。"""
+    hub = CONFIG.get("repo") or ""
+    try:
+        # 1) 校验 PAT 与 owner 是否匹配
+        try:
+            login = verify_token_owner(pat)
+        except Exception as e:
+            _prov_add(job, "verify_pat", False, "PAT 校验失败：%s: %s" % (type(e).__name__, e))
+            raise _ProvStop()
+        if not login:
+            _prov_add(job, "verify_pat", False, "PAT 无效（/user 无返回）")
+            raise _ProvStop()
+        if login.lower() != owner.lower():
+            _prov_add(job, "verify_pat", False,
+                      "PAT 属于 %s，与 owner %s 不一致 —— 请填该账号自己的 PAT" % (login, owner))
+            raise _ProvStop()
+        _prov_add(job, "verify_pat", True, "PAT 有效：%s" % login)
+
+        # 2) PAT 本地留存
+        try:
+            p = save_account_token(owner, pat)
+            _prov_add(job, "save_pat", True, "PAT 已存本机（不进 git）：%s" % p)
+        except Exception as e:
+            _prov_add(job, "save_pat", False, "PAT 本地留存失败：%s" % e)
+
+        # 3) 写 hub Secret（协调器要用它派发该账号）
+        ok, detail = gh_secret_set(hub, secret_name, pat)
+        _prov_add(job, "hub_secret", ok, detail)
+        if not ok:
+            raise _ProvStop()
+
+        # 4) 确保 fork 存在
+        try:
+            state, detail, note = ensure_fork(owner, repo, pat)
+            _prov_add(job, "fork", state != "error", detail, note)
+            if state == "error":
+                raise _ProvStop()
+        except _ProvStop:
+            raise
+        except Exception as e:
+            _prov_add(job, "fork", False, "建 fork 异常：%s: %s" % (type(e).__name__, e))
+            raise _ProvStop()
+
+        # 5) 开 Actions + 启用 workflow
+        try:
+            ok, detail = enable_actions(owner, repo, pat)
+            _prov_add(job, "actions", ok, detail)
+        except Exception as e:
+            _prov_add(job, "actions", False, "%s: %s" % (type(e).__name__, e))
+
+        # 6) 把 hub 机器密钥复制进 fork（临时 workflow）
+        try:
+            ok, detail = sync_secrets_to_fork(owner, repo, secret_name)
+            _prov_add(job, "secrets_sync", ok, detail)
+        except Exception as e:
+            _prov_add(job, "secrets_sync", False, "%s: %s" % (type(e).__name__, e))
+
+        # 7) 把 pool-config.json 推到 hub（协调器据此派发）
+        pc = load_pool_config()
+        if not pc["ok"]:
+            _prov_add(job, "push_config", False, pc["error"])
+            raise _ProvStop()
+        ok, detail = push_pool_config_to_hub(pc["config"])
+        _prov_add(job, "push_config", ok, detail)
+
+        # 8) 触发协调器（随后它会自动补机 / 主挂备顶）
+        res = dispatch_workflow("coordinator", {"dry_run": "false"})
+        _prov_add(job, "dispatch", res.get("ok", False),
+                  "已触发协调器巡检" if res.get("ok") else ("触发失败：%s" % res.get("error")))
+        clear_cache()
+        job["status"] = "done"
+    except _ProvStop:
+        job["status"] = "failed"
+    except Exception as e:
+        _prov_add(job, "error", False, "%s: %s" % (type(e).__name__, e))
+        job["status"] = "failed"
+    finally:
+        job["finished_at"] = now_iso()
+        if job["status"] == "running":
+            job["status"] = "done"
+        job["summary"] = _prov_summary(job)
+
+
+def _prov_summary(job):
+    steps = job.get("steps") or []
+    bad = [s for s in steps if not s.get("ok")]
+    if bad:
+        return "有 %d 步失败：%s" % (len(bad), "、".join(s["step"] for s in bad))
+    return "全部 %d 步成功，账号已入池" % len(steps)
+
+
+def start_provision(owner, repo, secret_name, pat, config_step=None):
+    """起一个后台部署任务，返回 job 字典（可立即返回给前端轮询）。"""
+    job_id = "prov-%d-%s" % (int(time.time() * 1000), owner)
+    job = {"id": job_id, "owner": owner, "repo": repo, "status": "running",
+           "steps": [], "started_at": now_iso(), "finished_at": "", "summary": ""}
+    if config_step:
+        job["steps"].append(config_step)
+    with _PROVISION_LOCK:
+        _PROVISION_JOBS[job_id] = job
+    threading.Thread(target=_prov_run, args=(job, owner, repo, secret_name, pat),
+                     daemon=True).start()
+    return job
+
+
+def api_accounts_provision_status(h, params):
+    jid = (params.get("id") or [""])[0]
+    with _PROVISION_LOCK:
+        job = _PROVISION_JOBS.get(jid)
+    if not job:
+        return h._json(404, {"ok": False, "error": "找不到部署任务 %s" % jid})
+    snap = dict(job)
+    snap["steps"] = list(job.get("steps") or [])
+    h._json(200, {"ok": True, "job": snap})
+
+
 def api_accounts_add(h, params):
-    """新增账号：写回 pool-config.json（原子写）。PAT 绝不进本文件。"""
+    """新增账号：写回 pool-config.json（原子写）。PAT 绝不进本文件。
+    若带上 pat + auto_deploy，则顺带在后台「自动部署仓库 + 接入账号池」。"""
     body = h._read_body()
     owner = str(body.get("owner") or "").strip()
     repo = str(body.get("repo") or "cloud-rdp").strip()
     secret = str(body.get("token_secret") or "").strip()
     acc_id = str(body.get("id") or "").strip()
+    pat = str(body.get("pat") or "").strip()
+    auto_deploy = body.get("auto_deploy")
+    if auto_deploy is None:
+        auto_deploy = bool(pat)          # 默认：填了 PAT 就自动部署
     enabled = body.get("enabled")
     if enabled is None:
         enabled = True
@@ -1792,10 +2250,13 @@ def api_accounts_add(h, params):
             if str(a.get("id") or "") == acc_id:
                 return h._json(409, {"ok": False, "error": "id %s 已存在" % acc_id})
 
-    # 仓库校验：明确 404 才拦；离线/网络异常放行（只提示），避免误伤
+    # 仓库校验：明确 404 才拦；但若开了「自动部署」，404 正是要 fork 的场景 → 放行
     v_state, v_note = verify_repo_exists(owner, repo)
     if v_state == "missing":
-        return h._json(400, {"ok": False, "error": v_note})
+        if auto_deploy and pat:
+            v_note = "仓库尚不存在 —— 自动部署会从 hub fork 出来"
+        else:
+            return h._json(400, {"ok": False, "error": v_note})
 
     if not acc_id:
         existing = set(str(a.get("id") or "") for a in accs)
@@ -1813,12 +2274,23 @@ def api_accounts_add(h, params):
         return h._json(500, {"ok": False, "error": "写回失败：%s" % e})
     clear_cache()
 
-    hint = ("PAT 不会写进本文件。请到 GitHub 仓库 Secrets 配置其一："
-            "① 推荐 —— Secret 名 POOL_TOKENS，值是 JSON，加一项 \"%s\": \"ghp_...\"；"
-            "② 或建名为 %s 的 Secret，值就是该账号的 PAT。" % (owner, secret))
-    return h._json(200, {"ok": True, "id": acc_id, "account": entry,
-                         "path": pc["path"], "verified": v_state,
-                         "verify_note": v_note, "hint": hint})
+    resp = {"ok": True, "id": acc_id, "account": entry, "path": pc["path"],
+            "verified": v_state, "verify_note": v_note, "auto_deploy": False}
+
+    if auto_deploy and pat:
+        cfg_step = {"step": "config", "ok": True, "ts": now_iso(), "note": "",
+                    "detail": "已写入 %s（id=%s）" % (os.path.basename(pc["path"]), acc_id)}
+        job = start_provision(owner, repo, secret, pat, config_step=cfg_step)
+        resp["auto_deploy"] = True
+        resp["job_id"] = job["id"]
+        resp["steps"] = list(job["steps"])
+        resp["hint"] = ("已开始自动部署：建 fork → 开 Actions → 复制机器密钥 → "
+                        "写 hub Secret → 推送配置 → 触发协调器。可在下方查看进度。")
+    else:
+        resp["hint"] = ("PAT 不会写进本文件。请到 GitHub 仓库 Secrets 配置其一："
+                        "① 推荐 —— Secret 名 POOL_TOKENS，值是 JSON，加一项 \"%s\": \"ghp_...\"；"
+                        "② 或建名为 %s 的 Secret，值就是该账号的 PAT。" % (owner, secret))
+    return h._json(200, resp)
 
 
 def api_machines(h, params):
@@ -1910,6 +2382,7 @@ ROUTES = {
     ("GET", "/api/accounts"): api_accounts,
     ("POST", "/api/accounts/toggle"): api_accounts_toggle,
     ("POST", "/api/accounts/add"): api_accounts_add,
+    ("GET", "/api/accounts/provision"): api_accounts_provision_status,
     ("GET", "/api/machines"): api_machines,
     ("GET", "/api/runs"): api_runs,
     ("GET", "/api/pool-state"): api_pool_state,
