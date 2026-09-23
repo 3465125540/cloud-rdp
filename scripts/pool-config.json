@@ -1,14 +1,12 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-
   "_README": [
     "账号池配置（无任何密钥！）。真实 PAT 只放 GitHub Secret，绝不写进本文件。",
     "每个账号 = 一个 fork（或独立仓库）的 cloud-rdp，用 token_secret 指向的 Secret 里的 PAT 去查询/触发。",
     "把 owner 换成真实 GitHub 登录名、token_secret 换成你在 Secret 里建的变量名即可。",
     "token_secret 对应的 PAT 需要 repo + workflow 权限（能读 actions runs、能 workflow_dispatch）。"
   ],
-
   "hub": {
     "owner": "3465125540",
     "repo": "cloud-rdp",
@@ -17,21 +15,17 @@
     "state_branch": "pool-state",
     "state_path": "state/pool-state.json"
   },
-
   "target_machines": 2,
-
   "machine": {
     "lifetime_minutes": 330,
     "rotate_lead_minutes": 45,
     "keepalive_minutes": 330,
     "boot_ready_minutes": 6
   },
-
   "standby": {
     "role_poll_minutes": 5,
     "repull_minutes": 10
   },
-
   "accounts": [
     {
       "id": "acc-1",
@@ -52,6 +46,13 @@
       "owner": "3465125540",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_3",
+      "enabled": true
+    },
+    {
+      "id": "acc-4",
+      "owner": "code1969sda",
+      "repo": "cloud-rdp",
+      "token_secret": "POOL_TOKEN_4",
       "enabled": true
     }
   ]
