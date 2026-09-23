@@ -185,8 +185,8 @@
 
 | 类别 | 内容 |
 |------|------|
-| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、**公共桌面 `C:\Users\Public\Desktop`**、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig`、**`.workbuddy-ai`** 等 |
-| Edge 浏览器 | `%LOCALAPPDATA%\Microsoft\Edge\User Data`（历史 / 书签 / 偏好 / `Web Data` / 图标，以及 cookie、密码；**缓存类目录已排除**，见 ⑨） |
+| 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、**公共桌面 `C:\Users\Public\Desktop`**、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig`、**WorkBuddy 全套**（`.workbuddy` = 用户数据/缓存/二进制、`.workbuddy-ai` = 旧路径（兼容老快照）、`AppData\Local\Programs\WorkBuddy` = 安装目录、`AppData\Local\WorkBuddy`、`AppData\Roaming\WorkBuddy`）等 |
+| Edge 浏览器 | `%LOCALAPPDATA%\Microsoft\Edge\User Data`（**浏览记录 `History` / 书签 `Bookmarks` / 全部设置 `Preferences`（含下载位置）/ `Web Data` / `Login Data` 本地已存密码 / `Local State` / cookie / 图标**；缓存类目录已排除，见 ⑨） |
 | 程序关联数据 | 按程序名/发布商匹配的 `%APPDATA%`、`%LOCALAPPDATA%`、`%LOCALAPPDATA%\Programs`、`%PROGRAMDATA%` 一级子目录（见 ⑨） |
 | 注册表 | RDP 用户的 **HKCU** 子键（`Software`、`Control Panel\Desktop/Colors/International/Mouse/Keyboard`、`Environment`、`Console`、`Explorer\Advanced`）+ 机器级 `TimeZoneInformation`、`Session Manager\Environment`、`Nls\Language/Locale` |
 | 软件清单 | `winget export` + 注册表 Uninstall 扫描（**清单**，不是二进制） |
@@ -271,6 +271,11 @@
 - 日志 `D:\cloudrdp-sys\_snapshot\_logs\apps-reinstall.log`；进度 `D:\cloudrdp-sys\_snapshot\_logs\apps-status.json`
 - 临时关闭：`Run workflow` 时把 `install_apps` 填 `false`，或改 `restore.installApps`
 - 限量试跑：`restore.maxPackages`（0 = 不限）
+- **收尾还会做「用户数据完整性」校验 + 补漏**（`scripts/userdata-lib.ps1`，与第 8 步同源、口径唯一）：
+  - 逐目标核对 **Edge**（`History` 浏览记录 / `Login Data` 本地已存密码 / `Preferences` 全部设置含下载位置 / `Bookmarks` / `Web Data` / `Local State`）与 **WorkBuddy**（`.workbuddy` 用户数据+缓存、`.workbuddy-ai` 旧路径、安装目录、`AppData\Local\WorkBuddy`、`AppData\Roaming\WorkBuddy`）
+  - 缺什么补什么：robocopy **只补不删**（不动你在机器上新增的文件）、幂等；补漏前先关闭占用程序，保证 SQLite(WAL)/LevelDB 一致
+  - 结论写 `apps-status.json` 的 `userData` 字段，并透出 `USERDATA_RESTORE` / `USERDATA_RESTORE_DETAIL` / `EDGE_RESTORE` / `WBAI_RESTORE`（第 13 步 ENV READY 会打印）
+  - 目标清单在 `snapshot-config.json` 的 `restore.userDataTargets`；`restore.userData: false` 整体关闭；只重装不校验用 `-SkipUserData`
 
 #### ⑥ 139 侧路径与迁移
 
@@ -711,7 +716,8 @@ cloud-rdp/
     ├── rdpuser-migrate.ps1             # 【新】用户名变更迁移：快照目录名 + manifest 字面路径 + .reg 内容（幂等、可反向）
     ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
-    ├── reinstall-apps.ps1              # winget 后台逐包重装（日志 + 进度 JSON）
+    ├── reinstall-apps.ps1              # 第 10 步：winget 后台逐包重装 + Edge/WorkBuddy 用户数据校验补漏
+    ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
     ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
     ├── pool-coordinator.ps1            # 【新】hub 协调器：补机 + 轮换 + 发布权威角色
@@ -736,10 +742,10 @@ cloud-rdp/
 | **7** | **从 139 拉取数据** | `sync-down.ps1`（实测 ≈19 分钟；139 约 0.45 MB/s） |
 | **8** | **预还原** | `pre-restore.ps1 -Pull`（拉取 → **用户名变更迁移** → 记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
 | **8b** | **补写用户语言键** | `setup-chinese.ps1 -UserHiveOnly`：第 8 步会导入 `registry\user\HKCU-Software.reg`，把 0f 写的语言键覆盖掉 —— 这里再补一次（幂等、秒级） |
-| **10** | **后台重装软件** | `reinstall-apps.ps1 -Background`（异步，不阻塞） |
+| **10** | **后台重装软件 + 恢复 Edge/WorkBuddy 用户数据** | `reinstall-apps.ps1 -Background`（异步，不阻塞）：winget 逐包重装 → 再对 Edge（浏览记录 / 已存密码 / 全部设置含下载位置）与 WorkBuddy（用户数据 / 缓存 / 安装目录）做完整性校验 + 缺失补漏 |
 | **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
-| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 .workbuddy-ai 取证** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
+| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 WorkBuddy 用户数据取证（`USERDATA_RESTORE`）** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
 | 14 | 保活 | **主/单机**：每 10 分钟同步数据、每 60 分钟快照并推送；**备机**：每 10 分钟**重拉**、每 60 分钟只做本地快照（不写 139），每 5 分钟核对权威角色、主下线即自升为主。每 30 分钟 C 盘守卫。时长收敛到 `360 − 已用 − 8(余量)`。**最后 15 分钟在后台启动收尾**，主循环继续跑 → 远程连接全程不中断 |
 | 15 | 等待后台收尾 | `if: always()`：等 finalize 后台作业完成（最多 4 分钟）；未启动才前台补跑。收尾 = C 盘清理 + 全量同步 + 整机快照（**备机**跳过同步/推送，只做本地快照） |
 
@@ -805,15 +811,16 @@ cloud-rdp/
 | 死链指向的是**别人家的用户名**（如 `C:\Users\aigc\...`） | 快照里的 `.lnk` 把当时的用户名烤死在二进制里，换账号后必然失效 | **已修**：`Repair-Shortcuts` 会先把任意 `C:\Users\<别人>\` 改写成当前用户目录；再不行就按文件名去数据目录/便携程序根兜底定位（如 `D:\a\cloud-rdp\GameViewer\GameViewer.exe`） |
 | 桌面多出 `_失效快捷方式` 文件夹 | 校验发现死链、且无法唯一定位到已还原的程序 | 正常（非破坏保留）。装回程序后把图标拖回桌面即可；该文件夹不会被再次备份 |
 | 快捷方式补抓把大目录也抓了 | 该 `.lnk` 指向一个大目录（如某游戏） | 调小 `shortcuts.captureMaxMBPerTarget` / `captureMaxTotalMB`（超限会记名告警，不静默） |
-| 不想让 `.workbuddy-ai` 被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy-ai` 那行（改完提交即可） |
+| 不想让 WorkBuddy 数据被上传 | 它含对话记录 / 运行缓存，属敏感内容 | 从 `files.dirs` 删掉 `%RDPUSERPROFILE%\.workbuddy`（当前真实路径）、`.workbuddy-ai`、`AppData\Local\Programs\WorkBuddy`、`AppData\Local\WorkBuddy`、`AppData\Roaming\WorkBuddy` 那几行（改完提交即可） |
 | 刚开机连进去发现桌面是空的 / 数据没同步完 | 你连得太早 —— `0d` 打印连接信息时，后台的数据同步与还原还没跑完 | 正常。等日志出现 `ENV READY`（第 13 步）再登录；或看公共桌面 `_CloudRDP_SETTING_UP.txt` → `_CloudRDP_READY.txt` |
 | 早连后中文输入法打不出中文 | `0f. 设置中文` 的语言包还在后台装（30~43 分钟），或已登录时旧逻辑会因 `reg load` 失败而整段跳过 | **已修**：检测到已登录就直接写 `HKU\<SID>`（不 load/unload）；语言包 **5 分钟封顶转后台**，看 `LANGPACK=TIMEOUT_BACKGROUND` 即知。装完 `Win+Space` 切换或注销重登一次 |
 | 公共桌面出现 `_CloudRDP_SETTING_UP.txt` / `_CloudRDP_READY.txt` | 提示初始化进度的标记文件（人在 RDP 里看不到 Actions 日志） | 正常，可随时删。已加进 `files.excludeFilePatterns`，不会被快照备份/还原 |
 | 早连后程序图标还是死链 | 快捷方式校验（`8. 预还原` 里的 4e 段）跑完之后才修好 | 等 `ENV READY`；或手动跑 `D:\cloudrdp-sys\_snapshot\_tools\restore-snapshot.ps1 -Scope user` |
 | **桌面只恢复了图标、点开报「找不到目标」**（用户级安装的程序） | **根因**：备份/基线扫描跑在 `runneradmin` 身份下，`HKCU:` 是它的 hive，**看不到用户 a 的卸载项** → 「程序体在 `%LOCALAPPDATA%\<厂商>`、卸载项在用户 HKCU」这一整类程序从没被备份 | **已修**：备份与基线两侧都用 `Get-InstalledProgramsIncludingUser`（自动挂载/读用户 hive，SID 归一化为 `HKU\__RDPUSER__`）。同时 **`programs` 现在先于 `files` 推送** —— 以前 `files` 吃掉 `--max-duration`，`programs/` 永远传不上去 |
 | 卸载了程序但「应用和功能」里还在（如 Unity Hub） | 卸载器只删文件、没删自己的 ARP 卸载键（Unity Hub 的卸载器叫 `Uninstall Unity Hub.exe`，旧正则没给它补 `/S` → 挂起到超时） | **已修**：放宽静默参数匹配 + 新增 `④ 残留清理`（删残留 ARP 键 + 残留空壳目录），透出 `SLIM_ARP_CLEANED` / `SLIM_DIRS_LEFTOVER` |
-| Edge 历史记录缺一段 / 快照报 `robocopy=9` | 抓取时 Edge 在运行，SQLite(WAL) 被持有；`LOCK`/`LOG` 这类 LevelDB 运行时文件也被独占 | **已修**：`excludeFilePatterns` 排除 `LOCK/LOG/LOG.old`（无还原价值）；**全量快照前自动关闭 Edge / WorkBuddy**（`files.quiesce`，快速快照不动）；还原时 robocopy 失败会用**共享读写**补写（`lockcopy-lib.ps1`）；还原后透出 `EDGE_RESTORE` |
-| `.workbuddy-ai` 里的 `cache` / `Temp` 没被备份 | `excludeDirNames` 按目录名全局排除，把用户数据目录里的缓存也滤掉了 | **已修**：`files.noExcludeDirs` 豁免清单（`%RDPUSERPROFILE%\.workbuddy-ai`）—— 该目录只禁用「目录名排除」，仍应用文件级排除 |
+| Edge 历史记录缺一段 / 快照报 `robocopy=9` | 抓取时 Edge 在运行，SQLite(WAL) 被持有；`LOCK`/`LOG` 这类 LevelDB 运行时文件也被独占 | **已修**：`excludeFilePatterns` 排除 `LOCK/LOG/LOG.old`（无还原价值）；**全量快照前自动关闭 Edge / WorkBuddy**（`files.quiesce`，快速快照不动）；还原时 robocopy 失败会用**共享读写**补写（`lockcopy-lib.ps1`）；还原后透出 `EDGE_RESTORE` / `USERDATA_RESTORE` |
+| WorkBuddy 里的 `Cache` / `GPUCache` / `Temp` 没被备份 | `excludeDirNames` 按目录名全局排除，把用户数据目录里的缓存也滤掉了（Electron 缓存含登录态 / 离线数据，丢了等于重装） | **已修**：`files.noExcludeDirs` 豁免清单（`.workbuddy` / `.workbuddy-ai` / `AppData\Local\Programs\WorkBuddy` / `AppData\Local\WorkBuddy` / `AppData\Roaming\WorkBuddy` 共 5 个）—— 这些目录只禁用「目录名排除」，仍应用文件级排除 |
+| **WorkBuddy 打开像全新安装（登录态 / 设置 / 历史全没）** | **根因**：快照清单里 WorkBuddy 只写了 `.workbuddy-ai`（旧路径，新版机器上根本不存在）→ **静默零还原**；安装目录与 `AppData\Local(Roaming)\WorkBuddy` 也从没被备份 | **已修**：清单补齐 5 处（见第四节「抓什么」）+ 第 10 步收尾用 `userdata-lib.ps1` 做**校验 + 补漏**（只补不删），结论透出 `USERDATA_RESTORE` / `WBAI_RESTORE` |
 | 邮件没收到 | 0e 步带 `continue-on-error`，失败被静默吞掉 | 看 `D:\cloudrdp-sys\_state\mail.log`（逐步 SMTP 对话 + 失败阶段 + 常见错因提示）与 `MAIL_RESULT`。最常见：139/QQ 邮箱未开启「客户端授权码」、或端口被屏蔽（试 465/587） |
 
 ---
@@ -822,7 +829,7 @@ cloud-rdp/
 
 - **非官方用途**：用 GitHub Actions 跑个人云桌面不符合其服务条款，长期使用可能被限流/封号。本仓库默认**私有**以降低暴露面，但**无法保证账号安全**。
 - **不要存重要/隐私数据**：数据经 AList 非官方桥接写入 139 云盘，链路不保证稳定与安全。
-- **快照含敏感文件**：`.ssh`、`.aws`、`.config`、`.vscode`、**`.workbuddy-ai`（对话记录 / 缓存）** 等会被同步到 139 云盘。
+- **快照含敏感文件**：`.ssh`、`.aws`、`.config`、`.vscode`、**`.workbuddy` / `.workbuddy-ai`（对话记录 / 缓存）** 等会被同步到 139 云盘。
   若不愿外传，请在 `scripts/snapshot-config.json` 的 `files.dirs` 里删掉对应条目（改完提交即可）。
 - **可移动程序会被复制一份**：默认 `copy` 会在数据目录里留副本（占额外磁盘），
   体积上限见 `portable.maxMBPerApp` / `portable.maxTotalMB`；不想用就设 `portable.enabled=false`。
@@ -833,7 +840,7 @@ cloud-rdp/
 - **额度有限**：私有仓库约 5~6 次满时长会话/月，用完即停（Actions 会**静默停摆、不报错**）。
 - **机器是一次性的**：Job 结束即销毁。已纳入快照的内容（见第四节）可自动还原，其余会丢失。
 - **防火墙已关闭**（本项目要求）：机器无公网 IP、只走 Tailscale 内网，但内网可达面变大，请自行评估。
-- **Edge cookie / 密码等敏感凭证会被上传到 139**：如不接受，把 `files.dirs` 里 Edge 那条删掉即可。
+- **Edge cookie / 密码（`Login Data`）等敏感凭证会被上传到 139**：如不接受，把 `files.dirs` 里 Edge 那条删掉即可（代价：浏览记录 / 书签 / 已存密码都不再还原）。
 
 > 如果需要**稳定可靠、数据持久、可定时开关机**的云主机，请直接购买低价 VPS（约 $5–15/月），比本方案靠谱得多。
 

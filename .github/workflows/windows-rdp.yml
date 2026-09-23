@@ -371,7 +371,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: .\scripts\setup-chinese.ps1 -UserHiveOnly
-      - name: 10. 后台重装软件（异步，不阻塞连接）
+      - name: 10. 后台重装软件 + 恢复 Edge/WorkBuddy 用户数据（异步，不阻塞连接）
         shell: pwsh
         run: .\scripts\reinstall-apps.ps1 -Background
       - name: 11. C 盘守卫：清理超限增量 + 报告
@@ -533,6 +533,22 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($ap)) {
             Write-Host "  软件重装     : $ap" -ForegroundColor DarkGray
             Write-Host "                 日志: C:\_snapshot\_logs\apps-reinstall.log" -ForegroundColor DarkGray
+          }
+          $ud = $env:USERDATA_RESTORE
+          if (-not [string]::IsNullOrWhiteSpace($ud)) {
+            $udc = "DarkGray"
+            if ($ud -eq "OK") { $udc = "Green" } elseif ($ud -eq "PARTIAL") { $udc = "Yellow" } elseif ($ud -eq "MISSING") { $udc = "Red" }
+            $udTxt = switch ($ud) {
+              "OK"      { "已完整恢复" }
+              "PARTIAL" { "部分恢复（有目标缺失，见详情）" }
+              "MISSING" { "未恢复（请检查快照是否包含用户数据）" }
+              default   { $ud }
+            }
+            Write-Host "  用户数据     : $ud  $udTxt" -ForegroundColor $udc
+            if (-not [string]::IsNullOrWhiteSpace($env:USERDATA_RESTORE_DETAIL)) {
+              Write-Host "                 $($env:USERDATA_RESTORE_DETAIL)" -ForegroundColor DarkGray
+            }
+            Write-Host "                 Edge=$($env:EDGE_RESTORE)  WorkBuddy=$($env:WBAI_RESTORE)   (浏览记录/已存密码/下载位置/用户数据/缓存/安装目录)" -ForegroundColor DarkGray
           }
           $qp = $env:QUOTA_LEFT_PCT
           if (-not [string]::IsNullOrWhiteSpace($qp)) {

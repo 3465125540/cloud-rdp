@@ -6,6 +6,7 @@
   "files": {
     "_comment": "要镜像备份的目录（绝对路径或含占位符）。按绝对路径镜像到 snapshot/files/<盘符>/<路径>",
     "_comment_data": "注意：C:\\data 由 sync-up/sync-down 独立高频同步（每 10 分钟），此处刻意不重复抓取，避免双倍带宽。",
+    "_comment_workbuddy": "WorkBuddy 三处都要抓：① %RDPUSERPROFILE%\\.workbuddy = 真实用户数据/缓存/二进制（新版本路径，实测 4.4GB）；② .workbuddy-ai = 旧版本路径（保留兼容老快照，不存在则自动跳过）；③ AppData\\Local\\Programs\\WorkBuddy 等 = 程序安装目录与运行数据。缺任一处 → 还原后 WorkBuddy 等于全新安装。",
     "_comment_runner": "警告：不要把 C:\\tools 加进来 —— 那是 GitHub runner 镜像自带的工具目录（Apache24 / nginx-* 等，实测 240MB / 1087 文件），不是用户数据。备份它纯浪费带宽，还原时还会用旧版覆盖 runner 自带版本。",
     "dirs": [
       "C:\\scripts",
@@ -28,7 +29,11 @@
       "%RDPUSERPROFILE%\\.wslconfig",
       "%RDPUSERPROFILE%\\.npmrc",
       "%RDPUSERPROFILE%\\.condarc",
-      "%RDPUSERPROFILE%\\.workbuddy-ai"
+      "%RDPUSERPROFILE%\\.workbuddy",
+      "%RDPUSERPROFILE%\\.workbuddy-ai",
+      "%RDPUSERPROFILE%\\AppData\\Local\\Programs\\WorkBuddy",
+      "%RDPUSERPROFILE%\\AppData\\Local\\WorkBuddy",
+      "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy"
     ],
     "_comment_excludeDirs": "按目录名排除（任意层级匹配），避免把缓存/依赖/仓库元数据拖进来",
     "excludeDirNames": [
@@ -75,6 +80,9 @@
       "LOG",
       "LOG.old"
     ],
+    "_comment_excludePaths": "按「绝对路径前缀」整目录排除（先展开占位符，再做不区分大小写前缀匹配）。比 excludeDirNames 更精准：excludeDirNames 全局按目录名匹配、会误伤同名目录；这里只排除你点名的那个路径。默认空 = 完整抓取，什么都不额外排除。",
+    "_comment_excludePaths_example": "例：.workbuddy 实测 4.4GB，其中 logs(713MB)/traces(633MB) 是纯运行日志、还原零价值；若嫌推送慢（139 实测约 0.45MB/s），把这两项加进来可省约 1.35GB / 50 分钟：%RDPUSERPROFILE%\\.workbuddy\\logs、%RDPUSERPROFILE%\\.workbuddy\\traces",
+    "excludePaths": [],
     "_comment_maxTotalMB": "快照总大小上限（MB）。0 = 不限（本项目按需求设为不限）",
     "maxTotalMB": 0,
     "_comment_tombstones": "显式清理清单：列出的相对路径（相对暂存根，如 files/C/apps/old）会从远端快照删除。用于弥补「大目录用 rclone copy 不删远端」",
@@ -83,12 +91,16 @@
     "_comment_quiesce": "抓取/还原前需要临时关闭的程序：保证 SQLite(WAL)/LevelDB 落盘一致，避免 robocopy 部分失败。仅在非 -Quick 的全量快照执行，避免打断正在使用的会话。",
     "quiesce": [
       { "name": "msedge",     "gracefulSec": 15, "note": "Edge：History / Bookmarks / Preferences / Web Data 一致" },
-      { "name": "WorkBuddy*", "gracefulSec": 15, "note": "WorkBuddy：.workbuddy-ai 下 workbuddy.db 等 SQLite 一致" }
+      { "name": "WorkBuddy*", "gracefulSec": 15, "note": "WorkBuddy：.workbuddy / .workbuddy-ai 下 workbuddy.db 等 SQLite 一致" }
     ],
 
-    "_comment_noExcludeDirs": "豁免排除清单：列出的目录只禁用 excludeDirNames（目录名排除），仍应用 excludeFilePatterns。用于「必须完整保留」的用户数据目录 —— 例：.workbuddy-ai 里的 cache/Temp 也要抓。",
+    "_comment_noExcludeDirs": "豁免排除清单：列出的目录只禁用 excludeDirNames（目录名排除），仍应用 excludeFilePatterns。用于「必须完整保留」的用户数据目录 —— 例：.workbuddy 里的 Cache/GPUCache/Temp 也要抓（Electron 缓存里含登录态与离线数据，丢了等于重装）。",
     "noExcludeDirs": [
-      "%RDPUSERPROFILE%\\.workbuddy-ai"
+      "%RDPUSERPROFILE%\\.workbuddy",
+      "%RDPUSERPROFILE%\\.workbuddy-ai",
+      "%RDPUSERPROFILE%\\AppData\\Local\\Programs\\WorkBuddy",
+      "%RDPUSERPROFILE%\\AppData\\Local\\WorkBuddy",
+      "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy"
     ]
   },
 
@@ -187,6 +199,48 @@
     "wingetIgnoreUnavailable": true,
     "maxPackages": 0,
     "_comment_maxPackages": "0 = 不限；填 N 只装清单里前 N 个包，便于快速验证",
+    "_comment_userData": "第 10 步（后台重装软件）收尾时对下列「用户数据目标」做完整性校验；缺失/不完整就从快照补漏。这是「Edge 浏览记录/已存密码/全部设置 + WorkBuddy 用户数据/缓存/安装目录」的兜底保险 —— 即使第 8 步预还原漏了，这里也会补齐并留下可见日志。",
+    "userData": true,
+    "_comment_userDataTargets": "name=显示名；path=目标路径（支持 %RDPUSERPROFILE%）；required=必须存在的相对文件；required 为空表示「目录存在即算通过」。",
+    "userDataTargets": [
+      {
+        "name": "Edge 浏览器",
+        "path": "%RDPUSERPROFILE%\\AppData\\Local\\Microsoft\\Edge\\User Data",
+        "required": [
+          "Local State",
+          "Default\\Bookmarks",
+          "Default\\History",
+          "Default\\Login Data",
+          "Default\\Preferences",
+          "Default\\Web Data"
+        ]
+      },
+      {
+        "name": "WorkBuddy 用户数据",
+        "path": "%RDPUSERPROFILE%\\.workbuddy",
+        "required": []
+      },
+      {
+        "name": "WorkBuddy 用户数据（旧路径）",
+        "path": "%RDPUSERPROFILE%\\.workbuddy-ai",
+        "required": []
+      },
+      {
+        "name": "WorkBuddy 安装目录",
+        "path": "%RDPUSERPROFILE%\\AppData\\Local\\Programs\\WorkBuddy",
+        "required": []
+      },
+      {
+        "name": "WorkBuddy 运行数据",
+        "path": "%RDPUSERPROFILE%\\AppData\\Local\\WorkBuddy",
+        "required": []
+      },
+      {
+        "name": "WorkBuddy 配置",
+        "path": "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy",
+        "required": []
+      }
+    ],
     "_comment_preRestore": "预还原阶段的开关",
     "preRestore": {
       "validate": true,

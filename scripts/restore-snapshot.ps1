@@ -81,6 +81,15 @@ $script:HasLockCopyLib = $false
 if (Test-Path -LiteralPath $lockCopyLib) { . $lockCopyLib; $script:HasLockCopyLib = $true }
 else { Write-Warning "[restore] 未找到 lockcopy-lib.ps1，robocopy 失败时不会尝试共享读写补写" }
 
+# 用户数据（Edge / WorkBuddy）取证与补漏共享库。
+# 为什么需要：清单里曾经写的是 .workbuddy-ai（本机不存在）→ WorkBuddy 数据静默零还原，
+# 且 Edge 的 Login Data（已存密码）从没被校验过。取证口径统一放到 userdata-lib.ps1，
+# 与第 10 步（reinstall-apps.ps1）共用同一份判断，避免两处标准漂移。
+$userDataLib = Join-Path $PSScriptRoot "userdata-lib.ps1"
+$script:HasUserDataLib = $false
+if (Test-Path -LiteralPath $userDataLib) { . $userDataLib; $script:HasUserDataLib = $true }
+else { Write-Warning "[restore] 未找到 userdata-lib.ps1，Edge/WorkBuddy 用户数据取证不可用" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -100,52 +109,45 @@ function Invoke-RestoreQuiesce {
     return $q.detail
 }
 
-# 还原后取证：用户最在意的两块数据是否真的回来了
-#   Edge 的 配置/历史/收藏夹（Bookmarks / History / Preferences / Web Data / Local State）
-#   .workbuddy-ai 的 SQLite 与设置（workbuddy.db / settings.json）
+# 还原后取证：用户最在意的两块数据（Edge / WorkBuddy）是否真的回来了。
 # 为什么要有：这两块历史上都被「静默漏掉」过（Edge robocopy 码 9、程序本体从没被还原），
-# 光看「还原了几个目录」是发现不了的。
+# 光看「还原了几个目录」是发现不了的。现在取证口径由 userdata-lib.ps1 统一提供，
+# 与第 10 步（reinstall-apps.ps1）同源，不会两处标准不一致。
 function Get-RestoreEvidence {
-    param([string]$RdpUser)
+    param([string]$RdpUser, [string]$Stage = '', [string]$ConfigPath = '')
 
-    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = '' }
+    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = ''; state = 'MISSING'; detail = '' }
+    if (-not $script:HasUserDataLib) { return $out }
     try {
-        $home = Join-Path 'C:\Users' $RdpUser
-        $ud = Join-Path $home 'AppData\Local\Microsoft\Edge\User Data'
-        $need = @('Default\Bookmarks', 'Default\History', 'Default\Preferences', 'Default\Web Data', 'Local State')
-        $ok = 0
-        foreach ($n in $need) {
-            $p = Join-Path $ud $n
-            try { if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p -Force).Length -gt 0) { $ok++ } } catch { }
+        $r = Invoke-UserDataVerifyAndRepair -Stage $Stage -RdpUser $RdpUser -ConfigPath $ConfigPath `
+                 -Log { param($m) Say ("  " + $m) } -NoRepair
+        $out.edge   = [string]$r.edge
+        $out.wbai   = [string]$r.wb
+        $out.state  = [string]$r.state
+        $out.detail = [string]$r.detail
+        foreach ($e in @($r.after)) {
+            if ($e.name -like 'Edge*') { $out.edgeDetail = [string]$e.detail }
+            if ($e.name -like 'WorkBuddy*' -and $e.name -notlike '*旧路径*') { $out.wbaiDetail = [string]$e.detail }
         }
-        $out.edge = if ($ok -eq $need.Count) { 'OK' } elseif ($ok -gt 0) { 'PARTIAL' } else { 'MISSING' }
-        $out.edgeDetail = ("{0}/{1}" -f $ok, $need.Count)
-
-        $wa = Join-Path $home '.workbuddy-ai'
-        $need2 = @('workbuddy.db', 'settings.json')
-        $ok2 = 0
-        foreach ($n in $need2) {
-            $p = Join-Path $wa $n
-            try { if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p -Force).Length -gt 0) { $ok2++ } } catch { }
-        }
-        $out.wbai = if ($ok2 -eq $need2.Count) { 'OK' } elseif ($ok2 -gt 0) { 'PARTIAL' } else { 'MISSING' }
-        $out.wbaiDetail = ("{0}/{1}" -f $ok2, $need2.Count)
     } catch { }
     return $out
 }
 
 # 把取证结果同时写日志与 GITHUB_ENV
+# （EDGE_RESTORE / WBAI_RESTORE 保留原名供老工作流兼容，新增 USERDATA_RESTORE）
 function Write-RestoreEvidence {
-    param([string]$RdpUser, [string]$LogPath = '')
-    $ev = Get-RestoreEvidence -RdpUser $RdpUser
-    Say ("还原取证：Edge 配置/历史/收藏夹 {0}（{1}）| .workbuddy-ai {2}（{3}）" -f `
-         $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail)
+    param([string]$RdpUser, [string]$LogPath = '', [string]$Stage = '', [string]$ConfigPath = '')
+    $ev = Get-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath
+    Say ("用户数据取证：Edge {0}（{1}）| WorkBuddy {2}（{3}）| 合计 {4}（{5}）" -f `
+         $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.state, $ev.detail)
     Set-GhEnv ("EDGE_RESTORE=" + $ev.edge)
     Set-GhEnv ("WBAI_RESTORE=" + $ev.wbai)
+    Set-GhEnv ("USERDATA_RESTORE=" + $ev.state)
+    Set-GhEnv ("USERDATA_RESTORE_DETAIL=" + $ev.detail)
     if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
         try {
-            ("[{0}] evidence edge={1}({2}) wbai={3}({4})" -f (Get-Date).ToString('o'), `
-             $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail) |
+            ("[{0}] evidence userdata={1}({2}) edge={3}({4}) wb={5}({6})" -f (Get-Date).ToString('o'), `
+             $ev.state, $ev.detail, $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail) |
                 Out-File -LiteralPath $LogPath -Append -Encoding utf8
         } catch { }
     }
@@ -692,7 +694,7 @@ function Invoke-MachineRestore {
 
     # 取证：Edge 配置/历史/收藏夹 + .workbuddy-ai 是否真的回来了
     # （个人目录由 user 作用域还原，这里只当「早测」；登录任务的日志里有最终结论）
-    Write-RestoreEvidence -RdpUser $RdpUser -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null
+    Write-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null
 }
 
 # ================================================================ user 作用域
@@ -864,7 +866,7 @@ function Invoke-UserRestore {
     # ---------- 5c. 取证：Edge 配置/历史/收藏夹 + .workbuddy-ai 是否真的回来了 ----------
     # 这里是权威结论（个人目录就是在 user 作用域还原的）。光看「还原了几个目录」
     # 发现不了「Edge 历史缺了」「程序本体没回来」这类静默漏项。
-    try { Write-RestoreEvidence -RdpUser $RdpUser -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null } catch { }
+    try { Write-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null } catch { }
 
     # ---------- 6. 只在成功时自注销；失败则保留任务，下次登录自动重试 ----------
     if ($problems.Count -eq 0) {

@@ -641,6 +641,93 @@ def main():
           "失败" in server._prov_summary({"steps": [{"step": "fork", "ok": False}]})
           and "成功" in server._prov_summary({"steps": [{"step": "fork", "ok": True}]}))
 
+    # ---------------- 用户数据完整性：Edge / WorkBuddy 快照与恢复 ----------------
+    # 背景：第 10 步（后台重装软件）过去只跑 winget，不恢复任何用户数据；
+    # 而快照清单里 WorkBuddy 路径写的是 .workbuddy-ai（本机不存在）→ 静默零还原，
+    # Edge 的 Login Data（已存密码）也从没被校验过。以下断言把「抓什么 / 校验什么」钉死。
+    print("[用户数据 Edge/WorkBuddy]")
+    repo_dir = os.path.dirname(wb_dir)
+    sc = json.loads(open(os.path.join(repo_dir, "scripts", "snapshot-config.json"),
+                         encoding="utf-8-sig").read())
+    sc_files = sc.get("files") or {}
+    sc_dirs = [str(x) for x in (sc_files.get("dirs") or [])]
+
+    def _has_dir(frag):
+        return any(frag in d for d in sc_dirs)
+
+    check("T132 快照清单含 .workbuddy（当前真实用户数据目录）", _has_dir("\\.workbuddy"),
+          "dirs=%d" % len(sc_dirs))
+    check("T133 快照清单含 WorkBuddy 安装目录",
+          _has_dir("AppData\\Local\\Programs\\WorkBuddy"))
+    check("T134 快照清单含 WorkBuddy 运行数据与配置",
+          _has_dir("AppData\\Local\\WorkBuddy") and _has_dir("AppData\\Roaming\\WorkBuddy"))
+
+    noex = [str(x) for x in (sc_files.get("noExcludeDirs") or [])]
+    wb_dirs = [d for d in sc_dirs if "workbuddy" in d.lower()]
+    noex_missing = [d for d in wb_dirs if d not in noex]
+    check("T135 noExcludeDirs 覆盖全部 WorkBuddy 目录（保住 Electron 缓存）",
+          len(wb_dirs) >= 5 and not noex_missing,
+          "wb_dirs=%d missing=%s" % (len(wb_dirs), noex_missing))
+    check("T136 files.excludePaths 存在且为列表（按绝对路径精确排除，默认空）",
+          isinstance(sc_files.get("excludePaths"), list))
+
+    udt = (sc.get("restore") or {}).get("userDataTargets") or []
+    udt_names = [str(t.get("name", "")) for t in udt]
+    check("T137 restore.userDataTargets 6 个目标", len(udt) == 6, "n=%d" % len(udt))
+    edge_t = [t for t in udt if "Edge" in str(t.get("name", ""))]
+    check("T138 含 Edge 浏览器目标", len(edge_t) == 1, str(udt_names))
+    if edge_t:
+        reqd = [str(r) for r in (edge_t[0].get("required") or [])]
+        check("T139 Edge 必检项含 History（浏览记录）", "Default\\History" in reqd, str(reqd))
+        check("T140 Edge 必检项含 Login Data（本地保存的密码）",
+              "Default\\Login Data" in reqd, str(reqd))
+        check("T141 Edge 必检项含 Preferences（含下载位置等设置）",
+              "Default\\Preferences" in reqd, str(reqd))
+    check("T142 userDataTargets 覆盖 WorkBuddy 用户数据/安装/运行/配置",
+          sum(1 for n in udt_names if n.startswith("WorkBuddy")) >= 5, str(udt_names))
+
+    ud_lib = os.path.join(repo_dir, "scripts", "userdata-lib.ps1")
+    check("T143 存在共享库 userdata-lib.ps1", os.path.isfile(ud_lib))
+    ud_txt = open(ud_lib, encoding="utf-8-sig").read() if os.path.isfile(ud_lib) else ""
+    check("T144 userdata-lib 导出 Invoke-UserDataVerifyAndRepair",
+          "function Invoke-UserDataVerifyAndRepair" in ud_txt)
+    check("T145 userdata-lib 含用户名迁移兜底（精确路径找不到时按尾部再找）",
+          "Find-UDSnapshotDir" in ud_txt and "Users" in ud_txt)
+    _rc_line = [ln for ln in ud_txt.splitlines() if "$rc = @(" in ln]
+    check("T145b userdata-lib 补漏为「只补不删」（robocopy 参数里无 /PURGE）",
+          len(_rc_line) == 1 and "/PURGE" not in _rc_line[0], str(_rc_line)[:160])
+
+    reinstall_txt = open(os.path.join(repo_dir, "scripts", "reinstall-apps.ps1"),
+                         encoding="utf-8-sig").read()
+    check("T146 第 10 步 dot-source userdata-lib.ps1",
+          "userdata-lib.ps1" in reinstall_txt and ". $userDataLib" in reinstall_txt)
+    check("T147 第 10 步调用校验+补漏（-Quiesce，写 apps-status.json）",
+          "Invoke-UserDataVerifyAndRepair" in reinstall_txt and "-Quiesce" in reinstall_txt
+          and "userData" in reinstall_txt)
+    check("T147b 第 10 步支持 -SkipUserData 开关", "-SkipUserData" in reinstall_txt)
+
+    restore_txt = open(os.path.join(repo_dir, "scripts", "restore-snapshot.ps1"),
+                       encoding="utf-8-sig").read()
+    check("T148 restore-snapshot dot-source userdata-lib.ps1（口径与第 10 步同源）",
+          ". $userDataLib" in restore_txt)
+    check("T149 restore 取证透出 USERDATA_RESTORE（并保留 EDGE_RESTORE/WBAI_RESTORE）",
+          "USERDATA_RESTORE=" in restore_txt and "EDGE_RESTORE=" in restore_txt
+          and "WBAI_RESTORE=" in restore_txt)
+    check("T149b restore 取证传 -Stage/-ConfigPath",
+          "-Stage $Stage -ConfigPath $ConfigPath" in restore_txt)
+
+    backup_txt = open(os.path.join(repo_dir, "scripts", "backup-snapshot.ps1"),
+                      encoding="utf-8-sig").read()
+    check("T150 backup-snapshot 支持 excludePaths（按绝对路径排除子目录）",
+          "excludePaths" in backup_txt and "ExcludeDirsAbs" in backup_txt)
+
+    wf_txt = open(os.path.join(repo_dir, ".github", "workflows", "windows-rdp.yml"),
+                  encoding="utf-8").read()
+    check("T151 工作流第 10 步名含「恢复 Edge/WorkBuddy 用户数据」",
+          "后台重装软件 + 恢复 Edge/WorkBuddy 用户数据" in wf_txt)
+    check("T152 ENV READY 汇总读 USERDATA_RESTORE / _DETAIL",
+          "USERDATA_RESTORE" in wf_txt and "USERDATA_RESTORE_DETAIL" in wf_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

@@ -120,12 +120,15 @@ function Get-AbsFromMirror {
 
 # robocopy 返回 0..7 都算成功，>=8 才是真失败
 function Invoke-Robocopy {
-    param([string]$Src, [string]$Dst, [string[]]$ExcludeDirs, [string[]]$ExcludeFiles)
+    param([string]$Src, [string]$Dst, [string[]]$ExcludeDirs, [string[]]$ExcludeFiles, [string[]]$ExcludeDirsAbs)
     if (-not (Test-Path -LiteralPath $Src)) { return -1 }   # -1 = 源不存在
     New-Item -ItemType Directory -Force -Path $Dst | Out-Null
     $rc = @($Src, $Dst, '/E', '/COPY:DAT', '/R:1', '/W:1',
             '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XJ', '/XO')
-    if ($ExcludeDirs  -and $ExcludeDirs.Count  -gt 0) { $rc += '/XD'; $rc += $ExcludeDirs }
+    $xd = @()
+    if ($ExcludeDirs    -and $ExcludeDirs.Count    -gt 0) { $xd += $ExcludeDirs }
+    if ($ExcludeDirsAbs -and $ExcludeDirsAbs.Count -gt 0) { $xd += $ExcludeDirsAbs }
+    if ($xd.Count -gt 0) { $rc += '/XD'; $rc += $xd }
     if ($ExcludeFiles -and $ExcludeFiles.Count -gt 0) { $rc += '/XF'; $rc += $ExcludeFiles }
     $out = @(& robocopy @rc 2>&1)
     $code = $LASTEXITCODE
@@ -372,6 +375,17 @@ foreach ($r in $noExRaw) {
 }
 if ($noExDirs.Count -gt 0) { Say ("豁免排除（完整抓取）：{0}" -f ($noExDirs -join ' ; ')) }
 
+# excludePaths：按「绝对路径前缀」精准排除（files.excludePaths）。
+# 与 excludeDirNames 的区别：后者按目录名全局匹配、会误伤任何层级的同名目录；
+# 这里只排除你点名的那个绝对路径（含其子目录），用于「大目录里的某个纯日志子目录」。
+$exPathsRaw = @(Get-Cfg $cfg.files 'excludePaths' @())
+$exPaths = New-Object System.Collections.Generic.List[string]
+foreach ($r in $exPathsRaw) {
+    if ([string]::IsNullOrWhiteSpace([string]$r)) { continue }
+    $exPaths.Add((Expand-SnapPath -Path ([string]$r) -RdpUser $RdpUser).TrimEnd('\').ToLower())
+}
+if ($exPaths.Count -gt 0) { Say ("按路径排除（excludePaths）：{0}" -f ($exPaths -join ' ; ')) }
+
 # ---------- 快照一致性：抓取前关闭占用程序 ----------
 # 只在「全量快照」做（保活期每 60 分钟的 -Quick 不动，免得打断用户正在用的会话）。
 # 为什么必须做：Edge 的 SQLite(WAL) 与 .workbuddy-ai 的 workbuddy.db 在程序运行时被持有，
@@ -401,6 +415,17 @@ foreach ($raw in $dirs) {
     $rel = Get-MirrorRel -Abs $src
     $dst = Join-Path (Join-Path $Stage "files") $rel
 
+    # excludePaths 命中判定：① 整个目录被点名 → 跳过；② 点的是它的子目录 → 交给 robocopy /XD
+    $srcKey    = $src.TrimEnd('\').ToLower()
+    $skipWhole = $false
+    $xdAbs     = New-Object System.Collections.Generic.List[string]
+    foreach ($ep in $exPaths) {
+        if ($ep -eq $srcKey) { $skipWhole = $true; break }
+        if ($ep.StartsWith($srcKey + '\')) { $xdAbs.Add($ep) }
+    }
+    if ($skipWhole) { Say ("  [按 excludePaths 跳过] {0}" -f $src); $skippedDirs.Add($src); continue }
+    if ($xdAbs.Count -gt 0) { Say ("  按 excludePaths 排除 {0} 个子目录" -f $xdAbs.Count) }
+
     $size = Get-TreeSize -Path $src
     if ($maxTotalMB -gt 0 -and (($totalBytes + $size.Bytes) / 1MB) -gt $maxTotalMB) {
         Warn ("体积上限 {0} MB 已达，跳过后续目录：{1}" -f $maxTotalMB, $src)
@@ -411,9 +436,9 @@ foreach ($raw in $dirs) {
     $full = $noExDirs.Contains($src.TrimEnd('\').ToLower())
     if ($full) {
         Say ("  [完整抓取] {0}（不排除任何子目录）" -f $src)
-        $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeFiles $exFiles
+        $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeFiles $exFiles -ExcludeDirsAbs ([string[]]$xdAbs)
     } else {
-        $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeDirs $exDirs -ExcludeFiles $exFiles
+        $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeDirs $exDirs -ExcludeFiles $exFiles -ExcludeDirsAbs ([string[]]$xdAbs)
     }
 
     $got = Get-TreeSize -Path $dst
@@ -424,7 +449,7 @@ foreach ($raw in $dirs) {
     }
     # 完整抓取目录：暂存文件数应等于「源文件数 − 被 excludeFilePatterns 排除的文件数」。
     # 只算真正该抓的文件，避免把 LOCK/LOG 这类主动排除误报成「文件数不足」（真机差 24 的根因）。
-    if ($full) {
+    if ($full -and $xdAbs.Count -eq 0) {
         $expected = Get-ExpectedFileCount -Path $src -ExcludeFiles $exFiles
         if ($got.Files -lt $expected) {
             Warn ("[完整抓取] 文件数不足：{0} 应抓 {1} / 暂存 {2}（差 {3}）—— 大概率被占用" -f `
