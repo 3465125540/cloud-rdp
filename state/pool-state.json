@@ -1,36 +1,22 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-09-23T06:51:04.9912143Z",
+  "updated_utc": "2026-09-23T12:13:06.7483695Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-1",
     "owner": "yc1966asgf",
     "repo": "cloud-rdp",
-    "run_id": 35803022719,
-    "since": "2026-09-23T00:39:43Z"
+    "run_id": 35823439764,
+    "since": "2026-09-23T05:41:18Z"
   },
   "standby": [
     {
       "account": "acc-3",
       "owner": "3465125540",
       "repo": "cloud-rdp",
-      "run_id": 35820523536,
-      "since": "2026-09-23T04:58:55Z"
-    },
-    {
-      "account": "acc-1",
-      "owner": "yc1966asgf",
-      "repo": "cloud-rdp",
-      "run_id": 35823439764,
-      "since": "2026-09-23T05:41:18Z"
-    },
-    {
-      "account": "acc-4",
-      "owner": "code1969sda",
-      "repo": "cloud-rdp",
-      "run_id": null,
-      "since": "2026-09-23T06:51:01.8204238Z"
+      "run_id": 35847579794,
+      "since": "2026-09-23T10:13:51Z"
     }
   ],
   "accounts": [
@@ -41,18 +27,18 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_1",
       "token_state": "ok",
-      "alive_count": 2,
+      "alive_count": 1,
       "total": 5,
       "last_run": {
         "run_id": 35823439764,
-        "status": "pending",
+        "status": "in_progress",
         "conclusion": "",
         "created_at": "2026-09-23T05:41:18Z",
         "event": "schedule",
         "url": "https://github.com/yc1966asgf/cloud-rdp/actions/runs/35823439764"
       },
       "note": "",
-      "role": "standby"
+      "role": "primary"
     },
     {
       "id": "acc-2",
@@ -77,12 +63,12 @@
       "alive_count": 1,
       "total": 20,
       "last_run": {
-        "run_id": 35820523536,
+        "run_id": 35847579794,
         "status": "in_progress",
         "conclusion": "",
-        "created_at": "2026-09-23T04:58:55Z",
+        "created_at": "2026-09-23T10:13:51Z",
         "event": "schedule",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/35820523536"
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/35847579794"
       },
       "note": "",
       "role": "standby"
@@ -98,14 +84,14 @@
       "total": 0,
       "last_run": null,
       "note": "",
-      "role": "standby"
+      "role": ""
     }
   ],
   "recent_dispatches": {
-    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "yc1966asgf": "2026-09-22T20:30:04.6344208Z",
-    "3465125540": "2026-09-23T03:10:52.4608375Z",
     "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "yc1966asgf": "2026-09-22T20:30:04.6344208Z",
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
+    "3465125540": "2026-09-23T03:10:52.4608375Z",
     "code1969sda": "2026-09-23T06:51:01.8204238Z"
   }
 }
