@@ -1,7 +1,11 @@
 @echo off
 REM ============================================================
-REM  智能体工作台 —— 一键启动（双击本文件）
-REM  依赖：Python 3.8+（本机已装 3.13）。零第三方包。
+REM  Agent workbench - one-click start (double-click this file)
+REM  Requires Python 3.8+. No third-party packages.
+REM
+REM  NOTE: keep this file pure ASCII. cmd.exe reads .cmd as ANSI
+REM  (GBK on zh-CN Windows); UTF-8 Chinese can be mis-decoded and
+REM  swallow a ')' or a quote, breaking the batch parser.
 REM ============================================================
 setlocal
 cd /d "%~dp0"
@@ -12,16 +16,16 @@ if not defined PY (
   where python >nul 2>nul && set "PY=python"
 )
 if not defined PY (
-  echo [x] 没找到 Python，请先安装 Python 3.8+ 并加入 PATH。
+  echo [x] Python not found. Install Python 3.8+ and add it to PATH.
   pause
   exit /b 1
 )
 
-echo 正在启动智能体工作台...
+echo Starting agent workbench...
 %PY% server.py %*
 if errorlevel 1 (
   echo.
-  echo [x] 启动失败，请看上方错误信息。
+  echo [x] Start failed. See the error above.
   pause
 )
 endlocal

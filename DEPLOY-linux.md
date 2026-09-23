@@ -258,7 +258,7 @@ systemctl status  cloud-rdp-workbench         # 状态
 
 ```bash
 cd /opt/cloud-rdp && python3 workbench/selftest.py
-# 期望输出： 结果：141 PASS / 0 FAIL
+# 期望输出： 结果：147 PASS / 0 FAIL
 ```
 
 ---

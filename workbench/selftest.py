@@ -537,6 +537,27 @@ def main():
     finally:
         server.CONFIG["access_token"] = ""
 
+    # ---------------- 回归：Windows 启动脚本必须纯 ASCII ----------------
+    # 事故：open-workbench.vbs 曾是「UTF-8 无 BOM」，WSH 按 ANSI/GBK 解码，
+    # 多字节序列吞掉一个引号 → 编译器报「语句未结束」(0x800A0401)。cmd/ps1 同理。
+    print("[启动脚本编码]")
+    wb_dir = os.path.dirname(os.path.abspath(__file__))
+    for fn in ("open-workbench.vbs", "serve.cmd", "start.cmd"):
+        fp = os.path.join(wb_dir, fn)
+        if not os.path.exists(fp):
+            check("T112 %s 存在" % fn, False, fp)
+            continue
+        blob = open(fp, "rb").read()
+        has_bom = blob[:3] == b"\xef\xbb\xbf" or blob[:2] in (b"\xff\xfe", b"\xfe\xff")
+        check("T112 %s 无 BOM" % fn, not has_bom, "有 BOM：WSH/cmd 会报无效字符")
+        try:
+            blob.decode("ascii")
+            ok, why = True, ""
+        except UnicodeDecodeError as e:
+            ok = False
+            why = "含非 ASCII 字节@%d：Windows 按 ANSI/GBK 解码会吞引号/括号 → 0x800A0401" % e.start
+        check("T113 %s 纯 ASCII" % fn, ok, why)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

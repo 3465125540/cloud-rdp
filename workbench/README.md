@@ -43,7 +43,12 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **141 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **147 项**，应全绿。不联网、不碰真机、不写你的桌面。
+
+> **启动脚本必须保持纯 ASCII**（`open-workbench.vbs` / `serve.cmd` / `start.cmd`）。
+> Windows 脚本宿主与 `cmd.exe` 按 ANSI（zh-CN 即 GBK）解码 `.vbs`/`.cmd`；若存成
+> 「UTF-8 无 BOM」的中文，多字节序列会吞掉引号/括号，`.vbs` 直接报
+> `0x800A0401 语句未结束`。自测 T112/T113 已加回归守卫。
 
 > **在 Linux 服务器上部署**（远端文件改走 `smbclient`、一键登录改走 `xfreerdp`、可加 `access_token` 保护）：
 > 见仓库根目录的 [`DEPLOY-linux.md`](../DEPLOY-linux.md) 与 `deploy/`（含 systemd 单元与一键安装脚本）。
@@ -164,10 +169,10 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（141 项）
-├── start.cmd             # 双击启动（自动开浏览器）
-├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）
-├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器
+├── selftest.py           # 离线自测（147 项）
+├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
+├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
+├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
 ├── make-icon.py          # 零依赖生成 workbench.ico（标准库画图）
 ├── make-shortcut.py      # 在桌面生成 .lnk（ctypes 直调 COM IShellLinkW）
 ├── verify-shortcut.py    # 读回 .lnk 属性做校验

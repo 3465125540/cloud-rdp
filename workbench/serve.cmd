@@ -1,8 +1,13 @@
 @echo off
 REM ============================================================
-REM  GitHub 虚拟机管理工作台 —— 后台启动服务（供桌面快捷方式调用）
-REM  与 start.cmd 的区别：不自动开浏览器、失败不 pause（要能隐藏跑）。
-REM  日志追加到 %USERPROFILE%\cloud-rdp-workbench.log
+REM  GitHub RDP workbench - start the server in the background
+REM  (target of the desktop shortcut). Unlike start.cmd it does
+REM  NOT open a browser and does NOT pause on failure, so it can
+REM  run hidden. Log appends to %USERPROFILE%\cloud-rdp-workbench.log
+REM
+REM  NOTE: keep this file pure ASCII. cmd.exe reads .cmd as ANSI
+REM  (GBK on zh-CN Windows); UTF-8 Chinese can be mis-decoded and
+REM  swallow a ')' or a quote, breaking the batch parser.
 REM ============================================================
 setlocal
 cd /d "%~dp0"
@@ -13,7 +18,7 @@ if not defined PY (
   where python >nul 2>nul && set "PY=python"
 )
 if not defined PY (
-  echo [x] 没找到 Python，请先安装 Python 3.8+ 并加入 PATH。
+  echo [x] Python not found. Install Python 3.8+ and add it to PATH.
   exit /b 1
 )
 

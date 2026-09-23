@@ -1,7 +1,11 @@
-' GitHub 虚拟机管理工作台 —— 桌面快捷方式的真正目标。
-' 逻辑与 9router 的 open-dashboard.vbs 一致：
-'   已在运行（8787 在监听）→ 直接开浏览器；
-'   没在运行 → 先隐藏启动服务，等端口起来（最多 20s）再开浏览器。
+' GitHub RDP workbench - launcher target of the desktop shortcut.
+' Logic mirrors 9router's open-dashboard.vbs:
+'   already running (port 8787 listening) -> just open the browser;
+'   not running -> start the server hidden, wait for the port (max 20s), then open browser.
+'
+' NOTE: this file MUST stay pure ASCII. Windows Script Host reads .vbs as ANSI
+' (GBK on zh-CN Windows); UTF-8 Chinese here gets mis-decoded and swallows a
+' quote character -> "Statement expected" (0x800A0401). Keep it ASCII-only.
 Option Explicit
 
 Const PORT = 8787
@@ -11,12 +15,12 @@ Dim oWS, fso, here
 Set oWS = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
-' 脚本所在目录 = workbench 目录
+' script folder = workbench folder
 here = fso.GetParentFolderName(WScript.ScriptFullName)
 
 If Not PortListening(PORT) Then
     If Not fso.FileExists(fso.BuildPath(here, "serve.cmd")) Then
-        MsgBox "找不到 serve.cmd（应在 " & here & "）。", 16, "GitHub虚拟机管理工作台"
+        MsgBox "serve.cmd not found (expected in " & here & ").", 16, "GitHub RDP Workbench"
         WScript.Quit 1
     End If
     oWS.CurrentDirectory = here
@@ -30,15 +34,15 @@ If Not PortListening(PORT) Then
     Loop
 
     If Not PortListening(PORT) Then
-        MsgBox "工作台启动超时（20 秒内没监听到 " & PORT & " 端口）。" & vbCrLf & _
-               "可看日志：" & oWS.ExpandEnvironmentStrings("%USERPROFILE%") & "\cloud-rdp-workbench.log", _
-               48, "GitHub虚拟机管理工作台"
+        MsgBox "Workbench did not start within 20s (port " & PORT & " not listening)." & vbCrLf & _
+               "See log: " & oWS.ExpandEnvironmentStrings("%USERPROFILE%") & "\cloud-rdp-workbench.log", _
+               48, "GitHub RDP Workbench"
     End If
 End If
 
 oWS.Run URL, 1, False
 
-' 判断本机某端口是否在 LISTENING
+' True if local port p is LISTENING
 Function PortListening(p)
     Dim rc
     PortListening = False
