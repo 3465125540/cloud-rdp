@@ -103,7 +103,7 @@ python workbench\selftest.py
 
 `POST /api/rdp {ip, hostname}` 做三件事：
 
-1. 在桌面写一个 `RDP-<host>-<ip>.rdp`（分辨率、剪贴板/磁盘重定向、`authentication level:i:0` 等都配好，留档 / 手动双击用）；
+1. 在 `~/Documents/CloudRDP/`（Windows 即 `C:\Users\<你>\Documents\CloudRDP\`）写一个 `RDP-<host>-<ip>.rdp`（分辨率、剪贴板/磁盘重定向、`authentication level:i:0` 等都配好，留档 / 手动双击用）；目录不存在会自动创建，可用配置项 `rdp_dir` 改成别处，**不会写到桌面**；
 2. `cmdkey /generic:TERMSRV/<ip> /user:a /pass:a` 把凭据存进 Windows 凭据管理器 → 连的时候**不弹密码框**；
 3. 唤起 `mstsc`。
 

@@ -2,7 +2,8 @@
   "_README": [
     "工作台配置。本文件不参与版本控制（.gitignore 已排除 config.json），",
     "因为里面可能有本机路径/凭据指向。改完重启服务生效。",
-    "留空 = 用内置默认值；默认值在 server.py 的 DEFAULT_CONFIG。"
+    "留空 = 用内置默认值；默认值在 server.py 的 DEFAULT_CONFIG。",
+    "rdp_dir 留空 = ~/Documents/CloudRDP（一键登录的 .rdp 落地目录，不会再写桌面）。"
   ],
 
   "host": "127.0.0.1",

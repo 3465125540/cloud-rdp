@@ -128,7 +128,7 @@ DEFAULT_CONFIG = {
     # ---- 一键登录 ----
     "rdp_user": "a",
     "rdp_password": "a",
-    "rdp_dir": "",                           # 留空 = 桌面
+    "rdp_dir": "",                           # 留空 = ~/Documents/CloudRDP（不再写桌面）
     "rdp_width": 1920,
     "rdp_height": 1080,
     "rdp_launch": True,                      # 生成后是否自动唤起 mstsc
@@ -1247,12 +1247,23 @@ def dispatch_workflow(workflow_key, inputs=None, ref=None):
 
 
 # ==================================================================== 一键登录
+def default_rdp_dir():
+    """一键登录 .rdp 的默认落地目录：~/Documents/CloudRDP（不再写桌面）。"""
+    return os.path.join(os.path.expanduser("~"), "Documents", "CloudRDP")
+
+
 def rdp_dir():
-    d = _expand(CONFIG.get("rdp_dir") or "")
-    if not d:
-        d = os.path.join(os.path.expanduser("~"), "Desktop")
-    if not os.path.isdir(d):
-        d = os.path.expanduser("~")
+    """一键登录 .rdp 的落地目录。
+
+    留空 = 用默认目录（~/Documents/CloudRDP），**绝不回落到桌面**；
+    目录不存在会自动创建；实在建不出来才退到系统临时目录兜底。
+    """
+    d = _expand(CONFIG.get("rdp_dir") or "") or default_rdp_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError as e:
+        sys.stderr.write("[warn] 建 .rdp 目录失败 %s: %s，改用临时目录\n" % (d, e))
+        d = tempfile.gettempdir()
     return d
 
 
