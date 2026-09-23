@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -213,6 +214,116 @@ def main():
     check("T93 非 GitHub / 空文本 → 空",
           server.parse_git_origin_owner("") == ""
           and server.parse_git_origin_owner('[remote "origin"]\n\turl = https://gitlab.com/a/b\n') == "")
+    # 「主机」列：一次性 runner 的 HostName 全叫 github-rdp-server，靠 DNSName 唯一短名区分
+    check("T93b peer_short_name 取 DNSName 首段（重名节点可区分）",
+          server.peer_short_name("github-rdp-server-11.tailf6704b.ts.net.") == "github-rdp-server-11"
+          and server.peer_short_name("github-rdp-server-3") == "github-rdp-server-3")
+    check("T93c peer_short_name 空/None → 空串（前端退回 HostName）",
+          server.peer_short_name("") == "" and server.peer_short_name(None) == ""
+          and server.peer_short_name("   ") == "")
+    check("T93d collect_machines 空 peers 不炸",
+          server.collect_machines([], [{"id": "acc-1", "owner": "alice"}]) == [])
+    _cm = server.collect_machines(
+        [{"ip": "100.1.1.1", "online": False, "hostname": "github-rdp-server",
+          "dns_name": "github-rdp-server-7"}],
+        [{"id": "acc-1", "owner": "alice"}])
+    check("T93e collect_machines 与 overview 同形状：补 account_id 且透传 dns_name",
+          len(_cm) == 1 and _cm[0].get("account_id") == ""
+          and _cm[0].get("dns_name") == "github-rdp-server-7", str(_cm))
+    # 池内机器补行：job 在跑但 Tailscale 上看不到 → 不能整台消失
+    _ps = {"state": {
+        "primary": {"account": "acc-1", "owner": "alice", "repo": "cloud-rdp",
+                    "run_id": 111, "since": "2026-09-23T00:00:00Z"},
+        "standby": [{"account": "acc-3", "owner": "bob", "repo": "cloud-rdp",
+                     "run_id": 222, "since": "2026-09-23T06:00:00Z"},
+                    {"account": "acc-4", "owner": "carol", "repo": "cloud-rdp",
+                     "run_id": None, "since": "2026-09-23T06:51:00Z"}],
+        "accounts": [{"id": "acc-3", "last_run": {"run_id": 222, "status": "in_progress",
+                                                  "conclusion": "", "url": "https://x/222"}}],
+    }}
+    _pm = server.pool_machine_rows(_ps, [{"account_id": "acc-1", "online": True, "ip": "100.0.0.1"}])
+    check("T93f 池内机器：已有在线节点的槽位不补行（primary acc-1 跳过）",
+          [r["account_id"] for r in _pm] == ["acc-3", "acc-4"], str(_pm))
+    check("T93g 池内机器：带 run 链接 / 状态 / 角色，且标记 pool_only",
+          _pm[0].get("pool_only") is True and _pm[0].get("run_url") == "https://x/222"
+          and _pm[0].get("run_status") == "in_progress" and _pm[0].get("role") == "standby",
+          str(_pm[0]))
+    check("T93h 池内机器：run_id 为空时 run_url 也留空（不拼出坏链接）",
+          _pm[1].get("run_id") is None and _pm[1].get("run_url") == "", str(_pm[1]))
+    check("T93i pool_machine_rows 空/异常池状态 → []",
+          server.pool_machine_rows({}, []) == []
+          and server.pool_machine_rows(None, None) == []
+          and server.pool_machine_rows({"state": []}, []) == [])
+    _pm2 = server.pool_machine_rows(_ps, [{"account_id": "acc-1", "online": True},
+                                          {"account_id": "acc-1", "online": True}])
+    check("T93j 同账号两台在线节点 → 只认领两个槽位，不多补行",
+          [r["account_id"] for r in _pm2] == ["acc-3", "acc-4"], str(_pm2))
+    # acc-1 同时占 primary 与 standby 两个槽位、但只有 1 台在线 → 不能补出「假的缺失行」
+    _ps3 = {"state": {
+        "primary": {"account": "acc-1", "owner": "alice", "run_id": 1},
+        "standby": [{"account": "acc-1", "owner": "alice", "run_id": 2},
+                    {"account": "acc-4", "owner": "carol", "run_id": 3}],
+        "accounts": [],
+    }}
+    _pm3 = server.pool_machine_rows(_ps3, [{"account_id": "acc-1", "online": True}])
+    check("T93k 同账号多槽位且已有在线机器 → 一行都不补（不误报「未上线」）",
+          [r["account_id"] for r in _pm3] == ["acc-4"], str(_pm3))
+
+    # 机器状态口径：job in_progress ⇒ 机器在跑（不再一律写死「Tailscale 未上线」）
+    check("T93l pool_run_state：in_progress→running、排队类→dispatched、终态→ended、空→unknown",
+          server.pool_run_state("in_progress") == "running"
+          and server.pool_run_state("  In_Progress ") == "running"
+          and server.pool_run_state("queued") == "dispatched"
+          and server.pool_run_state("pending") == "dispatched"
+          and server.pool_run_state("completed") == "ended"
+          and server.pool_run_state("cancelled") == "ended"
+          and server.pool_run_state("") == "unknown"
+          and server.pool_run_state(None) == "unknown",
+          "%s/%s/%s" % (server.pool_run_state("in_progress"),
+                        server.pool_run_state("completed"), server.pool_run_state(None)))
+    _ps4 = {"state": {
+        "primary": {"account": "acc-1", "owner": "alice", "run_id": 1},
+        "standby": [{"account": "acc-3", "owner": "hub", "run_id": 35820523536,
+                     "since": "2026-09-23T04:58:55Z"},
+                    {"account": "acc-4", "owner": "carol", "run_id": 9},
+                    {"account": "acc-5", "owner": "dave", "run_id": 7},
+                    {"account": "acc-6", "owner": "erin", "run_id": 11}],
+        "accounts": [{"id": "acc-3", "last_run": {"status": "in_progress", "run_id": 35820523536}},
+                     {"id": "acc-4", "last_run": {"status": "queued", "run_id": 9}},
+                     {"id": "acc-5", "last_run": {"status": "completed", "conclusion": "success", "run_id": 7}}],
+    }}
+    _pm4 = server.pool_machine_rows(_ps4, [{"account_id": "acc-1", "online": True}])
+    _by = {r["account_id"]: r for r in _pm4}
+    check("T93m 池内机器：job in_progress ⇒ machine_state=running（面板出「运行中」）",
+          _by["acc-3"].get("machine_state") == "running", str(_by.get("acc-3")))
+    check("T93n 池内机器：queued⇒dispatched、completed⇒ended、无 run 状态⇒unknown",
+          _by["acc-4"].get("machine_state") == "dispatched"
+          and _by["acc-5"].get("machine_state") == "ended"
+          and _by["acc-6"].get("machine_state") == "unknown",
+          str({k: v.get("machine_state") for k, v in _by.items()}))
+    check("T93o pool_machine_rows 每条都带 machine_state（前端不靠自己猜）",
+          all("machine_state" in r for r in _pm4),
+          str([r.get("machine_state") for r in _pm4]))
+
+    # 池内机器的 IP 兜底：本机 tailnet 看不到节点时，从它自己的 Actions job 日志里挖。
+    _m_ip = server._JOB_IP_RE.search(
+        "2026-09-23T06:12:39.5972790Z [0c] Tailscale IP: 100.112.127.106")
+    check("T93p job 日志里的机器自报 IP 行能被解析（[0c] Tailscale IP: x.x.x.x）",
+          bool(_m_ip) and _m_ip.group(1) == "100.112.127.106"
+          and server._JOB_IP_RE.search("no ip here") is None,
+          _m_ip.group(1) if _m_ip else "无匹配")
+    check("T93q job_tailscale_ip：离线 / 缺 owner / 缺 run_id → 空串（绝不抛）",
+          server.job_tailscale_ip("o", "r", 1) == ""
+          and server.job_tailscale_ip("", "r", 1) == ""
+          and server.job_tailscale_ip("o", "r", None) == "")
+    check("T93r pool_row_netinfo 离线 → 空 ip / 空 ip_source / reachable=None",
+          server.pool_row_netinfo("o", "r", 1) == {"ip": "", "ip_source": "", "reachable": None})
+    check("T93s pool_machine_rows 每行都带 ip / ip_source / reachable（前端不自己拼）",
+          all(("ip" in r and "ip_source" in r and "reachable" in r) for r in _pm4),
+          str([sorted(k for k in r if k in ("ip", "ip_source", "reachable")) for r in _pm4]))
+    check("T93t 有 _NoAuthRedirect：302 跳 blob 时摘掉 Authorization（否则 401）",
+          hasattr(server, "_NoAuthRedirect")
+          and issubclass(server._NoAuthRedirect, urllib.request.HTTPRedirectHandler))
 
     # ---------------- 一键登录：mstsc /v: 零弹窗（KB5083769 后） ----------------
     print("[一键登录 / Default.rdp]")
@@ -253,6 +364,54 @@ def main():
     else:
         check("T99 非 Windows：launch_rdp 不唤起",
               server.launch_rdp("1.2.3.4", "x.rdp")[0] is False)
+
+    # ---------------- Default.rdp 的两个坑（编码 / 隐藏属性） ----------------
+    # 瑀子实测：面板报「authentication level=未设置」+ 点修复报 Errno 13 Permission denied。
+    # 根因 ① mstsc 写的 Default.rdp 是 UTF-16LE+BOM，用 ascii 读 → 正则全失配 → 已是 0 也报未设置。
+    # 根因 ② Default.rdp 带 HIDDEN 属性，open(p,"w")=CREATE_ALWAYS 对隐藏文件必然 ACCESS_DENIED。
+    _tmpd = tempfile.mkdtemp(prefix="wb-rdp-")
+    try:
+        _u16 = os.path.join(_tmpd, "Default.rdp")
+        with open(_u16, "wb") as _f:
+            _f.write(b"\xff\xfe" + "authentication level:i:0\r\n".encode("utf-16-le"))
+        _txt, _enc = server.read_rdp_text(_u16)
+        check("T200 read_rdp_text 认得 UTF-16LE+BOM（按 ascii 读会让正则失配 → 误报「未设置」）",
+              _enc == "utf-16" and re.search(r"authentication level:i:0", _txt) is not None,
+              "%s / %r" % (_enc, _txt[:32]))
+        check("T201 encode_rdp_text 保住 BOM 与原编码（不会把 UTF-16 文件写成 ANSI）",
+              server.encode_rdp_text("abc", "utf-16") == b"\xff\xfe" + "abc".encode("utf-16-le")
+              and server.encode_rdp_text("abc", "latin-1") == b"abc")
+        server.write_rdp_inplace(_u16, b"\xff\xfe" + "x".encode("utf-16-le"))
+        check("T202 write_rdp_inplace 走 r+b（open(p,'w') 对隐藏文件必 Errno 13）",
+              open(_u16, "rb").read() == b"\xff\xfe" + "x".encode("utf-16-le"))
+        check("T203 default_rdp_status 带 encoding / hidden（不再只有一个 auth_level）",
+              "encoding" in st and "hidden" in st, str(sorted(st.keys())))
+        check("T204 有 mstsc_running()（写失败时能提示「关掉远程桌面再试」）",
+              callable(getattr(server, "mstsc_running", None)))
+        if server.IS_WINDOWS:
+            _hp = os.path.join(_tmpd, "Default.rdp")
+            with open(_hp, "wb") as _f:
+                _f.write(b"\xff\xfe" + ("screen mode id:i:2\r\nauthentication level:i:2\r\n"
+                                        .encode("utf-16-le")))
+            server.set_file_attrs(_hp, 0x80 | 0x2)      # NORMAL|HIDDEN —— mstsc 建出来就长这样
+            _orig_path = server.default_rdp_path
+            server.default_rdp_path = lambda pp=_hp: pp
+            try:
+                _ok, _note = server.ensure_default_rdp_auth_level()
+                _raw = open(_hp, "rb").read()
+                _attrs = server.file_attrs(_hp)
+            finally:
+                server.default_rdp_path = _orig_path
+            # 注意断言写法：BOM 在文件**开头**（screen mode id 之前），不是紧贴 auth 行。
+            # 之前写成 b"\xff\xfe" + auth行 必然 False —— 那是断言错了，不是修错了。
+            check("T205 隐藏 + UTF-16 的 Default.rdp 真能改成 auth=0（保住 BOM 与 HIDDEN）",
+                  _ok is True
+                  and _raw[:2] == b"\xff\xfe"
+                  and "authentication level:i:0\r\n".encode("utf-16-le") in _raw
+                  and bool(_attrs & 0x2),
+                  "%s | %s | attrs=0x%02x" % (_ok, _note, _attrs))
+    finally:
+        shutil.rmtree(_tmpd, ignore_errors=True)
 
     # ---------------- 路由健壮性 ----------------
     print("[路由]")
@@ -821,7 +980,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.5.0", server.VERSION == "1.5.0", server.VERSION)
+    check("T168 server.py 版本 1.5.4", server.VERSION == "1.5.4", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -848,6 +1007,88 @@ def main():
     app_txt = open(os.path.join(wb_dir, "static", "app.js"), encoding="utf-8").read()
     check("T175 app.js 有 restoreBadge 并渲染进机器表",
           "function restoreBadge" in app_txt and "restoreBadge(m.restore)" in app_txt)
+
+    # ---------------- 状态栏「状态详情」折叠 ----------------
+    css_txt = open(os.path.join(wb_dir, "static", "styles.css"), encoding="utf-8").read()
+    check("T176 app.js 有状态详情折叠（machineKey / FOLD_DETAILS / statusCell / toggleFoldDetail / fold-caret）",
+          all(s in app_txt for s in ("function machineKey", "var FOLD_DETAILS", "function statusCell",
+                                     "function toggleFoldDetail", "fold-caret")),
+          "缺少折叠实现")
+    check("T177 折叠状态持久化到 localStorage（wb.foldDetails），刷新后保持",
+          '"wb.foldDetails"' in app_txt and "localStorage.setItem" in app_txt)
+    check("T178 状态栏统一走 statusCell（定义 1 次 + 池内机器 / Tailscale 节点各 1 处调用）",
+          app_txt.count("statusCell(") >= 3, "statusCell 出现 %d 次" % app_txt.count("statusCell("))
+    check("T179 有「折叠详情」按钮 #btn-fold-all（HTML+JS 都接了），styles.css 有折叠样式",
+          'id="btn-fold-all"' in idx_txt and '#btn-fold-all' in app_txt
+          and ".fold-caret" in css_txt and ".st-wrap.folded" in css_txt)
+
+    # ---------------- 池内机器行：真 IP + 一键登录 ----------------
+    _pool_fn = ""
+    if "function poolOnlyRow(" in app_txt:
+        _pool_fn = app_txt.split("function poolOnlyRow(", 1)[1].split("\nfunction ", 1)[0]
+    check("T180 池内机器行：有 IP 就渲染真 IP（不再写死 —）+ 一键登录按钮 data-rdp",
+          "ipCell" in _pool_fn and "data-rdp=" in _pool_fn and "一键登录" in _pool_fn
+          and "m.ip" in _pool_fn,
+          "poolOnlyRow 未接真 IP / 登录按钮")
+    check("T181 池内机器行：可达性未知/不可达分开呈现（btn-warn）+ styles.css 有该样式",
+          "btn-warn" in _pool_fn and "reachable" in _pool_fn and ".btn-warn" in css_txt)
+    check("T182 池内机器行仍保留「运行日志」入口（拿不到 IP 时还能看进度）",
+          "运行日志" in _pool_fn and "m.run_url" in _pool_fn)
+
+    # ---------------- 中文环境（0f 步超时修复，run 35813312970 复盘） ----------------
+    # 事故：0f 步 timeout-minutes=6（360s），而脚本「同步等语言包」写死 300s，
+    # 加上系统 locale 2s + 用户 hive 33s + 增强步 ≥19s ≈ 360s —— 每次必然顶到
+    # step 超时被 kill（实测 03:12:41 起 → 03:18:41 被杀，正好 360s）。
+    # 更糟的是 GitHub 结束 step 时会杀掉该 step 的整棵进程树，老版 Start-Process 起的
+    # 那个「后台」子进程跟着一起死 → 语言包从没装成功过；而 CHINESE_STATUS 写在脚本
+    # 末尾，被 kill 后一个状态都没透出 → ENV READY 里「中文环境」整行消失，看起来
+    # 就是「每次都失败」。修复：语言包改挂计划任务（活得过 step）、状态分段落盘、
+    # 同步等待挪到最后且默认降到 90s。以下断言把这条设计钉死。
+    print("[中文环境 0f 超时修复]")
+    sc_path = os.path.join(repo_dir, "scripts", "setup-chinese.ps1")
+    check("T183 存在 setup-chinese.ps1", os.path.isfile(sc_path))
+    sc_txt = open(sc_path, encoding="utf-8-sig").read() if os.path.isfile(sc_path) else ""
+
+    check("T184 语言包安装改挂计划任务（Register-ScheduledTask + Start-ScheduledTask）",
+          "Register-ScheduledTask" in sc_txt and "Start-ScheduledTask" in sc_txt)
+    check("T185 计划任务以 SYSTEM 身份跑（-UserId 'SYSTEM' -LogonType ServiceAccount）",
+          "-UserId 'SYSTEM'" in sc_txt and "-LogonType ServiceAccount" in sc_txt)
+    check("T186 保留 Start-Process 兜底（本机无计划任务组件时仍能装）",
+          "Start-Process -FilePath $exe" in sc_txt and "退回 Start-Process" in sc_txt)
+    check("T187 同步等待默认降到 90s（老的 300s 必然顶穿 6 分钟 step 超时）",
+          "$LangPackWaitSec    = 90" in sc_txt and "$LangPackWaitSec    = 300" not in sc_txt)
+    check("T188 同步等待挪到「用户 hive 写完之后」（唯一不可控时长放最后）",
+          "同步等后台语言包最多" in sc_txt
+          and sc_txt.index("同步等后台语言包最多") > sc_txt.index("-Phase 'userhive'"))
+    check("T189 状态分段落盘：Write-ChineseState 定义 1 次 + 至少 5 处调用",
+          sc_txt.count("function Write-ChineseState") == 1
+          and sc_txt.count("Write-ChineseState -LangState") >= 5,
+          "调用 %d 次" % sc_txt.count("Write-ChineseState -LangState"))
+    check("T190 状态同时落盘 _state\\chinese-status.json（供工作台/收尾核对读）",
+          "chinese-status.json" in sc_txt and "[System.IO.File]::Move" in sc_txt)
+    check("T191 有 -CheckOnly 收尾核对模式（装完补报 + 清掉计划任务）",
+          "[switch]$CheckOnly" in sc_txt and "Unregister-ScheduledTask" in sc_txt)
+    check("T192 有 -SysDir 参数（计划任务子进程不继承 job 环境变量）",
+          "[string]$SysDir" in sc_txt and '-SysDir "{3}"' in sc_txt)
+    check("T193 两个 -Credential 调用不再裸用 -Wait（改 Invoke-AsUser + Wait-Process -Timeout）",
+          "function Invoke-AsUser" in sc_txt and "Wait-Process -Id $p.Id -Timeout" in sc_txt
+          and "-Credential $credU -Wait" not in sc_txt and "-Credential $cred2 -Wait" not in sc_txt)
+
+    check("T194 0f 步 timeout-minutes 提到 8（脚本正常 100~150s 返回）",
+          "timeout-minutes: 8" in wf_txt)
+    check("T195 0f 步名标明「秒级放行 / 计划任务后台」",
+          "秒级放行" in wf_txt and "计划任务后台" in wf_txt)
+    check("T196 新增 12b 步做收尾核对（setup-chinese.ps1 -CheckOnly）",
+          "12b. 中文语言包收尾核对" in wf_txt)
+    check("T197 保活循环补报中文语言包（-CheckOnly 至少出现 2 次：12b + keepalive）",
+          wf_txt.count("setup-chinese.ps1 -CheckOnly") >= 2,
+          "出现 %d 次" % wf_txt.count("setup-chinese.ps1 -CheckOnly"))
+    check("T198 ENV READY 中文语言包提示 langpack.log 路径",
+          "langpack.log" in wf_txt)
+    check("T199 -UserHiveOnly 不抹掉上一步状态（语言包/系统 locale 沿用，不再被写成 SKIPPED）",
+          "本次不处理语言包，沿用上一步状态" in sc_txt
+          and "$prevLp = [string]$env:CHINESE_LANGPACK" in sc_txt
+          and "$prevSys = [string]$env:CHINESE_SYSTEMLOCALE" in sc_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

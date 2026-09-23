@@ -451,21 +451,43 @@ Windows 更新缓存、安装包残留。
 #### ⑩ 中文环境：简体中文 + 微软拼音输入法（登录前生效）
 
 runner 镜像默认 **en-US**，RDP 用户 a 首次登录是纯英文界面且**没有中文输入法**。
-`scripts/setup-chinese.ps1` 在**整机还原之后、保活之前**（第 9 步）把环境配好：
+`scripts/setup-chinese.ps1` 在**瘦身之前**（第 0f 步）就把环境配好 —— 越早启动，
+语言包越有时间在后面的瘦身 / 拉数据 / 还原（约 40 分钟）里悄悄装完：
 
 | 层级 | 做什么 |
 |------|--------|
-| **语言包** | `Install-Language zh-Hans-CN`（LanguagePackManagement 模块），失败回退 `Add-WindowsCapability` |
+| **语言包** | `Install-Language zh-Hans-CN`（LanguagePackManagement 模块），失败回退 `Add-WindowsCapability`。**交给计划任务在后台装**（约 30~43 分钟），不阻塞开机 |
 | **机器级（HKLM）** | `Set-WinSystemLocale zh-CN` + `Set-WinUILanguageOverride` + `Set-WinDefaultInputMethodOverride`（微软拼音）+ `Set-WinHomeLocation`（中国） |
 | **用户级（a 的 HKCU）** | 写「语言列表 `zh-Hans-CN` + `en-US`」+ **微软拼音 TIP** + `Keyboard Layout\Preload`（`1=00000804` 中文、`2=00000409` 美式键盘）。登录后即带中文输入法，`Win+Space` / `Ctrl+Space` 切换 |
 
 > **为什么直接写注册表**：`Set-WinUserLanguageList` 只作用于「当前用户」，而脚本以 `runneradmin` 身份运行。
 > 所以先 `reg load` 用户 a 的 `NTUSER.DAT`（复用预还原那套机制），按一台真实中文 Windows 的结构写入，
 > 卸载后再尝试用 `Start-Process -Credential` 在该用户会话里跑一次 `Set-WinUserLanguageList` 做增强（失败不影响）。
+> 用户级语言键在 0f 步先写一遍；第 8 步「预还原」会导入 `HKCU-Software.reg` 把它覆盖掉，
+> 所以第 **8b** 步还要再补写一次（幂等、秒级）。
 
-- **顺序很关键**：必须在**整机还原之后** —— 否则快照里导入的英文 HKCU（`Control Panel\International`）会把中文设置覆盖掉
+##### 为什么语言包要「转计划任务」+「状态分段落盘」（2026-09-23 复盘）
+
+`0f` 步曾**每次运行都超时**（run `35813312970`：`03:12:41` 起 → `03:18:41` 被 `timeout-minutes: 6` 杀掉，
+正好 360s），Actions 里看着就是「中文每次都设置失败」。三个叠加的坑：
+
+| # | 问题 | 现在怎么修 |
+|---|------|-----------|
+| ① | **超时预算算错**：脚本里「同步等语言包」写死 300s，加上系统 locale 2s + 用户 hive 33s + 增强步 ≥19s ≈ 360s，必然顶到 step 超时 | 同步等待挪到**最后**且默认降到 **90s**；`0f` 步 `timeout-minutes` 提到 **8** 作纯保险（脚本正常 100~150s 就返回） |
+| ② | **「超时转后台」根本没生效**：GitHub 结束/超时一个 step 时会杀掉该 step 的**整棵进程树**，`Start-Process` 起的「后台」子进程跟 step 同树，一起被 kill —— 语言包**从来没装成功过**（日志里只有 `TIMEOUT_BACKGROUND`，从没出现「语言包安装结束」） | 改挂**计划任务**（`Register-ScheduledTask` + SYSTEM 身份），由 Task Scheduler 服务拉起，不在 step 进程树里，真正活到开机流程之后；`Start-Process` 仅作兜底 |
+| ③ | **状态只在脚本末尾写一次**：被 kill 后 `CHINESE_STATUS` 等一个都没透出，ENV READY 里「中文环境」整行消失 | 状态**分段落盘**（`GITHUB_ENV` + `_state\chinese-status.json`），任何时刻被 kill 都留得下一份自洽状态 |
+
+配套：
+
+- **`12b` 步**（ENV READY 之前）跑 `setup-chinese.ps1 -CheckOnly` 补核对一次；**保活循环**每 10 分钟也补查一次 ——
+  后台装完了就把 `CHINESE_LANGPACK` / `CHINESE_STATUS` 刷成真实结果（`PRESENT`），并清掉计划任务
+- **`-UserHiveOnly` 不抹状态**：第 8b 步会**沿用**上一步的语言包 / 系统 locale 状态，
+  不再把它们写成 `SKIPPED`（否则 ENV READY 会误报「没装」，而实际是「正在后台装」）
+- 两个 `Start-Process -Credential` 调用都加了 **`Wait-Process -Timeout 90`** —— 老代码裸用 `-Wait`，
+  一旦凭证 / 二次登录服务有问题就会永久挂住开机
 - 状态行：`中文环境 : OK   (语言包 OK / 系统 OK / 用户 OK)`，
-  透出 `CHINESE_STATUS` / `CHINESE_LANGPACK` / `CHINESE_SYSTEMLOCALE` / `CHINESE_USERHIVE`
+  透出 `CHINESE_STATUS` / `CHINESE_LANGPACK` / `CHINESE_SYSTEMLOCALE` / `CHINESE_USERHIVE`；
+  语言包日志在 `_state\langpack.log`
 - 开关：`snapshot-config.json` 的 `chinese.enabled` / `installLanguagePack`；手动触发可用输入 **`chinese`** 填 `off` 跳过
 - fail-soft：**永不返回非 0**，语言包下载失败只告警（界面可能仍是英文，但区域 / 键盘布局已改）
 
@@ -653,7 +675,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（224 项）
+python workbench\selftest.py   :: 离线自测（273 项）
 ```
 
 | 面板 | 内容 |
@@ -735,7 +757,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（224 项）
+│   ├── selftest.py                     #   离线自测（273 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

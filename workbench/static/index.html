@@ -79,10 +79,12 @@
       <div class="card-head">
         <h2>&#128421;&#65039; 机器运行实况</h2>
         <div class="head-right">
-          <label class="switch" data-tip="历史节点很多，默认只列当前在线（Tailscale 上能 ping 到）的机器">
+          <label class="switch" data-tip="历史节点很多，勾上只列当前在线的 Tailscale 节点。注意：「池内机器」行（账号池里已派发/在跑、但本机 Tailscale 视图看不到其节点）无论勾没勾都会显示 —— 那正是最需要看见的；只有已结束的池槽位会跟着藏起来。">
             <input type="checkbox" id="only-online" checked />
             <span>只看在线</span>
           </label>
+          <button class="btn btn-mini btn-ghost" id="btn-fold-all"
+                  data-tip="把所有机器的「状态详情」行（run 号 / 起跑时间 / 运行时长）一次性收起或展开。单行也能折叠：点状态栏徽标旁的小箭头（▾ 展开中 / ▸ 已折叠）。折叠状态记在本地，刷新后保持。">折叠详情</button>
           <span class="muted" id="machines-meta"></span>
         </div>
       </div>
@@ -90,9 +92,9 @@
         <table class="tbl" id="tbl-machines">
           <thead>
             <tr>
-              <th data-tip="机器主机名；下方小字是该机器归属的 GitHub 账号（派发它的账号）">主机</th>
+              <th data-tip="Tailscale 节点名（一次性 runner 的设备主机名都叫 github-rdp-server，故显示带去重后缀的唯一短名，如 github-rdp-server-11）；下方小字是该机器归属的 GitHub 账号（派发它的账号）。「池内机器」行 = 账号池里已派发/在跑、但本机 Tailscale 视图看不到其节点的机器">主机</th>
               <th data-tip="Tailscale 组网 IP。远程桌面（RDP）与 SMB 读机器状态都走这个地址">Tailscale IP</th>
-              <th data-tip="在线 = Tailscale 上能 ping 到；「活跃」= 最近有数据变动。下方显示本次作业已运行多久">状态</th>
+              <th data-tip="在线 = Tailscale 上能 ping 到；「活跃」= 最近有数据变动。下方显示本次作业已运行多久。「运行中」= 这台是一次性 runner，GitHub Actions 的 job 仍是 in_progress，机器确实在跑（哪怕本机 tailnet 看不到它的节点 —— tailnet 状态同步滞后 / 节点掉线都可能）；「已派发 · 排队中」= 派了还没起来。机器是否在跑以 Actions job 为准。详情行可折叠：点徽标旁的小箭头（▾/▸），或右上角「折叠详情」一键收起全部。">状态</th>
               <th data-tip="池角色：primary 主（唯一负责写 139 云盘）、standby 备（只读热备）、单机 = 未入池">角色</th>
               <th data-tip="开机时从 139 云盘拉取「数据」与「快照」的结果（机器上 _state\restore-status.json）。OK=已还原；EMPTY=139 上确无数据（正常终态）；TRANSIENT=网络抖动/后台拉取中，保活循环会自动重试；FAILED/AUTH=失败需人工处理。上方小字=数据，下方=快照">恢复</th>
               <th data-tip="机器上 D:\cloudrdp-sys\_snapshot 快照的新鲜度：多久之前 / 多少文件。点「一键备份」可立即同步到 139 云盘并刷新快照">快照</th>

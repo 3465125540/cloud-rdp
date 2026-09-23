@@ -375,13 +375,33 @@ jobs:
           .\scripts\send-connection-mail.ps1 -LogPath "$env:CLOUDRDP_SYS_DIR\_state\mail.log"
       # ---------------------------------------------------------------- 提前启动中文环境
       # 为什么放在瘦身之前：Install-Language 要联网下载 FoD 语言包，实测每次 30~43 分钟，
-      # 是整个开机流程里最慢的一步。提到最前面 + 「5 分钟封顶、超时转后台」之后，
-      # 它能在后面瘦身/拉数据/还原的 ~40 分钟里悄悄装完，而开机流程一步都不多等。
+      # 是整个开机流程里最慢的一步。提到最前面，它就能在后面瘦身/拉数据/还原的
+      # ~40 分钟里悄悄装完，而开机流程一步都不多等。
+      #
+      # ⚠️ 2026-09-23 复盘（run 35813312970，每次必超时）—— 老版有两个硬伤：
+      #   ① 超时预算算错了：0f 步 timeout-minutes=6（360s），而脚本里「同步等语言包」
+      #      就写死 300s，加上系统 locale 2s + 用户 hive 33s + 增强步 ≥19s ≈ 360s，
+      #      必然顶到 step 超时被 kill。实测：03:12:41 起 → 03:17:46 等满 300s
+      #      → 03:18:22 写完用户 hive → 03:18:41 被杀，正好 360s。
+      #   ② 「超时转后台」根本没生效：GitHub Actions 结束/超时一个 step 时会杀掉该 step
+      #      的**整棵进程树**，老版 Start-Process 起的那个「后台」子进程跟 step 同树，
+      #      于是一起被 kill —— 语言包**从来没装成功过**（日志里只有 TIMEOUT_BACKGROUND，
+      #      从没出现「语言包安装结束」）。而且 CHINESE_STATUS 写在脚本最末尾，
+      #      被 kill 后一个状态都没透出 → ENV READY 里「中文环境」整行消失。
+      #
+      # 现在的设计（脚本内改动，见 scripts/setup-chinese.ps1 头部说明）：
+      #   · 语言包安装改挂**计划任务**（Task Scheduler 服务拉起，不在本 step 进程树里，
+      #     活得过 step 超时），主脚本只负责挂任务 + 写注册表，秒级返回；
+      #   · 状态**分段落盘**（GITHUB_ENV + _state\chinese-status.json），
+      #     任何时刻被 kill 都留得下一份自洽状态；
+      #   · 「同步等语言包」挪到最后、默认只等 90s —— 唯一不可控时长的那段放最后。
+      # 这里给到 8 分钟是纯保险：脚本正常 100~150s 就返回。
+      #
       # 用户级语言键这里先写一遍；第 8 步「预还原」会导入 HKCU-Software.reg 把它覆盖掉，
       # 所以第 8b 步还要再补写一次（幂等、秒级）。
-      - name: 0f. 设置中文 + 微软拼音输入法（5 分钟封顶，超时转后台）
-        timeout-minutes: 6            # 硬兜底：脚本自己 5 分钟就放行，这层防卡死
-        continue-on-error: true       # 被超时杀掉也不阻断后续步骤
+      - name: 0f. 设置中文 + 微软拼音输入法（秒级放行，语言包转计划任务后台）
+        timeout-minutes: 8            # 保险：脚本正常 100~150s 返回，这里只是防卡死
+        continue-on-error: true       # 万一被超时杀掉也不阻断后续步骤
         shell: pwsh
         run: .\scripts\setup-chinese.ps1
       - name: 1. 开机瘦身（删镜像自带大件，约 70 GB）
@@ -437,6 +457,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_BILLING_TOKEN: ${{ secrets.GH_BILLING_TOKEN }}
         run: .\scripts\quota-report.ps1
+      # 中文语言包是 0f 步挂到计划任务里后台装的（约 30~43 分钟），到这一步可能刚好装完。
+      # 这里补核对一次：装完了就把 CHINESE_STATUS/CHINESE_LANGPACK 刷成真实结果，
+      # 让下面 ENV READY 显示的是实话（幂等、秒级；没装完就照实写「后台安装中」）。
+      - name: 12b. 中文语言包收尾核对（后台装完则补报）
+        continue-on-error: true
+        shell: pwsh
+        run: .\scripts\setup-chinese.ps1 -CheckOnly
       - name: 13. 环境就绪汇总（ENV READY）
         shell: pwsh
         run: |
@@ -615,7 +642,8 @@ jobs:
             if ($ch -eq "OK") { $chc = "Green" } elseif ($ch -eq "PARTIAL") { $chc = "Yellow" } elseif ($ch -eq "FAILED") { $chc = "Red" }
             Write-Host "  中文环境     : $ch   (语言包 $($env:CHINESE_LANGPACK) / 系统 $($env:CHINESE_SYSTEMLOCALE) / 用户 $($env:CHINESE_USERHIVE))" -ForegroundColor $chc
             if ($ch -eq "PARTIAL" -or $ch -eq "FAILED") {
-              Write-Host "  (中文未完全生效：登录后若无输入法，检查 139 上的语言包下载是否成功)" -ForegroundColor DarkGray
+              Write-Host "  (中文未完全生效：语言包由 Windows Update 下载，日志 $sysDir\_state\langpack.log；" -ForegroundColor DarkGray
+              Write-Host "   注册表部分（用户语言键/微软拼音）已写好，语言包装完新开一个会话即生效)" -ForegroundColor DarkGray
             }
           }
           $up = $env:SNAPSHOT_USER_PRERESTORE
@@ -812,6 +840,21 @@ jobs:
                           if ($o2.data) { $dataSt = [string]$o2.data.status }
                           Write-Host "[self-heal] 重拉后数据恢复状态=$dataSt"
                       } catch { }
+                  }
+
+                  # ---------- 中文语言包：后台装完就补记（0f 挂的计划任务）----------
+                  # 语言包要 30~43 分钟，常晚于 step 12b 那次核对；保活循环要跑几小时，
+                  # 这里每 10 分钟补查一次，装完就把 chinese-status.json 刷成真实结果。
+                  $csJson = Join-Path $env:CLOUDRDP_SYS_DIR '_state\chinese-status.json'
+                  $csLp = ''
+                  try {
+                      if (Test-Path -LiteralPath $csJson) {
+                          $co = (Get-Content -LiteralPath $csJson -Raw | ConvertFrom-Json)
+                          $csLp = [string]$co.langpack
+                      }
+                  } catch { }
+                  if ($csLp -in @('PENDING', 'TIMEOUT_BACKGROUND')) {
+                      & .\scripts\setup-chinese.ps1 -CheckOnly
                   }
 
                   $snapPend = Join-Path $env:CLOUDRDP_SYS_DIR '_state\snapshot-restore-pending.txt'

@@ -6,6 +6,28 @@
   为什么需要：GitHub runner 的 Windows Server 镜像默认 en-US，
   RDP 用户 a 首次登录是纯英文界面，且没有中文输入法。
 
+  ⚠️ 本脚本的第一原则：**秒级放行，绝不拖慢开机**。
+  Install-Language 联网下载 FoD 语言包实测要 30~43 分钟，而它只是「锦上添花」。
+  所以语言包安装被交给**计划任务**在后台装，主脚本只做三件快事：
+    ① 把安装挂到计划任务（Task Scheduler 服务拉起）
+    ② 立刻写完机器级 locale + 用户级 HKCU 语言键（秒级）
+    ③ 分段落盘 + 透出状态，最后最多再同步等 LangPackWaitSec 秒（默认 90）
+
+  为什么用计划任务，而不是老的「Start-Process + 超时转后台」：
+    2026-09-23 复盘（run 35813312970）查出两个硬伤：
+      a) 0f 步 timeout-minutes=6（360s），而脚本同步等语言包就要 300s，
+         加上系统 locale 2s + 用户 hive 33s + 增强步 ≥19s ≈ 360s —— **必然超时**。
+         实测时间线：03:12:41 起 → 03:17:46 语言包等满 300s → 03:18:22 写完用户 hive
+         → 03:18:41 被 step 超时杀掉，正好 360s。
+      b) GitHub Actions 在 step 超时/结束时会把该 step 的**整棵进程树**杀掉。
+         老代码 Start-Process 起的那个「后台」子进程跟 step 是同一棵树，
+         于是它一起被 kill —— 语言包**从来没装成功过**（日志里只有 TIMEOUT_BACKGROUND，
+         从没出现「语言包安装结束」）。计划任务由 Task Scheduler 服务启动，
+         不属于本 step 的进程树，才能真正活到开机流程之后。
+      c) 老代码把 CHINESE_STATUS 等状态写在脚本**最后**，被 kill 后一个都没透出 ——
+         所以 ENV READY 里「中文环境」整行消失，看起来就是「每次都失败」。
+         现在改成**分段落盘**，任何时刻被 kill 都留得下一份自洽的状态。
+
   两层设置：
     A. 机器级（HKLM）—— 安装 zh-Hans-CN 语言包 + 系统 locale / 显示语言覆盖。
        注册表立即写入；locale 类设置要重启才完全生效（对一次性 VM 意义有限，
@@ -23,6 +45,7 @@
 
   本脚本永不返回非 0（失败只告警，不影响开机）。结果透出：
     CHINESE_STATUS / CHINESE_LANGPACK / CHINESE_SYSTEMLOCALE / CHINESE_USERHIVE
+  同时落盘 <SysDir>\_state\chinese-status.json，供工作台 / 收尾核对步骤读取。
 #>
 [CmdletBinding()]
 param(
@@ -30,16 +53,23 @@ param(
     [string]$PrimaryLocale   = 'zh-Hans-CN',
     [string]$SecondaryLocale = 'en-US',
     [string]$ConfigPath      = '',
+    # 状态目录（语言包进度 / 状态文件都在它下面的 _state）。
+    # 必须能显式传入：计划任务子进程**不继承** job 环境变量，拿不到 CLOUDRDP_SYS_DIR。
+    [string]$SysDir          = '',
     [switch]$SkipLanguagePack,
     [switch]$SkipUserHive,
     # 只补写「用户 HKCU 语言键」（秒级）。用于「预还原之后」再补一次 ——
     # 因为预还原会导入 registry\user\HKCU-Software.reg，把早段写的语言键覆盖掉。
     [switch]$UserHiveOnly,
     # 子进程模式：只装语言包，装完写 langpack-done.txt 后退出。
-    # 由父进程用 Start-Process 拉起，超时则父进程放行、它继续在后台装。
+    # 由计划任务（首选）或 Start-Process（兜底）拉起。
     [switch]$InstallPackOnly,
-    # 同步等待语言包的上限（秒）。超时转后台，不阻塞开机。
-    [int]$LangPackWaitSec    = 300,
+    # 收尾核对模式：不装包、不写注册表，只把后台安装的最新结果透出（幂等、秒级）。
+    # 用于 step 12b / keepalive 自愈循环 —— 后台装完了要有人把它记下来。
+    [switch]$CheckOnly,
+    # 同步等待语言包的上限（秒）。超时就把状态标成「后台安装中」，不阻塞开机。
+    # 默认 90s：足够吃掉「已缓存 / 秒装完」的快路径，又远小于 step 超时。
+    [int]$LangPackWaitSec    = 90,
     [switch]$DryRun
 )
 
@@ -105,6 +135,150 @@ if (-not [string]::IsNullOrWhiteSpace($env:INPUT_CHINESE)) {
     elseif ($ov -eq 'on' -or $ov -eq 'true' -or $ov -eq '1') { $enabled = $true }
 }
 
+# ---------------------------------------------------------------- 状态目录（语言包进度 / 状态文件）
+if ([string]::IsNullOrWhiteSpace($SysDir)) {
+    $SysDir = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
+}
+$stateDir  = Join-Path $SysDir '_state'
+$lpDone    = Join-Path $stateDir 'langpack-done.txt'
+$lpLog     = Join-Path $stateDir 'langpack.log'
+$stateJson = Join-Path $stateDir 'chinese-status.json'
+$taskName  = 'CloudRDP-LangPack'
+try { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null } catch { }
+
+# ---------------------------------------------------------------- 状态透出 / 落盘
+$problems = New-Object System.Collections.Generic.List[string]
+
+# 总状态口径（与工作台 server.py 的展示口径一致）：
+#   语言包 PENDING / TIMEOUT_BACKGROUND = 还在后台装 → 不算 OK，但也不算失败
+function Get-ChineseOverall {
+    param([string]$LangState, [string]$HiveState)
+    $langBusy = @('PENDING', 'TIMEOUT_BACKGROUND')
+    if ($problems.Count -eq 0 -and ($langBusy -notcontains $LangState)) { return 'OK' }
+    if ($LangState -eq 'FAILED' -and $HiveState -ne 'OK') { return 'FAILED' }
+    return 'PARTIAL'
+}
+
+# 分段落盘：任何时刻调用都写出一份自洽快照。这样即使脚本在最后的同步等待里
+# 被 step 超时杀掉，GITHUB_ENV 里也已经有前面写好的状态（老代码的致命缺陷）。
+function Write-ChineseState {
+    param([string]$LangState, [string]$SysState, [string]$HiveState, [string]$Phase, [string]$EnhState = '')
+    $overall = Get-ChineseOverall -LangState $LangState -HiveState $HiveState
+    Set-GhEnv "LANGPACK=$LangState"
+    Set-GhEnv "CHINESE_LANGPACK=$LangState"
+    Set-GhEnv "CHINESE_SYSTEMLOCALE=$SysState"
+    Set-GhEnv "CHINESE_USERHIVE=$HiveState"
+    Set-GhEnv "CHINESE_LOCALE=$loc"
+    if (-not [string]::IsNullOrWhiteSpace($EnhState)) { Set-GhEnv "CHINESE_ENHANCE=$EnhState" }
+    Set-GhEnv "CHINESE_STATUS=$overall"
+    try {
+        $obj = [ordered]@{
+            updated_utc   = (Get-Date).ToUniversalTime().ToString('o')
+            phase         = $Phase
+            status        = $overall
+            langpack      = $LangState
+            systemlocale  = $SysState
+            userhive      = $HiveState
+            enhance       = $EnhState
+            locale        = $loc
+            secondary     = $sec
+            host          = $env:COMPUTERNAME
+            run_id        = $env:GITHUB_RUN_ID
+            problems      = @($problems)
+        }
+        $tmp = $stateJson + '.tmp'
+        ($obj | ConvertTo-Json -Depth 5) | Out-File -LiteralPath $tmp -Encoding utf8
+        try { if ([System.IO.File]::Exists($stateJson)) { [System.IO.File]::Delete($stateJson) } } catch { }
+        [System.IO.File]::Move($tmp, $stateJson)
+    } catch { }
+    return $overall
+}
+
+# ---------------------------------------------------------------- 后台安装：优先计划任务
+# 为什么必须是计划任务：GitHub Actions 会在 step 结束/超时时杀掉该 step 的整棵进程树，
+# Start-Process 的子进程活不过 step。计划任务由 Task Scheduler 服务拉起，不在那棵树里。
+function Start-LangPackBackground {
+    $exe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+    if (-not $exe) { $exe = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source }
+    if (-not $exe) { Warn '找不到 pwsh/powershell，无法启动语言包安装'; return 'FAILED' }
+
+    $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -InstallPackOnly -PrimaryLocale "{1}" -RdpUser "{2}" -SysDir "{3}"' -f `
+              $PSCommandPath, $loc, $RdpUser, $SysDir
+
+    # ① 计划任务（首选；活得过 step 超时）
+    try {
+        if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
+            $act = New-ScheduledTaskAction -Execute $exe -Argument $argStr -WorkingDirectory $PSScriptRoot
+            $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                       -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+            Register-ScheduledTask -TaskName $taskName -Action $act -Principal $prn -Settings $set `
+                -Description 'CloudRDP: 开机后台安装 zh-Hans-CN 语言包（含微软拼音）' -Force -ErrorAction Stop | Out-Null
+            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            Note ("  已挂计划任务 {0}（Task Scheduler 拉起，不受 step 超时影响）" -f $taskName)
+            return 'PENDING'
+        }
+        Warn '本机没有 Register-ScheduledTask，退回 Start-Process'
+    } catch { Warn "计划任务方式失败（$($_.Exception.Message)），退回 Start-Process" }
+
+    # ② Start-Process（兜底：step 超时会连同它一起被杀，但总比什么都不做强）
+    try {
+        $child = Start-Process -FilePath $exe -ArgumentList $argStr -WindowStyle Hidden -PassThru -ErrorAction Stop
+        if ($child) { Note ("  已起后台进程 PID {0}（注意：step 超时会连同它一起被杀）" -f $child.Id); return 'PENDING' }
+    } catch { Warn "Start-Process 也失败：$($_.Exception.Message)" }
+    return 'FAILED'
+}
+
+# 在指定用户会话里跑一条命令。老代码用 -Wait，一旦凭证/二次登录服务有问题就永久挂住 ——
+# 这里改成 -PassThru + Wait-Process -Timeout，超时就杀掉，绝不拖死开机。
+function Invoke-AsUser {
+    param(
+        [System.Management.Automation.PSCredential]$Cred,
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [int]$TimeoutSec = 90,
+        [string]$What = 'user-cmd'
+    )
+    $p = $null
+    try { $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Credential $Cred -WindowStyle Hidden -PassThru -ErrorAction Stop }
+    catch { Note ("  {0} 启动失败：{1}" -f $What, $_.Exception.Message); return $null }
+    if (-not $p) { return $null }
+    try { Wait-Process -Id $p.Id -Timeout $TimeoutSec -ErrorAction Stop }
+    catch {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+        Note ("  {0} 超过 {1} 秒未结束，已放弃（不阻塞开机）" -f $What, $TimeoutSec)
+    }
+    return $p
+}
+
+# ---------------------------------------------------------------- 写用户 HKCU 语言键
+function Write-ChineseUserHive {
+    param([string]$Hive, [string]$Locale, [string]$SecLocale, [string]$Tip)
+    $ok = 0; $fail = 0
+    $lc = $(if ($PreloadMap.ContainsKey($Locale)) { $PreloadMap[$Locale] } else { '00000804' })
+    $sc = $(if ($PreloadMap.ContainsKey($SecLocale)) { $PreloadMap[$SecLocale] } else { '00000409' })
+
+    $cmds = @(
+        # 语言列表（REG_MULTI_SZ，用 \0 分隔）
+        @('add', "$Hive\Control Panel\International\User Profile", '/v', 'Languages', '/t', 'REG_MULTI_SZ', '/d', "$Locale\0$SecLocale", '/f'),
+        # 主语言：微软拼音输入法（TIP）+ 缓存语言名
+        @('add', "$Hive\Control Panel\International\User Profile\$Locale", '/v', $Tip, '/t', 'REG_DWORD', '/d', '1', '/f'),
+        @('add', "$Hive\Control Panel\International\User Profile\$Locale", '/v', 'CachedLanguageName', '/t', 'REG_SZ', '/d', '@Winlangdb.dll,-1650', '/f'),
+        # 键盘布局：1 = 中文（微软拼音），2 = 美式键盘（Win+Space 切换）
+        @('add', "$Hive\Keyboard Layout\Preload", '/v', '1', '/t', 'REG_SZ', '/d', $lc, '/f'),
+        @('add', "$Hive\Keyboard Layout\Preload", '/v', '2', '/t', 'REG_SZ', '/d', $sc, '/f'),
+        # 区域：Locale / sLanguage
+        @('add', "$Hive\Control Panel\International", '/v', 'Locale',     '/t', 'REG_SZ', '/d', '00000804', '/f'),
+        @('add', "$Hive\Control Panel\International", '/v', 'sLanguage',  '/t', 'REG_SZ', '/d', 'CHS', '/f')
+    )
+    foreach ($c in $cmds) {
+        $a = [object[]]$c
+        & reg.exe @a 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $ok++ } else { $fail++ }
+    }
+    return @{ ok = $ok; fail = $fail }
+}
+
 Say '===== 中文环境设置开始 ====='
 
 if (-not $enabled) {
@@ -113,18 +287,9 @@ if (-not $enabled) {
     exit 0
 }
 
-$problems = New-Object System.Collections.Generic.List[string]
-
-# ---------------------------------------------------------------- 状态文件（语言包进度）
-$SysDir   = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
-$stateDir = Join-Path $SysDir '_state'
-$lpDone   = Join-Path $stateDir 'langpack-done.txt'
-$lpLog    = Join-Path $stateDir 'langpack.log'
-try { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null } catch { }
-
 # ---------------------------------------------------------------- 子进程模式：只装语言包
-# 由父进程 Start-Process 拉起。装完（无论成败）写 langpack-done.txt，
-# 父进程靠这个标记判断「是否已在限时内装好」。
+# 由计划任务（首选）拉起。装完（无论成败）写 langpack-done.txt，
+# 父进程 / 收尾核对步骤靠这个标记判断「后台装完没」。
 if ($InstallPackOnly) {
     $res = 'FAILED'
     try {
@@ -153,12 +318,57 @@ if ($InstallPackOnly) {
     exit 0
 }
 
-# ---------------------------------------------------------------- 1. 安装语言包（限时；超时转后台）
-# 为什么限时：真机实测 Install-Language 每次要 30~43 分钟（联网下载 FoD 语言包），
-# 而它在整个开机流程里只是「锦上添花」。所以最多同步等 LangPackWaitSec（默认 300 秒），
-# 超时就把安装交给后台子进程继续跑，开机流程立刻放行下一步。
-# 这也是「把中文步骤提到最前」的配套：越早启动，后台越有时间在开机完成前装完。
+# ---------------------------------------------------------------- 收尾核对模式
+# 不装包、不写注册表：只把「后台到底装完没」查清楚并透出。step 12b / keepalive 用。
+if ($CheckOnly) {
+    $hiveState = if ($env:CHINESE_USERHIVE) { [string]$env:CHINESE_USERHIVE } else { 'UNKNOWN' }
+    $sysState  = if ($env:CHINESE_SYSTEMLOCALE) { [string]$env:CHINESE_SYSTEMLOCALE } else { 'UNKNOWN' }
+    $lpState   = if ($env:CHINESE_LANGPACK) { [string]$env:CHINESE_LANGPACK } else { 'PENDING' }
+
+    # ① 计划任务写的完成标记
+    if (Test-Path -LiteralPath $lpDone) {
+        $v = (Get-Content -LiteralPath $lpDone -Raw -Encoding ascii).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($v)) { $lpState = $v }
+    }
+    # ② 最强信号：直接问系统装没装（不依赖任何标记文件）
+    try {
+        $langs = @(Get-InstalledLanguage -ErrorAction SilentlyContinue | ForEach-Object { $_.LanguageId })
+        if ($langs -contains $loc) { $lpState = 'PRESENT' }
+    } catch { }
+    if ($lpState -eq 'FAILED') { $problems.Add('langpack') }
+
+    $overall = Write-ChineseState -LangState $lpState -SysState $sysState -HiveState $hiveState -Phase 'check'
+    Say ("===== 中文环境收尾核对：{0}（语言包 {1} / 系统 {2} / 用户 {3}）=====" -f $overall, $lpState, $sysState, $hiveState)
+    # 装完了就把计划任务清掉（幂等；一次性 VM 上不清也无害）
+    if (@('OK', 'OK-CAPABILITY', 'PRESENT') -contains $lpState) {
+        try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+    }
+    exit 0
+}
+
+# ================================================================
+# 主流程：先挂后台安装 → 再做快设置 → 最后才同步等一会儿
+# ================================================================
+
+# ---------------------------------------------------------------- 1. 挂后台安装（不等待）
+# 本次不管语言包时（-UserHiveOnly / -SkipLanguagePack）**沿用上一步已透出的状态**，
+# 别把它抹成 SKIPPED —— 否则第 8b 步一跑，ENV READY 里「语言包」就变成 SKIPPED，
+# 看起来像「没装」，而实际是「正在后台装」。
 $lpState = 'SKIPPED'
+if (-not $wantLp) {
+    $prevLp = [string]$env:CHINESE_LANGPACK
+    if (-not [string]::IsNullOrWhiteSpace($prevLp)) {
+        $lpState = $prevLp
+        Say "本次不处理语言包，沿用上一步状态：$lpState"
+    }
+}
+# 同理：本次不动机器级 locale 时（-UserHiveOnly）也沿用上一步状态，别抹成 SKIPPED。
+# 放在这里（而不是第 2 段里）是为了让「第一次落盘」就已经是自洽的。
+$sysState = 'SKIPPED'
+if (-not $wantSys) {
+    $prevSys = [string]$env:CHINESE_SYSTEMLOCALE
+    if (-not [string]::IsNullOrWhiteSpace($prevSys)) { $sysState = $prevSys }
+}
 if ($wantLp) {
     $installed = $false
     try {
@@ -171,60 +381,21 @@ if ($wantLp) {
         Say "语言包已存在：$loc"
     } elseif ($DryRun) {
         $lpState = 'DRYRUN'
-        Say ("[DryRun] 将安装语言包 {0}（最多同步等 {1} 秒，超时转后台）" -f $loc, $LangPackWaitSec)
+        Say ("[DryRun] 将把语言包 {0} 挂到后台安装（计划任务 {1}）" -f $loc, $taskName)
     } else {
         # 先清掉上一轮遗留的完成标记，避免误判
         try { Remove-Item -LiteralPath $lpDone -Force -ErrorAction SilentlyContinue } catch { }
-
-        $exe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
-        if (-not $exe) { $exe = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source }
-        if (-not $exe) {
-            $lpState = 'FAILED'
-            $problems.Add('langpack')
-            Warn '找不到 pwsh/powershell，无法启动语言包安装'
+        $lpState = Start-LangPackBackground
+        if ($lpState -eq 'PENDING') {
+            Say ("语言包 {0} 已交给后台安装（联网下载约 30~43 分钟，不阻塞开机；装完新开一个会话即生效）" -f $loc)
         } else {
-            $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -InstallPackOnly -PrimaryLocale "{1}" -RdpUser "{2}"' -f `
-                      $PSCommandPath, $loc, $RdpUser
-            Say ("安装语言包 {0}（联网下载；最多同步等 {1} 秒，超时转后台继续）..." -f $loc, $LangPackWaitSec)
-
-            $child = $null
-            try { $child = Start-Process -FilePath $exe -ArgumentList $argStr -WindowStyle Hidden -PassThru } catch { }
-
-            if (-not $child) {
-                $lpState = 'FAILED'
-                $problems.Add('langpack')
-                Warn '语言包后台进程启动失败'
-            } else {
-                $waited = 0
-                while ($waited -lt $LangPackWaitSec) {
-                    if (Test-Path -LiteralPath $lpDone) { break }
-                    try { if ($child.HasExited) { break } } catch { }
-                    Start-Sleep -Seconds 5
-                    $waited += 5
-                }
-
-                if (Test-Path -LiteralPath $lpDone) {
-                    $lpState = (Get-Content -LiteralPath $lpDone -Raw -Encoding ascii).Trim()
-                    if ([string]::IsNullOrWhiteSpace($lpState)) { $lpState = 'OK' }
-                    if ($lpState -eq 'FAILED') { $problems.Add('langpack') }
-                    Say ("语言包安装完成：{0}（同步等了 {1} 秒）" -f $lpState, $waited)
-                } elseif ($child.HasExited) {
-                    $lpState = 'FAILED'
-                    $problems.Add('langpack')
-                    Warn '语言包后台进程已退出但没有写出完成标记（可能失败）'
-                } else {
-                    $lpState = 'TIMEOUT_BACKGROUND'
-                    Say ("语言包安装超过 {0} 秒 —— 已转后台继续（不阻塞开机；装完后重新登录即生效）" -f $LangPackWaitSec)
-                }
-            }
+            $problems.Add('langpack')
         }
     }
 }
-Set-GhEnv ("LANGPACK=" + $lpState)
-Set-GhEnv ("CHINESE_LANGPACK=" + $lpState)
+Write-ChineseState -LangState $lpState -SysState $sysState -HiveState 'SKIPPED' -Phase 'langpack-spawned' | Out-Null
 
 # ---------------------------------------------------------------- 2. 机器级：系统 locale / 显示语言
-$sysState = 'SKIPPED'
 if ($wantSys -and -not $DryRun) {
     try {
         Set-WinSystemLocale -SystemLocale 'zh-CN' -ErrorAction Stop
@@ -240,39 +411,15 @@ if ($wantSys -and -not $DryRun) {
 
     try { Set-Culture -CultureInfo 'zh-CN' -ErrorAction Stop } catch { }
     try { Set-WinHomeLocation -GeoId 45 -ErrorAction Stop; Say '家位置 -> 中国' } catch { }
-} else {
+} elseif ($DryRun) {
     Say '[DryRun] 将设置系统 locale / 显示语言 / 默认输入法'
+} else {
+    Say "本次不处理机器级 locale（沿用上一步状态 $sysState）"
 }
+Write-ChineseState -LangState $lpState -SysState $sysState -HiveState 'SKIPPED' -Phase 'systemlocale' | Out-Null
 
 # ---------------------------------------------------------------- 3. 用户级：写用户 a 的 HKCU
 # 关键：必须在用户登录前写好，否则登录后没有中文输入法。
-function Write-ChineseUserHive {
-    param([string]$Hive, [string]$Locale, [string]$SecLocale, [string]$Tip)
-    $ok = 0; $fail = 0
-    $lc = $(if ($PreloadMap.ContainsKey($Locale)) { $PreloadMap[$Locale] } else { '00000804' })
-    $sc = $(if ($PreloadMap.ContainsKey($SecLocale)) { $PreloadMap[$SecLocale] } else { '00000409' })
-
-    $cmds = @(
-        # 语言列表（REG_MULTI_SZ，用 \0 分隔）
-        @('add', "$Hive\Control Panel\International\User Profile", '/v', 'Languages', '/t', 'REG_MULTI_SZ', '/d', "$Locale\0$SecLocale", '/f'),
-        # 主语言：微软拼音输入法（TIP）+ 缓存语言名
-        @('add', "$Hive\Control Panel\International\User Profile\$Locale", '/v', $Tip, '/t', 'REG_DWORD', '/d', '1', '/f'),
-        @('add', "$Hive\Control Panel\International\User Profile\$Locale", '/v', 'CachedLanguageName', '/t', 'REG_SZ', '/d', '@Winlangdb.dll,-1650', '/f'),
-        # 键盘布局：1 = 中文（微软拼音），2 = 美式键盘（Win+Space 切换）
-        @('add', "$Hive\Keyboard Layout\Preload", '/v', '1', '/t', 'REG_SZ', '/d', $lc, '/f'),
-        @('add', "$Hive\Keyboard Layout\Preload", '/v', '2', '/t', 'REG_SZ', '/d', $sc, '/f'),
-        # 区域：Locale / sLanguage
-        @('add', "$Hive\Control Panel\International", '/v', 'Locale',     '/t', 'REG_SZ', '/d', '00000804', '/f'),
-        @('add', "$Hive\Control Panel\International", '/v', 'sLanguage',  '/t', 'REG_SZ', '/d', 'CHS', '/f')
-    )
-    foreach ($c in $cmds) {
-        $a = [object[]]$c
-        & reg.exe @a 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { $ok++ } else { $fail++ }
-    }
-    return @{ ok = $ok; fail = $fail }
-}
-
 $hiveState = 'SKIPPED'
 if (-not $SkipUserHive -and -not $DryRun) {
     $userHome = Join-Path 'C:\Users' $RdpUser
@@ -286,8 +433,7 @@ if (-not $SkipUserHive -and -not $DryRun) {
                 foreach ($ch in $env:RDP_PASSWORD.ToCharArray()) { $ssPw.AppendChar($ch) }
                 $ssPw.MakeReadOnly()
                 $credU = New-Object System.Management.Automation.PSCredential($RdpUser, $ssPw)
-                Start-Process -FilePath 'cmd.exe' -ArgumentList '/c exit' -Credential $credU `
-                    -Wait -WindowStyle Hidden -ErrorAction Stop
+                Invoke-AsUser -Cred $credU -FilePath 'cmd.exe' -Arguments @('/c', 'exit') -TimeoutSec 90 -What '预创建用户配置文件' | Out-Null
                 Start-Sleep -Seconds 2
             } else {
                 Warn '缺少 RDP_PASSWORD，无法预创建用户配置文件'
@@ -352,11 +498,13 @@ if (-not $SkipUserHive -and -not $DryRun) {
 } elseif ($DryRun) {
     Say '[DryRun] 将写入用户语言列表 / 微软拼音 / 键盘布局'
 }
+Write-ChineseState -LangState $lpState -SysState $sysState -HiveState $hiveState -Phase 'userhive' | Out-Null
 
 # ---------------------------------------------------------------- 4. 增强：在该用户会话里跑 Set-WinUserLanguageList
 # 直接写注册表已足够；这一步是「用官方 API 再确认一次」，失败不影响。
 # 放宽条件：hive 写失败（LOADFAIL/PARTIAL）但用户**已登录**时也跑 ——
 # 此时在他的会话里跑 Set-WinUserLanguageList 正是最有效的补救（用的是他自己的 HKCU）。
+$enhState = 'SKIPPED'
 $userLoggedIn = $false
 if ($script:HasUserHiveLib -and (Get-Command Get-UserHiveRoot -ErrorAction SilentlyContinue)) {
     try { $userLoggedIn = [bool](Get-UserHiveRoot -RdpUser $RdpUser).loaded } catch { $userLoggedIn = $false }
@@ -371,28 +519,45 @@ if (-not $DryRun -and $enhanceGate -and -not [string]::IsNullOrWhiteSpace($env:R
         $inner = "try { Set-WinUserLanguageList -LanguageList '$loc','$sec' -Force -ErrorAction Stop; 'SETOK' } catch { 'SETFAIL:' + \$_.Exception.Message }"
         $tmpOut = Join-Path $env:TEMP 'crdp-lang-out.txt'
         Remove-Item -LiteralPath $tmpOut -Force -ErrorAction SilentlyContinue
-        Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-                            "$inner | Out-File -LiteralPath '$tmpOut' -Encoding utf8") `
-            -Credential $cred2 -Wait -WindowStyle Hidden -ErrorAction Stop
+        Invoke-AsUser -Cred $cred2 -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+                         "$inner | Out-File -LiteralPath '$tmpOut' -Encoding utf8") `
+            -TimeoutSec 90 -What 'Set-WinUserLanguageList 增强' | Out-Null
         if (Test-Path -LiteralPath $tmpOut) {
             $r = (Get-Content -LiteralPath $tmpOut -Raw -Encoding UTF8).Trim()
-            if ($r -match 'SETOK') { Say '  已在该用户会话用 Set-WinUserLanguageList 确认' }
-            else { Note ("  Set-WinUserLanguageList 未确认（不影响注册表设置）：" + $r) }
+            if ($r -match 'SETOK') { $enhState = 'OK'; Say '  已在该用户会话用 Set-WinUserLanguageList 确认' }
+            else { $enhState = 'SKIP'; Note ("  Set-WinUserLanguageList 未确认（不影响注册表设置）：" + $r) }
+        } else {
+            $enhState = 'NOCONFIRM'
         }
-    } catch { Note "  Set-WinUserLanguageList 增强步骤跳过：$_" }
+    } catch { $enhState = 'SKIP'; Note "  Set-WinUserLanguageList 增强步骤跳过：$_" }
+}
+Write-ChineseState -LangState $lpState -SysState $sysState -HiveState $hiveState -Phase 'enhance' -EnhState $enhState | Out-Null
+
+# ---------------------------------------------------------------- 5. 最后：同步等一会儿后台安装
+# 挪到最后的理由：同步等待是整条流程里唯一「不可控时长」的一段。放最后，
+# 即使被 step 超时杀掉，前面所有设置与状态都已经落盘 —— 不会再出现「全盘皆输」。
+if ($lpState -eq 'PENDING' -and $LangPackWaitSec -gt 0) {
+    Say ("同步等后台语言包最多 {0} 秒（装不完也没关系，计划任务会继续装）..." -f $LangPackWaitSec)
+    $waited = 0
+    while ($waited -lt $LangPackWaitSec) {
+        if (Test-Path -LiteralPath $lpDone) { break }
+        Start-Sleep -Seconds 5
+        $waited += 5
+    }
+    if (Test-Path -LiteralPath $lpDone) {
+        $v = (Get-Content -LiteralPath $lpDone -Raw -Encoding ascii).Trim()
+        if ([string]::IsNullOrWhiteSpace($v)) { $v = 'OK' }
+        $lpState = $v
+        Say ("语言包安装完成：{0}（同步等了 {1} 秒）" -f $lpState, $waited)
+    } else {
+        $lpState = 'TIMEOUT_BACKGROUND'
+        Say ("语言包仍在后台安装（已等 {0} 秒）—— 计划任务会继续，装完新开一个会话即生效" -f $waited)
+    }
+    if ($lpState -eq 'FAILED') { $problems.Add('langpack') }
 }
 
-# ---------------------------------------------------------------- 5. 透出状态
-# TIMEOUT_BACKGROUND = 语言包已转后台继续装（本次开机内可能还没装完）→ 算 PARTIAL 而不是 OK
-$status = if ($problems.Count -eq 0 -and $lpState -ne 'TIMEOUT_BACKGROUND') { 'OK' }
-          elseif ($lpState -eq 'FAILED' -and $hiveState -ne 'OK') { 'FAILED' }
-          else { 'PARTIAL' }
-Set-GhEnv "CHINESE_STATUS=$status"
-Set-GhEnv "CHINESE_LANGPACK=$lpState"
-Set-GhEnv "CHINESE_SYSTEMLOCALE=$sysState"
-Set-GhEnv "CHINESE_USERHIVE=$hiveState"
-Set-GhEnv "CHINESE_LOCALE=$loc"
-
-Say ("===== 中文环境设置完成：{0}（语言包 {1} / 系统 {2} / 用户 {3}）=====" -f $status, $lpState, $sysState, $hiveState)
+# ---------------------------------------------------------------- 6. 最终状态
+$overall = Write-ChineseState -LangState $lpState -SysState $sysState -HiveState $hiveState -Phase 'done' -EnhState $enhState
+Say ("===== 中文环境设置完成：{0}（语言包 {1} / 系统 {2} / 用户 {3}）=====" -f $overall, $lpState, $sysState, $hiveState)
 exit 0

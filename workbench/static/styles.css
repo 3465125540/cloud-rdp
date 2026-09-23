@@ -69,6 +69,11 @@ html, body {
 .btn-primary { background: var(--accent-2); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent); }
 .btn-ghost { background: transparent; }
+/* IP 已知但当前探测不可达（机器可能已销毁）—— 按钮转黄，别让人以为点了就能连上 */
+.btn-warn {
+  background: rgba(210, 153, 34, .12); border-color: rgba(210, 153, 34, .45); color: #f0c674;
+}
+.btn-warn:hover { background: rgba(210, 153, 34, .2); border-color: rgba(210, 153, 34, .7); }
 .btn-mini { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; }
 
 /* ---------------- 统计条 ---------------- */
@@ -242,6 +247,20 @@ html, body {
 
 /* ---------------- 状态栏「运行时长」 ---------------- */
 .uptime { font-size: 11px; margin-top: 3px; white-space: nowrap; }
+
+/* ---------------- 状态栏：可折叠的「状态详情」 ---------------- */
+/* 徽标旁一个小箭头，点它折叠/展开下面那行详情（run 号 / 起跑时间等，nowrap 会很长）。
+   详情默认展开；折叠状态记在 localStorage（wb.foldDetails），自动刷新后保持。 */
+.st-head { display: inline-flex; align-items: center; gap: 4px; }
+.fold-caret {
+  border: 1px solid transparent; background: transparent; color: var(--fg-dim);
+  font-size: 9px; line-height: 1; padding: 1px 3px; border-radius: 4px;
+  cursor: pointer; opacity: .5; transition: opacity .12s, background .12s, border-color .12s;
+}
+.fold-caret:hover { opacity: 1; background: rgba(255,255,255,.07); border-color: var(--line); }
+.fold-caret:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* 折叠后只藏详情行，徽标（在线 / 运行中 / 已结束…）始终可见 */
+.st-wrap.folded > .st-detail { display: none; }
 
 /* ---------------- 主机列「归属账号」 ---------------- */
 .acct { font-size: 10.5px; margin-top: 2px; white-space: nowrap; }

@@ -91,6 +91,7 @@ function render() {
   renderHead();
   renderStats();
   renderMachines();
+  updateFoldAllLabel();
   renderAccounts();
   renderRuns();
   renderErrors();
@@ -183,28 +184,228 @@ function restoreBadge(restore) {
   return html;
 }
 
+// ---------------- 状态栏「状态详情」折叠 ----------------
+// 状态栏 = 徽标（在线 / 运行中 / 已结束…）+ 一行详情（run 号 / 起跑时间 / 运行时长）。
+// 详情行是 nowrap 的，机器一多就把表格撑得很宽 —— 所以给它加折叠：点徽标旁的小箭头收起/展开。
+// 折叠状态记在 localStorage，自动刷新后保持（否则每次刷新都弹回来，等于没有）。
+
+// 稳定行键：池内机器用 account_id，Tailscale 节点用 dns_name / ip。取不到就不给折叠箭头。
+function machineKey(m) {
+  return String(m.account_id || m.dns_name || m.ip || m.hostname || "");
+}
+
+var FOLD_DETAILS = (function () {
+  var KEY = "wb.foldDetails";
+  var map = {};
+  try { map = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { map = {}; }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(map)); } catch (e) { /* 隐私模式等：忽略 */ } }
+  return {
+    has: function (k) { return !!(k && map[k]); },
+    toggle: function (k) {
+      if (!k) return false;
+      if (map[k]) { delete map[k]; } else { map[k] = 1; }
+      save();
+      return !!map[k];
+    },
+    setAll: function (keys, on) {
+      (keys || []).forEach(function (k) {
+        if (!k) return;
+        if (on) { map[k] = 1; } else { delete map[k]; }
+      });
+      save();
+    },
+    count: function (keys) {
+      return (keys || []).filter(function (k) { return !!map[k]; }).length;
+    }
+  };
+})();
+
+// 当前表里所有可折叠行的键（Tailscale 节点 + 池内机器）。
+function collectMachineKeys() {
+  var all = (DATA.machines || []).concat(DATA.pool_machines || []);
+  return all.map(machineKey).filter(function (k) { return !!k; });
+}
+
+// 状态栏单元格：徽标 + 折叠箭头 + 详情行。detailHtml 为空则原样返回徽标（没有可折叠的东西）。
+function statusCell(badgeHtml, detailHtml, key) {
+  if (!detailHtml) return badgeHtml;
+  key = key || "";
+  var folded = FOLD_DETAILS.has(key);
+  var caret = key
+    ? '<button type="button" class="fold-caret" data-fold="' + esc(key) + '"' +
+      ' aria-expanded="' + (folded ? "false" : "true") + '"' +
+      ' title="' + (folded ? "展开" : "折叠") + '状态详情">' +
+      (folded ? "\u25B8" : "\u25BE") + "</button>"
+    : "";
+  return '<div class="st-wrap' + (folded ? " folded" : "") + '">' +
+    '<span class="st-head">' + badgeHtml + caret + "</span>" +
+    '<div class="st-detail">' + detailHtml + "</div>" +
+    "</div>";
+}
+
+// 点小箭头：折叠/展开这一行的状态详情（就地改 DOM，不重绘整表 —— 免得表格闪一下）。
+function toggleFoldDetail(btn) {
+  var key = btn.getAttribute("data-fold") || "";
+  if (!key) return;
+  var folded = FOLD_DETAILS.toggle(key);
+  var wrap = btn.closest(".st-wrap");
+  if (wrap) wrap.classList.toggle("folded", folded);
+  btn.textContent = folded ? "\u25B8" : "\u25BE";
+  btn.setAttribute("aria-expanded", folded ? "false" : "true");
+  btn.title = (folded ? "展开" : "折叠") + "状态详情";
+  updateFoldAllLabel();
+}
+
+// 「折叠详情 / 展开详情」按钮的文案：全部收起时才显示「展开详情」。
+function updateFoldAllLabel() {
+  var el = $("#btn-fold-all");
+  if (!el) return;
+  var keys = collectMachineKeys();
+  var allFolded = keys.length > 0 && FOLD_DETAILS.count(keys) === keys.length;
+  el.textContent = allFolded ? "展开详情" : "折叠详情";
+  el.disabled = keys.length === 0;
+}
+
+// 池内机器行：账号池状态说这台「已派发/在跑」，但本机 Tailscale 视图看不到它的节点。
+// 存在的意义 —— 机器不会因为 tailnet 掉线就从面板里整台消失（那正是「像少了几台机器」的元凶）。
+// 徽标由 machine_state 决定：job in_progress 就是「运行中」，绝不写死「Tailscale 未上线」
+// —— 否则会出现「GitHub 说 job 在跑、面板说没在跑」的自相矛盾（Tailscale 看不到 ≠ 机器没在跑）。
+function poolOnlyRow(m) {
+  var label = [m.account_id, m.pool_owner].filter(function (x) { return !!x; }).join(" · ") || "未命名账号";
+  var stMap = { in_progress: "Actions job 运行中", queued: "排队中", pending: "等待启动",
+                waiting: "等待中", requested: "已请求", action_required: "待处理",
+                completed: "已结束", cancelled: "已取消", skipped: "已跳过",
+                failure: "已失败", timed_out: "已超时" };
+  var stText = stMap[m.run_status] || (m.run_status || "无 run 状态");
+  var state = m.machine_state || "unknown";
+  var since = m.since ? (bjTime(m.since) || m.since) : "";
+  // IP 兜底来源：这台机器自己的 Actions job 日志（workflow 第 0c 步自报 Tailscale IP）。
+  // 本机 tailnet 看不到该节点时这是唯一能拿到 IP 的路子 —— pool-state 里根本没有 IP 字段。
+  var ip = m.ip || "";
+  var ipNote = ip ? "（来自该机器的 Actions job 日志）" : "";
+  var badgeHtml, tip;
+  if (state === "running") {
+    // 一次性 runner 的存在性 = job 的存在性：job 在跑 ⇒ 机器在跑。
+    badgeHtml = badge("运行中", "ok");
+    tip = "GitHub Actions 的 job 仍是 in_progress —— 这台机器确实在运行。" +
+      "本机 Tailscale 视图看不到它的节点（tailnet 状态同步滞后 / 节点掉线都可能），" +
+      (ip ? "IP 是从它自己的 job 日志里读出来的。" : "IP 也读不到（job 日志拿不到）。") +
+      "点右侧「运行日志」可看实时进度。";
+  } else if (state === "dispatched") {
+    badgeHtml = badge("已派发 · 排队中", "warn");
+    tip = "账号池已把这台派出去，但 job 还没进入运行（排队 / 等待启动）。" +
+      "本机 Tailscale 视图也还没看到它的节点。" + (ip ? "IP 已从 job 日志读到。" : "");
+  } else if (state === "ended") {
+    badgeHtml = badge("已结束", "mute");
+    tip = "这个池槽位对应的 run 已经结束，机器应已销毁 —— Tailscale 上看不到它的节点是正常的。";
+  } else {
+    badgeHtml = badge("已派发 · 状态未知", "warn");
+    tip = "账号池里这个槽位被占用，但拿不到对应 run 的状态（例如 fork 仓库不可读 / run_id 缺失）。" +
+      "本机 Tailscale 视图也看不到它的节点。";
+  }
+  var detail = '<div class="uptime muted">' + esc(stText) +
+    (m.run_id ? " · run " + esc(String(m.run_id)) : "") +
+    (since ? " · 自 " + esc(since) : "") + "</div>";
+  var st = statusCell(badgeHtml, detail, machineKey(m));
+
+  // IP 列：有就显示真 IP（来源写进 tooltip），没有才留「—」并说明为什么。
+  var ipCell = ip
+    ? '<span class="mono" data-tip="该 IP 来自这台机器自己的 Actions job 日志（第 0c 步机器自报 ' +
+      'Tailscale IP: ' + esc(ip) + '）。本机 tailnet 视图看不到它的节点，所以用日志兜底。">' +
+      esc(ip) + "</span>"
+    : '<span class="muted" data-tip="拿不到 IP：本机 tailnet 看不到该节点，且读不到它的 Actions job 日志' +
+      '（fork 仓库不可读 / run 还没开始 / 日志已过期）。机器是否在跑以「状态」列的 Actions job 为准。">—</span>';
+
+  // 操作列：一键登录 + 查看信息（有 IP 才有）+ 运行日志。
+  // 可达性是后端现探的（TCP 3389，60 秒缓存）—— 不可达时按钮转黄并说明原因，
+  // 而不是假装能连（机器已销毁时点了必然失败，说清楚比让用户白等强）。
+  var hostLabel = m.account_id || m.pool_owner || ip;
+  var ops = [];
+  if (ip) {
+    var rTip = m.reachable === true
+      ? "刚探测过 " + ip + ":3389 是通的，直接连。"
+      : (m.reachable === false
+          ? "IP 已知" + ipNote + "，但刚探测 3389 不通 —— 机器可能已销毁 / tailnet 掉线。" +
+            "点了大概率连不上，进度以「运行日志」为准。"
+          : "IP 已知" + ipNote + "。未做端口探测。");
+    var rCls = m.reachable === false ? "btn-warn" : "btn-primary";
+    ops.push('<button class="btn btn-mini ' + rCls + '" data-rdp="' + esc(ip) +
+             '" data-host="' + esc(hostLabel) + '" data-tip="' + esc(rTip) + '">一键登录</button>');
+    ops.push('<button class="btn btn-mini btn-ghost" data-info="' + esc(ip) +
+             '" data-host="' + esc(hostLabel) + '">查看信息</button>');
+  }
+  if (m.run_url) {
+    ops.push('<a class="btn btn-mini btn-ghost" href="' + esc(m.run_url) +
+             '" target="_blank" rel="noopener">运行日志</a>');
+  }
+  var opsHtml = ops.length ? ops.join(" ") : '<span class="muted">—</span>';
+  return "<tr>" +
+    '<td class="strong"><span data-tip="' + esc(tip) + '">' + esc(label) + "</span>" +
+    '<div class="acct muted">池内机器 · ' + esc(m.role || "?") + "</div></td>" +
+    '<td class="mono">' + ipCell + "</td>" +
+    "<td>" + st + "</td>" +
+    "<td>" + roleBadge(m.role) + "</td>" +
+    '<td><span class="muted">—</span></td>' +
+    '<td><span class="muted">—</span></td>' +
+    '<td><span class="muted">—</span></td>' +
+    '<td class="right nowrap">' + opsHtml + "</td>" +
+    "</tr>";
+}
+
 function renderMachines() {
-  var all = DATA.machines || [];
+  var nodes = DATA.machines || [];        // Tailscale 节点
+  var poolOnly = DATA.pool_machines || []; // 账号池说「已派发/在跑」、但 Tailscale 上看不到的机器
+  var all = nodes.concat(poolOnly);
   var onlyOnline = $("#only-online").checked;
-  var rows = onlyOnline ? all.filter(function (m) { return m.online; }) : all;
+  // 「只看在线」不该把「在跑但本机 Tailscale 看不到」的池内机器一起藏掉 —— 那正是最需要看见的。
+  // 只有「已结束」的池槽位既不在线也没在跑，勾选时才跟着藏起来。
+  var rows = onlyOnline
+    ? all.filter(function (m) { return m.online || (m.pool_only && m.machine_state !== "ended"); })
+    : all;
   var tb = $("#tbl-machines tbody");
   $("#machines-empty").hidden = rows.length > 0;
-  var onlineN = all.filter(function (m) { return m.online; }).length;
-  $("#machines-meta").textContent = all.length
-    ? ("在线 " + onlineN + " / 共 " + all.length + " 个节点（前缀 " + ((DATA.config || {}).machine_prefix || "") + "*）")
+  var onlineN = nodes.filter(function (m) { return m.online; }).length;
+  var poolRunning = poolOnly.filter(function (m) { return m.machine_state === "running"; }).length;
+  var metaEl = $("#machines-meta");
+  var metaParts = [];
+  if (nodes.length) {
+    metaParts.push("在线 " + onlineN + " / 共 " + nodes.length + " 个节点（前缀 " +
+      ((DATA.config || {}).machine_prefix || "") + "*）");
+  }
+  if (poolOnly.length) {
+    metaParts.push("另有 " + poolOnly.length + " 台池内机器" +
+      (poolRunning ? "（" + poolRunning + " 台运行中）" : "") + "，本机 Tailscale 视图未看到其节点");
+  }
+  metaEl.textContent = metaParts.join(" · ");
+  // 离线节点基本都是一次性 Actions runner 跑完没从 tailnet 摘掉的残留（不是故障）。
+  metaEl.title = nodes.length
+    ? ("前缀 " + ((DATA.config || {}).machine_prefix || "") + "* 的 Tailscale 节点。"
+       + "离线节点多为一次性 runner 结束后残留在 tailnet 里的记录（机器已销毁，不是故障）；"
+       + "可在 Tailscale 控制台按最后在线时间清理。"
+       + "另：「池内机器」行来自账号池状态 —— 机器是否在跑以它的 Actions job 为准"
+       + "（job in_progress 就是「运行中」）；本机 tailnet 看不到它的节点不代表机器没在跑。")
     : "";
 
   tb.innerHTML = rows.map(function (m) {
+    if (m.pool_only) return poolOnlyRow(m);
     var online = !!m.online;
-    var st = online
+    // 节点唯一名：一次性 runner 的 HostName 全是 github-rdp-server，
+    // 只有 Tailscale 的 DNSName 带去重后缀（github-rdp-server-11）能区分是哪台。
+    var nodeName = m.dns_name || m.hostname || "";
+    var hostTip = "Tailscale 节点 " + (nodeName || "?") +
+      (m.dns_name && m.hostname ? "（设备主机名 " + m.hostname + "）" : "") +
+      " · IP " + (m.ip || "?");
+    var stBadge = online
       ? badge("在线" + (m.active ? " · 活跃" : ""), "ok")
       : badge("离线", "bad");
-    // 状态栏附加：正在运行的时长（起于远端 _state\job-start.txt）
+    // 状态栏附加：正在运行的时长（起于远端 _state\job-start.txt）—— 和池内机器一样可折叠
+    var stDetail = "";
     if (online) {
-      st += m.uptime_human
+      stDetail = m.uptime_human
         ? '<div class="uptime" title="起于 ' + esc(m.started_utc || "?") + '">运行 ' + esc(m.uptime_human) + "</div>"
         : '<div class="uptime muted" title="读不到 _state\\job-start.txt（需 SMB 可读）">运行 —</div>';
     }
+    var st = statusCell(stBadge, stDetail, machineKey(m));
     var snap = '<span class="muted">—</span>';
     if (m.snapshot && m.snapshot.ok) {
       var sn = m.snapshot;
@@ -242,8 +443,8 @@ function renderMachines() {
       : '<span class="muted" title="最后在线（实时北京时间 UTC+8）；原始 UTC：' + esc(m.last_seen || "?") + '">' +
         esc(bjTime(m.last_seen) || m.last_seen_human || "未知") + "</span>";
     var ops = online
-      ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">一键登录</button>' +
-        ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(m.hostname) + '">查看信息</button>'
+      ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(nodeName) + '">一键登录</button>' +
+        ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(nodeName) + '">查看信息</button>'
       : '<span class="muted">离线</span>';
     // 主机列第二行：机器归属的账号
     //   来源① 池机器写的 _state\pool-info.txt（pool_owner）→ 映射成账号池 id
@@ -257,7 +458,7 @@ function renderMachines() {
       acct = '<div class="acct muted" title="读不到机器上的归属信息（SMB 鉴权失败 / 机器未就绪）">账号未知</div>';
     }
     return "<tr>" +
-      "<td class=\"strong\">" + esc(m.hostname || "-") + acct + "</td>" +
+      "<td class=\"strong\"><span data-tip=\"" + esc(hostTip) + "\">" + esc(nodeName || "-") + "</span>" + acct + "</td>" +
       '<td class="mono">' + esc(m.ip || "-") + "</td>" +
       "<td>" + st + "</td>" +
       "<td>" + roleBadge(m.role) + "</td>" +
@@ -492,6 +693,15 @@ function showConnInfo(ip, host) {
       ? "打开 .rdp 文件（2026-04 更新后会弹「安全警告」）"
       : "mstsc /v: 命令行（不触发 .rdp 安全警告）";
     var d = c.default_rdp || {};
+    // Default.rdp 是 mstsc 写的 UTF-16LE+BOM 隐藏文件 —— 后端现在按真实编码读，
+    // 这里把编码 / 路径如实透出来，免得再出现「明明已是 0 却报未设置」那种对不上。
+    var rdpMeta = [];
+    if (d.encoding) rdpMeta.push("编码 " + d.encoding);
+    if (d.path) rdpMeta.push(d.path);
+    var rdpMetaTip = rdpMeta.length
+      ? '<div class="muted" title="' + esc(rdpMeta.join(" · ")) + '">Default.rdp：' +
+        esc(rdpMeta.join(" · ")) + "</div>"
+      : "";
     var authLine = "";
     var fixBtn = "";
     if (mode !== "file") {
@@ -501,7 +711,8 @@ function showConnInfo(ip, host) {
         var lv = (d.auth_level === null || d.auth_level === undefined) ? "未设置" : String(d.auth_level);
         authLine = '<div class="warn-line">证书警告未关闭（Default.rdp authentication level=' +
           esc(lv) + '）—— 连接自签证书机器时会弹「无法验证身份」</div>';
-        fixBtn = '<button class="btn btn-mini" data-fix-default="1">修复证书警告</button>';
+        fixBtn = '<button class="btn btn-mini" data-fix-default="1" data-ip="' + esc(ip) +
+          '" data-host="' + esc(host || "") + '">修复证书警告</button>';
       }
     }
     var html =
@@ -513,6 +724,7 @@ function showConnInfo(ip, host) {
       '<div class="conn-note">' +
         '<div class="muted">唤起方式：' + esc(modeLabel) + "</div>" +
         authLine +
+        rdpMetaTip +
       "</div>" +
       '<div class="conn-foot">' +
         '<button class="btn btn-primary btn-mini" data-conn-login="' + esc(ip) +
@@ -600,6 +812,17 @@ function bind() {
   $("#btn-refresh2").addEventListener("click", function () { load(true); });
   $("#auto-refresh").addEventListener("change", setTimer);
   $("#only-online").addEventListener("change", renderMachines);
+  // 一键折叠 / 展开所有行的状态详情（机器多时不用一行行点）
+  var foldAllBtn = $("#btn-fold-all");
+  if (foldAllBtn) {
+    foldAllBtn.addEventListener("click", function () {
+      var keys = collectMachineKeys();
+      var allFolded = keys.length > 0 && FOLD_DETAILS.count(keys) === keys.length;
+      FOLD_DETAILS.setAll(keys, !allFolded);
+      renderMachines();
+      updateFoldAllLabel();
+    });
+  }
 
   $("#run-tabs").addEventListener("click", function (e) {
     var b = e.target.closest(".tab");
@@ -752,6 +975,7 @@ function bind() {
   $("#tbl-machines").addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (!b) return;
+    if (b.classList.contains("fold-caret")) { toggleFoldDetail(b); return; }
     if (b.dataset.backup) { doBackup(b); return; }
     if (b.dataset.info) { showConnInfo(b.dataset.info, b.dataset.host || ""); return; }
     var ip = b.dataset.rdp || b.dataset.rdpfile;
@@ -822,11 +1046,22 @@ function bind() {
     var fx = e.target.closest("[data-fix-default]");
     if (fx) {
       fx.disabled = true;
+      fx.innerHTML = '<i class="spin"></i> 修复中';
       api("/api/rdp/default", { method: "POST" }).then(function (r) {
-        if (r.ok) toast("已修复：" + esc(r.note || "Default.rdp authentication level=0"), "ok");
-        else toast("修复失败：" + esc(r.note || "未知错误"), "bad");
-      }).catch(function (err) { toast("修复失败：" + esc(err.message), "bad"); })
-        .then(function () { fx.disabled = false; });
+        if (r.ok) {
+          toast("已修复：" + esc(r.note || "Default.rdp authentication level=0"), "ok");
+          // 重开弹窗 —— 不然「证书警告未关闭」那行还挂在那儿，看着像没修好
+          showConnInfo(fx.dataset.ip || "", fx.dataset.host || "");
+        } else {
+          toast("修复失败：" + esc(r.note || "未知错误"), "bad", 12000);
+          fx.disabled = false;
+          fx.textContent = "修复证书警告";
+        }
+      }).catch(function (err) {
+        toast("修复失败：" + esc(err.message), "bad", 12000);
+        fx.disabled = false;
+        fx.textContent = "修复证书警告";
+      });
       return;
     }
     var lb = e.target.closest("[data-conn-login]");

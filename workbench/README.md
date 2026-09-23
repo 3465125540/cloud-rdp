@@ -13,7 +13,7 @@
 | 面板 | 数据来源 | 能做什么 |
 | --- | --- | --- |
 | **GitHub 账号管理** | `scripts/pool-config.json` + 仓库 Actions Secrets 列表 + `pool-state` 分支 | 看每个账号的 Secret 是否就位、当前是主还是备、有没有在跑机；**一键启用/停用**账号（直接改 pool-config.json）；**＋ 新增**可贴该账号 PAT **一键自动部署**（建 fork → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器），进度实时展示。顶部「监测数据」时间按**实时北京时间**（UTC+8，形如 `2026/9/22-20:16`）展示 |
-| **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` / `job-start.txt` / `pool-info.txt` / `backup-request.txt` + runner 工作区 `D:\a\<repo>\<repo>\.git\config` + `_snapshot\manifest.json` | 看哪些机器在线、Tailscale IP、**归属账号**、角色（主/备/单机）、**已运行时长**、快照新鲜度 + **快照绝对时间**、最后在线时间；**一键登录** / **查看信息**（弹窗显示 Tailscale IP / 用户名 / 密码，可一键复制）；快照栏还有 **☁ 一键备份**（增量同步数据到 139 + 快速快照推送） |
+| **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` / `job-start.txt` / `pool-info.txt` / `backup-request.txt` + runner 工作区 `D:\a\<repo>\<repo>\.git\config` + `_snapshot\manifest.json` + 账号池状态（`pool-state`） | 看哪些机器在线、Tailscale IP、**归属账号**、角色（主/备/单机）、**已运行时长**、快照新鲜度 + **快照绝对时间**、最后在线时间；**一键登录** / **查看信息**（弹窗显示 Tailscale IP / 用户名 / 密码，可一键复制）；快照栏还有 **☁ 一键备份**（增量同步数据到 139 + 快速快照推送）。**池内机器**行：账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（机器掉线也不会从面板消失）；徽标按 Actions job 状态出「运行中 / 已派发 / 已结束」；**IP 从该机器自己的 job 日志里挖**（`[0c] Tailscale IP:`），配**一键登录 / 查看信息**（`3389` 现探不通时按钮转黄说明原因）；**「状态详情」可折叠**（单行点箭头 / 表头「折叠详情」一键，状态记在本地） |
 | **定时计划运行日志** | GitHub Actions API（`windows-rdp.yml` / `pool-coordinator.yml`） | 两个 workflow 的最近 25 次运行：状态、触发方式（定时/手动）、开始时间（**实时北京时间**，UTC+8，形如 `2026/9/22-20:16`）、用时、SHA，点「日志」跳 GitHub；右上角**「缩略」只显示最近 5 条**，再点「展开全部」看全量 |
 | **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`（Windows）；Linux 上唤起 `xfreerdp`/`remmina` | 点一下直接连上在线机器，免手输密码 |
 
@@ -43,7 +43,11 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **166 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **273 项**，应全绿。不联网、不碰真机、不写你的桌面。
+
+> 自测不只测工作台本身，也把开机脚本的**关键设计**钉成断言（防回归），例如
+> T153+ 的「先探后拉」数据还原铁律、T183+ 的中文语言包「转计划任务 + 状态分段落盘」
+> （见根目录 README 的 ⑩ 小节）。
 
 > **启动脚本必须保持纯 ASCII**（`open-workbench.vbs` / `serve.cmd` / `start.cmd`）。
 > Windows 脚本宿主与 `cmd.exe` 按 ANSI（zh-CN 即 GBK）解码 `.vbs`/`.cmd`；若存成
@@ -125,22 +129,144 @@ python workbench\selftest.py
 > 也可以从「查看信息」弹窗里点「修复证书警告」手动触发 `POST /api/rdp/default`，
 > 它会报告 / 修正 `Default.rdp` 的 `authentication level`。
 
+#### `Default.rdp` 的两个坑（面板「一直报未设置」+「修复失败 Errno 13」的真凶）
+
+`Documents\Default.rdp` 是 **mstsc 自己写的文件**，它有两个和普通文本文件不一样的地方。
+2026-09 面板实测：弹窗一直写「证书警告未关闭（authentication level=**未设置**）」，
+点「修复证书警告」又直接报 `写 Default.rdp 失败：[Errno 13] Permission denied` —— 两个都是文件特性踩的坑，**不是文件真的坏/没权限**。
+
+| 坑 | 现象 | 根因 | 修法 |
+|----|------|------|------|
+| ① **编码** | 明明 `authentication level:i:0` 已存在，面板却报「未设置」 | mstsc 写的是 **UTF-16LE + BOM**（头两字节 `ff fe`）。旧代码用 `encoding="ascii"` 读 → 拿到 `a\x00u\x00t\x00h\x00…`，任何 `re.search` 都失配 → `level` 永远 `None` | `read_rdp_text()`：认 BOM（`ff fe` / `fe ff`）→ 按 `utf-16` 解码；无 BOM 但隔字节全 NUL → 判 `utf-16-le`；再退 `utf-8-sig` / `latin-1` |
+| ② **隐藏属性** | 点修复 → `[Errno 13] Permission denied` | `Default.rdp` 带 **HIDDEN**（`attrs=0x22` = HIDDEN\|ARCHIVE）。Windows 的 `CreateFile(CREATE_ALWAYS)`（即 `open(p,"w")`）**在目标已存在且带 HIDDEN/SYSTEM 时直接 ACCESS_DENIED** —— 裸 Windows 同样如此，不是沙箱 | `write_rdp_inplace()`：用 **`r+b`（OPEN_EXISTING）** 就地改写 `seek(0)`→`write`→`truncate`，顺带保住 ACL / 属性 / 备份链 |
+
+几个配套细节：
+
+* **写回必须保编码**：`encode_rdp_text()` 按原编码 + 原 BOM 编回（`utf-16` → `b"\xff\xfe" + text.encode("utf-16-le")`），否则会把 UTF-16 文件写成 ANSI，mstsc 直接读不懂。
+* **只读属性单独处理**：HIDDEN 不拦就地写，但 READONLY 会拦。所以写前若发现 `READONLY` 先清掉，`finally` 里再还原（HIDDEN 全程不动）。
+* **mstsc 可能占着文件**：写失败时用 `mstsc_running()`（`tasklist /FI "IMAGENAME eq mstsc.exe"`）判断，命中就在报错里补一句「检测到远程桌面窗口正在运行，关掉再试」。
+* **弹窗读的是 `encoding` / `hidden`**：`/api/rdp/default` 现在返回这两个字段，弹窗会把「编码 utf-16 · C:\Users\…\Default.rdp」如实显示出来，免得再出现「面板说的和文件里对不上」。
+* **修复成功后弹窗会自动重开**（`showConnInfo` 重调），否则「证书警告未关闭」那行还挂在那儿，看着像没修好。
+
+> 实测（本机真实文件）：修复前 `{"auth_level":0,"auth_zero":true,"encoding":"utf-16","hidden":true}` —— 文件本来就是对的，
+> 是**检测**坏了；`POST /api/rdp/default` → `{"ok":true,"note":"Default.rdp 已是 authentication level=0（无需改动）"}`。
+> 写入路径另用「隐藏 + UTF-16」的合成文件单独验证：改成 `auth=0` 后 **BOM 与 HIDDEN（`0x22`）都保住**。
+
 > 机器只能经 Tailscale 内网访问，tailnet 才是真正的安全边界，密码只当第二道门 —— 与 `windows-rdp.yml` 里的取舍一致。
 
 界面上每台在线机器有两个按钮：**一键登录**（生成 + 预存凭据 + 唤起）和**查看信息**
 （弹窗显示 `Tailscale IP :` / `Username     :` / `Password     :`，点任意一行复制该值，也可「复制全部」）。
 状态列还会显示这台机器的**已运行时长**（读远端 `_state\job-start.txt`，`now - job 起点`）。
-「主机」列在主机名下方显示这台机器**归属的账号** —— 因为所有机器 Tailscale 主机名都叫 `github-rdp-server`，
-账号才是区分它们的标识。两个来源（返回的 `owner_source` 会标明用了哪个）：
+「主机」列第一行是 **Tailscale 节点名**。所有一次性 runner 的设备主机名（`HostName`）都叫 `github-rdp-server`，
+所以显示的是 `DNSName` 的首段**唯一短名**（如 `github-rdp-server-38`）—— 否则 42 行全是同一个词，只能靠 IP 区分；
+把鼠标悬停在节点名上可看到设备主机名 + IP。`.rdp` 文件名也用这个唯一短名（`RDP-github-rdp-server-38-100.77.250.79.rdp`）。
+主机名下方显示这台机器**归属的账号** —— 账号才是区分它们的标识。两个来源（返回的 `owner_source` 会标明用了哪个）：
 
-1. **池机器**：远端 `_state\pool-info.txt` 的 `pool_owner`（workflow 第 0c2 步写入）；
-2. **单机 / 老机器**（没有该文件）：兜底读 runner 工作区 `D:\a\<repo>\<repo>\.git\config` 的 origin owner
+1. **池机器**：远端 `_state\pool-info.txt` 的 `pool_owner`（workflow 第 0c2 步写入，**权威来源**）；
+2. **单机 / 老机器**（`pool-role.txt` 为 `standalone`、没有 pool-info.txt）：兜底读 runner 工作区
+   `D:\a\<repo>\<repo>\.git\config` 的 origin owner
    （Actions 在机器上 checkout 的仓库地址就带 fork owner；**只取 owner，绝不回显/记录 URL 里可能内嵌的 token**）。
 
 owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两个来源都读不到（SMB 鉴权失败 / 机器未就绪）时显示「账号未知」。
 
+### 「池内机器」行 —— 机器掉线也不会从面板消失
+
+**坑 1（机器整台消失）**：机器运行实况原本完全以 Tailscale 节点为准。但实测会遇到「**Actions job 明明在跑、本机 Tailscale 视图却看不到它的节点**」
+（例：acc-3 的机器 job 卡在 `7. 从 139 云盘拉取数据`，节点最后在线 16:37；acc-4 的机器同理）。
+这时机器整台从表里消失 —— 看上去就像「少了几台机器」，而实际上它在跑。
+
+**坑 2（口径自相矛盾）**：补行后徽标一度写死「**已派发 · Tailscale 未上线**」。
+可 GitHub API 明明说这台 job 还是 `in_progress`（机器确实在跑），机器自己的日志还打印「`Tailscale 已上线`」——
+面板却写「未上线」，两边直接对不上，用户自然会认为「面板没检测到这台机器在跑」。
+
+**修法**：`pool_machine_rows()` 按账号池状态（`pool-state` 的 `primary` / `standby` 槽位）对号入座，
+凡是**该账号在 Tailscale 上没有在线机器**的槽位，就在表里补一行。行徽标由 `machine_state` 决定
+（`pool_run_state()` 从 run status 映射），**不再写死「未上线」**：
+
+| `machine_state` | 来源 run status | 徽标 |
+|---|---|---|
+| `running` | `in_progress` | **运行中**（绿）—— 一次性 runner 的存在性 = job 的存在性，job 在跑 ⇒ 机器在跑 |
+| `dispatched` | `queued` / `pending` / `waiting` / `requested` / `action_required` | 已派发 · 排队中（黄） |
+| `ended` | `completed` / `cancelled` / `skipped` / `failure` / `timed_out` | 已结束（灰） |
+| `unknown` | 拿不到 run 状态（fork 仓库 404 / run_id 缺失） | 已派发 · 状态未知（黄） |
+
+其余要点：
+
+- 同一账号只补一行（池状态里一个账号可能同时占 `primary` 与 `standby` 两个槽位）；
+- 该账号只要有**任意一台**在线机器就不补行（避免把「其实在线」的账号误报成「未上线」）；
+- 这些行**不受「只看在线」勾选影响**（那正是最需要看见的行）—— 只有 `ended` 的槽位会跟着藏起来；
+  也不计入 `machines_total`（那些是真实 Tailscale 节点）；
+- 表头旁显示「另有 N 台池内机器（M 台运行中），本机 Tailscale 视图未看到其节点」，返回字段是 `pool_machines`。
+- 每行还带 **`ip`**（从该机器自己的 Actions job 日志里挖出来的 Tailscale IP）+ **`ip_source`** + **`reachable`**
+  （现探 `3389` 通不通，60 秒缓存）—— 有 IP 就渲染真 IP 并给出「一键登录 / 查看信息」，详见下节。
+
+> 结论口径：**机器是否在跑，以它的 Actions job 为准**（`in_progress` 就是运行中）；
+> **本机 tailnet 看不到它的节点 ≠ 机器没在跑**（tailnet 状态同步滞后 / 节点掉线都可能）。
+> 看「能不能连」才只看 Tailscale 在线。
+
+### 池内机器也有 IP 和「一键登录」—— IP 从它自己的 job 日志里挖
+
+池内机器行的 IP 一度写死 `—`，因为没有数据来源：`pool-state` 里**根本没有 IP 字段**，
+本机 tailnet 又看不到这个节点（否则它就不会是「池内机器」了）。结果就是：机器明明在跑，面板上却没有 IP、也没有登录入口。
+
+**IP 的唯一可靠来源 = 机器自己。** 工作流第 `0c` 步装完 Tailscale 后会打印：
+
+```
+2026-09-23T06:12:39.5972790Z [0c] Tailscale IP: 100.112.127.106
+```
+
+这行落在 **Actions job 日志**里，而 job 日志是能取的：
+
+| 步骤 | 调用 | 坑 |
+|---|---|---|
+| run → job id | `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` | 一次性 runner 的 run 只有一个 job，取第一个 |
+| job → 日志 | `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` | **会 302 跳到 Azure Blob**（`productionresultssa*.blob.core.windows.net`）|
+| 302 跟随 | 自定义 `_NoAuthRedirect` | **必须摘掉 `Authorization` 头** —— Azure 不认 GitHub 的 Bearer token，带过去直接 **HTTP 401** |
+| 只拉开头 | `Range: bytes=0-262143` | 整份日志可能 4 MB+，IP 行在开头 256 KB 内；Blob 支持 Range，回 **206** |
+
+拿到 IP 后还会**现探一次 `3389` 通不通**（`tcp_open()`，60 秒缓存），因为「IP 已知」和「现在连得上」是两回事 ——
+acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节点已掉线，3389/445 全部超时。
+所以按钮分两种状态：
+
+- **`reachable === true`** → 蓝底「一键登录」，tooltip 写「刚探测 3389 是通的」；
+- **`reachable === false`** → **黄底 `.btn-warn`**，tooltip 写明「IP 已知，但刚探测 3389 不通 —— 机器可能已销毁 / tailnet 掉线」，
+  按钮**仍可点**（探测可能因防火墙误判），但用户不会以为点了就一定能连上。
+
+其余要点：
+
+- IP 按 **run** 缓存 1 小时（job 一结束，日志内容和 IP 都不再变）；可达性只缓存 **60 秒**（否则机器起来了面板还说连不上）。
+- 拿不到就**老实留 `—`** 并说明原因（fork 仓库不可读 / run 还没开始 / 日志已过期）——
+  acc-4 的 fork `code1969sda/cloud-rdp` 现在就是 **404**，它的行没有 IP、也没有登录按钮，这是预期内的降级。
+- 「运行日志」入口**始终保留**，拿不到 IP 时还能点进去看实时进度。
+- 行里新增 `ip_source` 字段（`Actions job 日志（机器自报 [0c] Tailscale IP）`），tooltip 里如实标出来源，不假装是 tailnet 读的。
+
+> **为什么大多数机器走兜底而不是权威来源？** 工作台「派发一台保活机」是**单机模式**派发
+> （不带 `pool_role/pool_hub`，行为与历史版本一致），机器第 0c2 步因此写 `standalone` 且**不写** `pool-info.txt`。
+> 只有**协调器**（`pool-coordinator.yml`）派发的机器才带池坐标，才会走来源 ①。两种情况下归属都正确 ——
+> 每个账号 checkout 的都是自己的仓库（fork 或 hub），`.git\config` 的 origin owner 天然等于该账号。
+
+> **离线节点不用管**：列表里 40 来个节点绝大多数是**一次性 runner 跑完没从 tailnet 摘掉的残留**
+> （机器已销毁，不是故障）。鼠标悬停「在线 N / 共 M 个节点」有说明；可在 Tailscale 控制台按最后在线时间清理。
+> 只有「在线」的行才有真实归属。
+
 > 「查看信息」用的 `GET /api/conn-info?ip=...` 会把用户名/密码回给前端 —— 服务默认只监听
 > `127.0.0.1`，仅本机可访问；别把 `host` 改成 `0.0.0.0` 再暴露到公网。
+
+### 「状态详情」可折叠 —— 机器一多不撑表
+
+「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
+（`Actions job 运行中 · run 35820523536 · 自 2026/9/23-12:58`）。
+详情行是 `white-space: nowrap` 的，机器一多就把表格撑得很宽，所以给它加了折叠：
+
+- **单行**：点徽标右边的小箭头 —— `▾` 展开中 / `▸` 已折叠。折叠**只藏详情行，徽标永远可见**。
+- **全部**：表头右上角 **「折叠详情 / 展开详情」** 按钮，一键收起/展开所有行（机器 40+ 时用这个）。
+- **记住**：折叠状态存在 `localStorage["wb.foldDetails"]`（形如 `{"acc-3":1}`），**自动刷新后保持** ——
+  否则每次刷新都弹回来，等于没折。行键 = `machineKey()`：`account_id` → `dns_name` → `ip` → `hostname` 取第一个非空的。
+- 详情行为空的行（如**离线**节点，没有运行时长）**不给箭头** —— 没东西可折。
+
+实现：`statusCell(徽标, 详情, 行键)` 统一产出 `st-wrap / st-head / fold-caret / st-detail` 结构，
+池内机器与 Tailscale 节点两条渲染路径都走它；`toggleFoldDetail()` 就地改 DOM（**不重绘整表**，免得表格闪一下）；
+`render()` 里 `updateFoldAllLabel()` 同步「折叠/展开详情」按钮文案（全部收起时才显示「展开详情」，无行时禁用）。
 
 ---
 
@@ -182,12 +308,12 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务与各链路健康状态 |
-| GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存。`stats` 含 `machines_data_bad` / `machines_snapshot_bad`（**未从 139 成功拉取数据的机器数**，acc-1 事故后新增，概览页「恢复异常」卡片直接读它） |
+| GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存。`stats` 含 `machines_data_bad` / `machines_snapshot_bad`（**未从 139 成功拉取数据的机器数**，acc-1 事故后新增，概览页「恢复异常」卡片直接读它）。`pool_machines` = 账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（前端「池内机器」行）；每行带 `machine_state`（`running`/`dispatched`/`ended`/`unknown`，由 `pool_run_state()` 从 run status 映射，前端据此出徽标），以及 `ip` / `ip_source` / `reachable`（IP 从该机器自己的 Actions job 日志里挖，可达性现探 `3389`，60 秒缓存） |
 | GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
 | POST | `/api/accounts/add` | `{owner, repo, pat, token_secret?, id?, enabled?, auto_deploy?}` 新增账号（校验后原子写回 pool-config.json，**不写 PAT 明文**）。**必填只有 `pat`**；`token_secret` 留空则自动分配 `POOL_TOKEN_N`（响应里 `secret_auto=true` + `token_secret` 回传）。带 `pat` + `auto_deploy=true`（默认）时顺带**自动部署**并返回 `job_id` |
 | GET | `/api/accounts/provision?id=<job_id>` | 查询自动部署任务进度（`job.steps[]` 逐步 ✓/✕，`job.status` = running/done/failed） |
-| GET | `/api/machines` | 机器实况（含 `uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），`restore`（**数据/快照恢复状态**：`{data:{status,reason,at_utc}, snapshot:{...}, source}`），以及 `backup_request`（一键备份是否在排队）） |
+| GET | `/api/machines` | 机器实况（含 `dns_name`（Tailscale 唯一短名，区分同名节点）、`uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），`restore`（**数据/快照恢复状态**：`{data:{status,reason,at_utc}, snapshot:{...}, source}`），以及 `backup_request`（一键备份是否在排队））。与 `/api/overview` 走同一个 `collect_machines()`，形状一致 |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录（`created_beijing` / `updated_beijing` 为北京时区绝对时间，形如 `2026/9/22-20:16`） |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
 | POST | `/api/dispatch` | `{target:"coordinator"\|"keepalive", inputs:{...}}` 触发 workflow |
@@ -203,7 +329,7 @@ owner 再映射成账号池里的 `id`，显示成 `acc-3 · 3465125540`。两�
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（224 项）
+├── selftest.py           # 离线自测（273 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

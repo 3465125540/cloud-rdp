@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.0"
+VERSION = "1.5.4"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -393,6 +393,136 @@ def gh_ready():
     return cached("gh_ready", max(30, CONFIG["cache_seconds"]), probe)
 
 
+# ==================================================================== job 日志（挖 IP）
+class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """跟随 302 时必须摘掉 Authorization 头。
+
+    `GET /repos/{owner}/{repo}/actions/jobs/{id}/logs` 会 302 到
+    `productionresultssa*.blob.core.windows.net`（Azure Blob）。Azure 不认 GitHub 的
+    Bearer token，把 Authorization 带过去会直接被拒（实测 HTTP 401）。摘掉就能拿正文。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.headers.pop("Authorization", None)
+        return new
+
+
+# 机器自报的 IP：workflow 第 0c 步 `Write-Host "[0c] Tailscale IP: $ts_ip"`。
+_JOB_IP_RE = re.compile(r"\[0c\]\s*Tailscale IP:\s*(\d{1,3}(?:\.\d{1,3}){3})")
+
+
+def fetch_job_log(url, byte_limit=262144, timeout=30):
+    """取 job 日志正文（只要开头 byte_limit 字节）。
+
+    整份日志可能好几 MB（实测一次 4.2 MB），但机器自报的 `[0c] Tailscale IP:` 就在
+    开头 256 KB 内 —— 用 `Range: bytes=0-N` 只拉一段（GitHub 的 blob 支持 Range，
+    回 206 Partial Content），省时省流量。任何失败都抛给调用方。
+    """
+    if OFFLINE:
+        return ""
+    hdrs = {"User-Agent": "cloud-rdp-workbench/%s" % VERSION,
+            "Accept": "application/vnd.github+json",
+            "Range": "bytes=0-%d" % max(0, int(byte_limit) - 1)}
+    token = resolve_token()
+    if token:
+        hdrs["Authorization"] = "Bearer " + token
+
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    routes = _route_order(host)
+    first_timeout = min(timeout, int(CONFIG.get("first_try_timeout") or 12))
+    last_err = None
+    for i, route in enumerate(routes):
+        t = first_timeout if (i == 0 and len(routes) > 1) else timeout
+        handlers = []
+        if route == "proxy":
+            pu = _proxy_url()
+            handlers.append(urllib.request.ProxyHandler({"http": pu, "https": pu}))
+        else:
+            handlers.append(urllib.request.ProxyHandler({}))   # 直连就是直连
+        handlers.append(_NoAuthRedirect())
+        try:
+            op = urllib.request.build_opener(*handlers)
+            req = urllib.request.Request(url, headers=hdrs, method="GET")
+            with op.open(req, timeout=t) as resp:
+                payload = resp.read()
+        except Exception as e:
+            last_err = e
+            continue
+        _remember_route(host, route)
+        return payload.decode("utf-8", "replace")
+    raise last_err if last_err else RuntimeError("job log failed: %s" % url)
+
+
+def run_job_id(owner, repo, run_id):
+    """run → 它唯一的 job id（一次性 runner 的 run 只有一个 job）。拿不到返回 ''。"""
+    def probe():
+        try:
+            d = gh_api("/repos/%s/%s/actions/runs/%s/jobs" % (owner, repo, run_id),
+                       params={"per_page": 20}, timeout=20)
+        except Exception:
+            return ""
+        for j in (d.get("jobs") or []):
+            if isinstance(j, dict) and j.get("id"):
+                return str(j["id"])
+        return ""
+    return cached("run_job_id:%s/%s:%s" % (owner, repo, run_id), 3600, probe)
+
+
+def job_tailscale_ip(owner, repo, run_id):
+    """池内机器的 Tailscale IP —— 从它自己的 Actions job 日志里挖。
+
+    pool-state 里**没有** IP 字段；本机 tailnet 又看不到该节点（否则这行就不会是
+    「池内机器」）。唯一可靠来源是机器自报：workflow 第 0c 步把 IP 打印进日志，
+    用 Range 只拉开头 256 KB 就能拿到。任何一步失败（fork 404 / 权限不足 /
+    日志已被清理）都返回 ''，绝不抛 —— acc-4 的 fork 现在就是 404，拿不到是预期内的。
+    """
+    if OFFLINE or not owner or not run_id:
+        return ""
+
+    def probe():
+        jid = run_job_id(owner, repo, run_id)
+        if not jid:
+            return ""
+        try:
+            txt = fetch_job_log("https://api.github.com/repos/%s/%s/actions/jobs/%s/logs"
+                                % (owner, repo, jid))
+        except Exception:
+            return ""
+        m = _JOB_IP_RE.search(txt or "")
+        return m.group(1) if m else ""
+    # job 一旦结束，它的日志内容与 IP 都不再变 —— 缓存久一点，省得每次刷新都拉日志。
+    return cached("job_ip:%s/%s:%s" % (owner, repo, run_id), 3600, probe)
+
+
+def tcp_open(ip, port, timeout=2.0):
+    """TCP 连一下看端口通不通（RDP 3389）。通 True / 不通 False。"""
+    if not ip:
+        return False
+    try:
+        with socket.create_connection((str(ip), int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def pool_row_netinfo(owner, repo, run_id):
+    """池内机器行的「网络信息」：IP（来自 job 日志）+ RDP 端口可达性。
+
+    IP 与可达性缓存 TTL 不同：IP 一辈子不变（按 run 缓存 1 小时），
+    可达性只反映「此刻」（缓存 60 秒），否则机器起来了面板还显示连不上。
+    """
+    info = {"ip": "", "ip_source": "", "reachable": None}
+    ip = job_tailscale_ip(owner, repo, run_id)
+    if not ip:
+        return info
+    info["ip"] = ip
+    info["ip_source"] = "Actions job 日志（机器自报 [0c] Tailscale IP）"
+    info["reachable"] = cached("reach:%s" % ip, 60, lambda: tcp_open(ip, 3389))
+    return info
+
+
 # ==================================================================== 时间工具
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -487,6 +617,17 @@ def beijing_time(iso, fmt=None):
 
 
 # ==================================================================== Tailscale
+def peer_short_name(dns_name):
+    """Tailscale DNSName → 唯一短名。
+
+    一次性 runner 的设备主机名全是 `github-rdp-server`，只有 DNSName 带 tailnet 去重后缀：
+      `github-rdp-server-11.tailf6704b.ts.net.` → `github-rdp-server-11`
+    主机栏靠它区分「到底是哪台机器」。取不到就返回空串（前端退回 HostName）。
+    """
+    d = str(dns_name or "").strip().rstrip(".")
+    return d.split(".")[0] if d else ""
+
+
 def tailscale_status():
     def probe():
         if OFFLINE:
@@ -519,6 +660,10 @@ def tailscale_status():
             ips = v.get("TailscaleIPs") or []
             peers.append({
                 "hostname": host,
+                # 唯一短名：所有一次性 runner 的 HostName 都叫 github-rdp-server，
+                # 只有 DNSName 带 tailnet 去重后缀（github-rdp-server-11）。
+                # 主机栏用它区分「到底是哪台」，重名时不再是同一行文字。
+                "dns_name": peer_short_name(v.get("DNSName")),
                 "ip": ips[0] if ips else "",
                 "online": bool(v.get("Online")),
                 "active": bool(v.get("Active")),
@@ -765,6 +910,122 @@ def map_machine_accounts(machines, account_list):
     for m in machines:
         m["account_id"] = owner2id.get(str(m.get("pool_owner") or ""), "")
     return machines
+
+
+def collect_machines(peers, account_list):
+    """Tailscale peers → 前端「机器运行实况」用的机器列表（含池角色 / 快照 / 账号归属）。
+
+    `/api/overview` 与 `/api/machines` 必须走同一条路，否则两个端点出来的机器形状不一致
+    （曾经 `/api/machines` 漏了归属映射，直接打它拿到的 account_id 是空的）。
+    """
+    machines = []
+    peers = peers or []
+    if peers:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            details = list(ex.map(lambda p: machine_detail(p.get("ip"), p.get("online")), peers))
+        for p, d in zip(peers, details):
+            machines.append(dict(p, **d))
+    map_machine_accounts(machines, account_list or [])
+    return machines
+
+
+def pool_run_state(status):
+    """Actions run 状态 → 机器状态口径（前端 `machine_state`）。
+
+    一次性 runner 的存在性 = job 的存在性：`in_progress` 是唯一能证明「机器此刻在跑」的状态。
+    `queued/pending/...` 只是派发了还没起来；`completed/...` 是已经结束。
+    拿不到状态（例如池里占了槽位但 run 信息缺失）返回 `unknown`。
+
+    前端据此出「运行中 / 已派发 / 已结束」徽标 —— 不再一律写死「Tailscale 未上线」，
+    否则会出现「GitHub 说 job 在跑、面板说没在跑」的自相矛盾（瑀子报过这个）。
+    """
+    s = str(status or "").strip().lower()
+    if s == "in_progress":
+        return "running"
+    if s in ("queued", "pending", "waiting", "requested", "action_required"):
+        return "dispatched"
+    if s in ("completed", "cancelled", "skipped", "failure", "timed_out", "stale"):
+        return "ended"
+    return "unknown"
+
+
+def pool_machine_rows(pool_state, machines):
+    """池状态里「已派发/在跑」但 Tailscale 上看不到在线节点的机器 → 补一行。
+
+    机器运行实况只看 Tailscale 节点，于是「Actions job 在跑、Tailscale 节点却掉线」
+    的机器会整台从表里消失（看起来像「少了几台机器」）。这里按池状态的 primary/standby
+    对号入座：该账号在 Tailscale 上有在线机器就跳过，否则补一行。
+    行的徽标由 `machine_state` 决定 —— job `in_progress` 就是「运行中」，
+    不能因为本机 tailnet 看不到节点就写成「未上线」（Tailscale 看不到 ≠ 机器没在跑）。
+    同一账号只补一行（池状态里同一账号可能同时占 primary 与 standby 两个槽位）。
+    """
+    st = (pool_state or {}).get("state") or {}
+    if not isinstance(st, dict):
+        return []
+    # 有在线节点的账号集合：池状态里同一账号可能占多个槽位（primary + standby 各一条），
+    # 只要该账号有在线机器就不补行 —— 否则会把「其实在线」的账号误报成「Tailscale 未上线」。
+    online_accs = set()
+    for m in (machines or []):
+        acc = str(m.get("account_id") or "")
+        if acc and m.get("online"):
+            online_accs.add(acc)
+    runs = {}
+    for a in (st.get("accounts") or []):
+        if isinstance(a, dict) and isinstance(a.get("last_run"), dict):
+            runs[str(a.get("id") or "")] = a["last_run"]
+    slots = []
+    if isinstance(st.get("primary"), dict):
+        slots.append(dict(st["primary"], _slot="primary"))
+    for s in (st.get("standby") or []):
+        if isinstance(s, dict):
+            slots.append(dict(s, _slot="standby"))
+
+    out, seen, net_args = [], set(), []
+    for s in slots:
+        acc = str(s.get("account") or "")
+        if not acc or acc in online_accs or acc in seen:
+            continue          # 有在线机器 / 已补过行 → 跳过（一个账号只补一行）
+        seen.add(acc)
+        run = runs.get(acc) or {}
+        owner = str(s.get("owner") or "")
+        repo = str(s.get("repo") or "cloud-rdp")
+        rid = s.get("run_id") or run.get("run_id") or None
+        url = run.get("url") or ("https://github.com/%s/%s/actions/runs/%s" % (owner, repo, rid)
+                                 if rid else "")
+        out.append({
+            "pool_only": True,          # 前端据此走「池内机器」专用行样式
+            "online": False,
+            "hostname": "", "dns_name": "", "ip": "", "active": False,
+            "account_id": acc,
+            "pool_owner": owner,
+            "role": s.get("_slot") or "",
+            "role_source": "账号池状态",
+            "since": s.get("since") or "",
+            "run_id": rid,
+            "run_status": run.get("status") or "",
+            "run_conclusion": run.get("conclusion") or "",
+            "run_url": url,
+            # 机器状态口径：job in_progress ⇒ running（机器确实在跑）。
+            # 前端按它出徽标，避免「job 在跑却显示未上线」的自相矛盾。
+            "machine_state": pool_run_state(run.get("status")),
+            "owner_source": "账号池状态（本机 tailnet 视图未看到该节点）",
+            # 下面两项由 pool_row_netinfo 回填（IP 来自 job 日志，可达性现探）
+            "ip_source": "",
+            "reachable": None,
+            "snapshot": None,
+            "restore": {"data": {}, "snapshot": {}, "source": ""},
+        })
+        net_args.append((owner, repo, rid))
+
+    # 挖 IP / 探端口都要发外部请求 —— 并行做，别让几行串行等几次超时。
+    if out:
+        with ThreadPoolExecutor(max_workers=min(4, len(out))) as ex:
+            infos = list(ex.map(lambda a: pool_row_netinfo(*a), net_args))
+        for row, info in zip(out, infos):
+            row["ip"] = info.get("ip") or ""
+            row["ip_source"] = info.get("ip_source") or ""
+            row["reachable"] = info.get("reachable")
+    return out
 
 
 def parse_snapshot_manifest(man):
@@ -1423,28 +1684,121 @@ def default_rdp_path():
     return os.path.join(os.path.expanduser("~"), "Documents", "Default.rdp")
 
 
+# ---------------- Default.rdp 的两个坑（都踩过，别再踩） ----------------
+# 坑 ① 编码：mstsc 写的 Default.rdp 是 **UTF-16LE + BOM**（`ff fe`）。
+#    用 `encoding="ascii"` 读会得到 `a\x00u\x00t\x00h\x00...`，任何正则都失配 →
+#    **明明已经是 authentication level=0，面板却一直报「未设置」**，于是每次点开弹窗都白劝一次修复。
+# 坑 ② 隐藏属性：Default.rdp 带 **HIDDEN**。Windows 的 CreateFile(CREATE_ALWAYS)
+#    （也就是 `open(p, "w")`）**在目标已存在且带 HIDDEN/SYSTEM 属性时直接失败**
+#    （ERROR_ACCESS_DENIED → `[Errno 13] Permission denied`）—— 实测裸 Windows 也一样，
+#    不是沙箱的锅。所以改这个文件只能**就地改写**（`r+b` = OPEN_EXISTING）。
+_RDP_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+
+
+def file_attrs(path):
+    """Windows 文件属性位（非 Windows 或取不到返回 0）。HIDDEN=0x2 / READONLY=0x1。"""
+    if not IS_WINDOWS:
+        return 0
+    try:
+        import ctypes
+        a = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+        return 0 if a in (-1, 0xFFFFFFFF) else int(a)
+    except Exception:
+        return 0
+
+
+def set_file_attrs(path, attrs):
+    """写 Windows 文件属性位。成功 True。"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.SetFileAttributesW(str(path), int(attrs)))
+    except Exception:
+        return False
+
+
+def read_rdp_text(path):
+    """读 .rdp 正文并识别编码 → (文本, 编码名)。
+
+    mstsc 写的是 UTF-16LE+BOM；手工编辑/老版本可能是 ANSI/UTF-8。按编码正确解码，
+    正则才匹配得上（坑 ①）。
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw[:2] in _RDP_UTF16_BOMS:
+        return raw.decode("utf-16", "replace"), "utf-16"
+    if raw[:3] == b"\xef\xbb\xbf":
+        return raw.decode("utf-8-sig", "replace"), "utf-8-sig"
+    # 无 BOM：隔一个字节全是 NUL → 基本可断定 UTF-16LE
+    if len(raw) >= 8 and not any(raw[1::2]):
+        return raw.decode("utf-16-le", "replace"), "utf-16-le"
+    return raw.decode("latin-1", "replace"), "latin-1"
+
+
+def encode_rdp_text(text, enc):
+    """按原编码（含 BOM）编码回去 —— 别把 UTF-16 文件写成 ANSI。"""
+    if enc == "utf-16":
+        return b"\xff\xfe" + text.encode("utf-16-le")
+    if enc == "utf-16-le":
+        return text.encode("utf-16-le")
+    if enc == "utf-8-sig":
+        return b"\xef\xbb\xbf" + text.encode("utf-8")
+    return text.encode("latin-1", "replace")
+
+
+def write_rdp_inplace(path, data):
+    """就地改写**已存在**的文件 —— 绝不要用 `open(path, "w")`。
+
+    `open(path, "w")` 走 CreateFile(CREATE_ALWAYS)，对带 HIDDEN 属性的文件必然
+    `Errno 13 Permission denied`（坑 ②）。`r+b` 是 OPEN_EXISTING，没有这个限制，
+    还顺带保住原文件的 ACL / 属性 / 备份链。
+    """
+    with open(path, "r+b") as f:
+        f.seek(0)
+        f.write(data)
+        f.truncate()
+
+
+def mstsc_running():
+    """mstsc.exe 是否在跑 —— 它可能占着 Default.rdp，写失败时用来给一句人话提示。"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mstsc.exe", "/NH"],
+                             capture_output=True, timeout=8, creationflags=NO_WINDOW)
+        return "mstsc" in out.stdout.decode("gbk", "replace").lower()
+    except Exception:
+        return False
+
+
 def default_rdp_status():
-    """Default.rdp 现状：路径 / 是否存在 / authentication level / 是否已备份。"""
+    """Default.rdp 现状：路径 / 是否存在 / authentication level / 编码 / 隐藏 / 是否已备份。"""
     p = default_rdp_path()
     exists = os.path.isfile(p)
-    level = None
+    level, enc, hidden = None, "", False
     if exists:
+        hidden = bool(file_attrs(p) & 0x2)
         try:
-            with open(p, "r", encoding="ascii", errors="replace") as f:
-                m = re.search(r"authentication level:i:(\d+)", f.read())
+            txt, enc = read_rdp_text(p)
+            m = re.search(r"authentication level:i:(\d+)", txt)
             level = int(m.group(1)) if m else None
         except Exception:
-            level = None
+            level, enc = None, ""
     return {"path": p, "exists": exists, "auth_level": level,
-            "auth_zero": level == 0, "backup": os.path.isfile(p + ".bak-workbench")}
+            "auth_zero": level == 0, "encoding": enc, "hidden": hidden,
+            "backup": os.path.isfile(p + ".bak-workbench")}
 
 
 def ensure_default_rdp_auth_level():
     """确保 Default.rdp 里 `authentication level:i:0`（连自签证书机器不再弹「无法验证身份」）。
 
-    `mstsc /v:<ip>` 会读取 Default.rdp 作为模板；把认证级别设为 0 后，证书警告也消失，
+    `mstsc /v:<ip>` 会读 Default.rdp 当模板；认证级别设 0 后证书警告也消失，
     于是「手动连接」路径可以做到**零弹窗**。首次改动前会把原文件备份为
     `Default.rdp.bak-workbench`（只备份一次）。返回 (ok, 说明文字)。
+
+    本函数是上面两个坑的直接修补：**按真实编码读**（否则已是 0 也看不出来），
+    **就地改写**（否则隐藏文件必然 Permission denied）。
     """
     if not IS_WINDOWS:
         return (False, "非 Windows")
@@ -1452,36 +1806,58 @@ def ensure_default_rdp_auth_level():
     if not os.path.isfile(p):
         try:
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="ascii", newline="") as f:
-                f.write("screen mode id:i:2\r\nauthentication level:i:0\r\n"
-                        "prompt for credentials:i:0\r\n")
+            with open(p, "wb") as f:
+                f.write(encode_rdp_text(
+                    "screen mode id:i:2\r\nauthentication level:i:0\r\n"
+                    "prompt for credentials:i:0\r\n", "utf-16"))
             return (True, "已新建 Default.rdp（authentication level=0）")
         except Exception as e:
             return (False, "新建 Default.rdp 失败：%s" % e)
+
     try:
-        with open(p, "r", encoding="ascii", errors="replace") as f:
-            txt = f.read()
+        txt, enc = read_rdp_text(p)
     except Exception as e:
         return (False, "读 Default.rdp 失败：%s" % e)
+
     if re.search(r"authentication level:i:0\b", txt):
-        return (True, "Default.rdp 已是 authentication level=0")
+        return (True, "Default.rdp 已是 authentication level=0（无需改动）")
+
     bak = p + ".bak-workbench"
     if not os.path.isfile(bak):
         try:
             shutil.copy2(p, bak)
         except Exception:
             pass
+
     if re.search(r"authentication level:i:\d+", txt):
         txt = re.sub(r"authentication level:i:\d+", "authentication level:i:0", txt)
     else:
         txt = txt.rstrip("\r\n") + "\r\nauthentication level:i:0\r\n"
+
+    old = file_attrs(p)
+    readonly = bool(old & 0x1)
     try:
-        with open(p, "w", encoding="ascii", newline="") as f:
-            f.write(txt)
-        return (True, "已把 Default.rdp 的 authentication level 改为 0（原文件备份为 "
-                      "Default.rdp.bak-workbench）")
+        if readonly:                      # 只读会让任何写都失败；HIDDEN 不拦就地写，不用动
+            set_file_attrs(p, old & ~0x1)
+        write_rdp_inplace(p, encode_rdp_text(txt, enc))
+    except PermissionError as e:
+        hint = ""
+        if mstsc_running():
+            hint = "。检测到远程桌面窗口（mstsc）正在运行，它可能占着这个文件 —— 关掉远程桌面再试"
+        return (False, "写 Default.rdp 失败：%s%s" % (e, hint))
     except Exception as e:
         return (False, "写 Default.rdp 失败：%s" % e)
+    finally:
+        if readonly:
+            try:
+                set_file_attrs(p, old)
+            except Exception:
+                pass
+
+    return (True, "已把 Default.rdp 的 authentication level 改为 0"
+                  "（原文件备份为 Default.rdp.bak-workbench，编码 %s 保持不变）"
+            % (enc or "未知"))
+
 
 
 def _launch_rdp_linux(ip, rdp_path, mode):
@@ -1610,17 +1986,13 @@ def build_overview():
     if not pool_state.get("ok"):
         errors.append("池状态：%s" % pool_state.get("error"))
 
-    # 机器实况：Tailscale 在线节点 + 每台的池角色 / 快照
-    machines = []
-    peers = ts.get("peers") or []
-    if peers:
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            details = list(ex.map(lambda p: machine_detail(p.get("ip"), p.get("online")), peers))
-        for p, d in zip(peers, details):
-            machines.append(dict(p, **d))
+    # 机器实况：Tailscale 节点 + 每台的池角色 / 快照 + 账号归属（「主机」列「账号 · owner」）
+    machines = collect_machines(ts.get("peers") or [], accounts.get("accounts") or [])
 
-    # 机器归属账号：pool_owner → 账号池 id（前端「主机」列展示「账号 · owner」）
-    map_machine_accounts(machines, accounts.get("accounts") or [])
+    # 池内已派发/在跑、但 Tailscale 上看不到的机器 → 单独一组「池内机器」行。
+    # 不补的话，机器一掉线就整台从面板消失，看着像「少了几台机器」。
+    # 注意：不计入 machines / machines_total（那些是真实的 Tailscale 节点）。
+    pool_machines = pool_machine_rows(pool_state, machines)
 
     online = [m for m in machines if m.get("online")]
     primary = [m for m in machines if m.get("role") == "primary"]
@@ -1664,6 +2036,7 @@ def build_overview():
         },
         "accounts": accounts,
         "machines": machines,
+        "pool_machines": pool_machines,
         "pool_state": pool_state,
         "runs": runs,
         "errors": errors,
@@ -2440,9 +2813,11 @@ def api_accounts_add(h, params):
 
 def api_machines(h, params):
     ts = tailscale_status()
-    machines = []
-    for p in (ts.get("peers") or []):
-        machines.append(dict(p, **machine_detail(p.get("ip"), p.get("online"))))
+    try:
+        accs = (get_accounts() or {}).get("accounts") or []
+    except Exception:
+        accs = []
+    machines = collect_machines(ts.get("peers") or [], accs)
     h._json(200, {"ok": ts.get("ok", False), "error": ts.get("error", ""),
                   "self": ts.get("self"), "machines": machines})
 
