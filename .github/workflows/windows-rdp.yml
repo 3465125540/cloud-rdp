@@ -677,6 +677,19 @@ jobs:
             }
             Write-Host "                 Edge=$($env:EDGE_RESTORE)  WorkBuddy=$($env:WBAI_RESTORE)   (浏览记录/已存密码/下载位置/用户数据/缓存/安装目录)" -ForegroundColor DarkGray
           }
+          # Edge 加密密钥（DPAPI）能力：文件「在不在」看不出「解不解得开」。
+          # 密码 / Cookie 是 DPAPI 加密的、密钥绑旧机器+旧用户 → 跨机必然 BROKEN。
+          # 这里把结论和「怎么恢复登录态」直接写进汇总，不让用户自己去猜。
+          $ec = $env:EDGE_CRYPT
+          if (-not [string]::IsNullOrWhiteSpace($ec) -and $ec -ne "UNKNOWN") {
+            if ($ec -eq "BROKEN") {
+              Write-Host "  Edge 登录态  : BROKEN  ⚠ 已保存的密码 / Cookie 跨机解不开（Windows DPAPI 绑旧机器+旧用户）" -ForegroundColor Yellow
+              Write-Host "                 已恢复：历史 / 收藏夹 / 偏好 / 自动填充 / 站点本地存储(Local Storage、IndexedDB、Service Worker)" -ForegroundColor DarkGray
+              Write-Host "                 恢复登录态：Edge 里登录 Microsoft 或 Google 账号并开启「同步」（设置 → 个人资料 → 同步）" -ForegroundColor DarkGray
+            } else {
+              Write-Host "  Edge 登录态  : $ec（加密密钥可解）" -ForegroundColor Green
+            }
+          }
           $qp = $env:QUOTA_LEFT_PCT
           if (-not [string]::IsNullOrWhiteSpace($qp)) {
             $qi = [int]$qp

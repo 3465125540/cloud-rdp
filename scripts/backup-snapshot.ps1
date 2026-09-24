@@ -953,18 +953,24 @@ Say ("  快捷方式：{0} 个" -f $scCount)
 # ---------------------------------------------------------------- 6. 供还原用的脚本副本
 
 # 注意：必须把**共享库**一起带过去 —— 登录任务跑的是 $Stage\_tools\restore-snapshot.ps1，
-# 它要 dot-source programs-lib / portable-lib / userhive-lib / regimport-lib / lockcopy-lib /
-# app-quiesce-lib；漏带会导致用户级还原静默降级（比如还原前不关占用程序、robocopy 失败后
-# 不会用共享读写补写 —— 这两条正是 .workbuddy-ai / Edge 还原失败的兜底）。
-# restore-snapshot.ps1 里还有一层「缺失就从 $PSScriptRoot 补拷」的自愈，但快照应当自带全。
-foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json",
-                 "programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1",
-                 "regimport-lib.ps1", "lockcopy-lib.ps1", "app-quiesce-lib.ps1")) {
+# 它要 dot-source 全部 *-lib.ps1；漏带会导致用户级还原静默降级（比如还原前不关占用程序、
+# robocopy 失败后不会用共享读写补写 —— 这两条正是 .workbuddy-ai / Edge 还原失败的兜底）。
+#
+# ⚠️ 历史坑：这里原先是**硬编码清单**，新增 userdata-lib.ps1（Edge/WorkBuddy 取证）
+#    时忘了加进来 → 登录任务的用户级还原里取证/补漏整段静默不可用。
+#    改成 glob「所有 *-lib.ps1」，从此不会再漏。
+$toolsFiles = New-Object System.Collections.Generic.List[string]
+foreach ($f in @("restore-snapshot.ps1", "snapshot-config.json")) { $toolsFiles.Add($f) }
+foreach ($lib in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter "*-lib.ps1" -File -ErrorAction SilentlyContinue)) {
+    $toolsFiles.Add($lib.Name)
+}
+foreach ($f in $toolsFiles) {
     $src = Join-Path $PSScriptRoot $f
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $Stage "_tools\$f") -Force -ErrorAction SilentlyContinue
     }
 }
+Say ("  _tools 脚本副本：{0} 个（含全部共享库）" -f $toolsFiles.Count)
 
 # ---------------------------------------------------------------- 7. 清单
 

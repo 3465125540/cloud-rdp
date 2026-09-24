@@ -313,7 +313,7 @@ function poolOnlyRow(m) {
     ? '<span class="mono" data-tip="该 IP 来自这台机器自己的 Actions job 日志（第 0c 步机器自报 ' +
       'Tailscale IP: ' + esc(ip) + '）。本机 tailnet 视图看不到它的节点，所以用日志兜底。">' +
       esc(ip) + "</span>"
-    : '<span class="muted" data-tip="拿不到 IP：本机 tailnet 看不到该节点，且读不到它的 Actions job 日志' +
+    : '<span class="none" data-tip="拿不到 IP：本机 tailnet 看不到该节点，且读不到它的 Actions job 日志' +
       '（fork 仓库不可读 / run 还没开始 / 日志已过期）。机器是否在跑以「状态」列的 Actions job 为准。">—</span>';
 
   // 操作列：一键登录 + 查看信息（有 IP 才有）+ 运行日志。
@@ -338,17 +338,17 @@ function poolOnlyRow(m) {
     ops.push('<a class="btn btn-mini btn-ghost" href="' + esc(m.run_url) +
              '" target="_blank" rel="noopener">运行日志</a>');
   }
-  var opsHtml = ops.length ? ops.join(" ") : '<span class="muted">—</span>';
+  var opsHtml = ops.length ? ops.join(" ") : '<span class="none">—</span>';
   return "<tr>" +
     '<td class="strong"><span data-tip="' + esc(tip) + '">' + esc(label) + "</span>" +
     '<div class="acct muted">池内机器 · ' + esc(m.role || "?") + "</div></td>" +
     '<td class="mono">' + ipCell + "</td>" +
     "<td>" + st + "</td>" +
     "<td>" + roleBadge(m.role) + "</td>" +
-    '<td><span class="muted">—</span></td>' +
-    '<td><span class="muted">—</span></td>' +
-    '<td><span class="muted">—</span></td>' +
-    '<td class="right nowrap">' + opsHtml + "</td>" +
+    '<td><span class="none">—</span></td>' +
+    '<td><span class="none">—</span></td>' +
+    '<td><span class="none">—</span></td>' +
+    '<td class="right ops-cell">' + opsHtml + "</td>" +
     "</tr>";
 }
 
@@ -406,19 +406,22 @@ function renderMachines() {
         : '<div class="uptime muted" title="读不到 _state\\job-start.txt（需 SMB 可读）">运行 —</div>';
     }
     var st = statusCell(stBadge, stDetail, machineKey(m));
-    var snap = '<span class="muted">—</span>';
+    // 快照列 = 时间徽章（第一行）+ 一键备份按钮（第二行）。
+    // 原来是「时间 · 文件数」挤在一个徽章里（自然宽 163px），是整张表最宽的一列，
+    // 也是横向滚动条的主要来源；文件数移到 tooltip（见上 snapTip），
+    // 列宽需求 183 → 98px，行高也不再被撑到三行。
+    var snapTop = '<span class="none">—</span>';
+    var snapFoot = "";
     if (m.snapshot && m.snapshot.ok) {
       var sn = m.snapshot;
       var snapTime = bjTime(sn.created) || sn.created_local || "";   // 实时北京时间（UTC+8）
-      var parts = [];
-      if (snapTime) parts.push(snapTime);
-      if (typeof sn.files === "number") parts.push(sn.files + " 文件");
       var snapTip = "快照生成时间（实时北京时间 UTC+8）" + (sn.mode ? "，模式 " + sn.mode : "") +
-        "。原始 UTC：" + (sn.created || "?");
-      snap = '<span data-tip="' + esc(snapTip) + '">' +
-        (sn.stale ? badge(parts.join(" · "), "warn") : badge(parts.join(" · "), "ok")) + "</span>";
+        "。原始 UTC：" + (sn.created || "?") +
+        (typeof sn.files === "number" ? "　文件数 " + sn.files : "");
+      snapTop = '<span data-tip="' + esc(snapTip) + '">' +
+        (sn.stale ? badge(snapTime || "快照", "warn") : badge(snapTime || "快照", "ok")) + "</span>";
     } else if (m.snapshot) {
-      snap = '<span class="muted" title="未读到 _snapshot/manifest.json">无快照</span>';
+      snapTop = '<span class="none" title="未读到 _snapshot/manifest.json">无快照</span>';
     }
     // 快照栏附「一键备份」按钮（仅在线机器 —— 需经 SMB 把请求文件写到机器上）
     // 合并版：一次点击 = ① 增量同步到 139（rclone copy --update：只传新增/有变化的文件，
@@ -426,26 +429,28 @@ function renderMachines() {
     if (online) {
       var br = m.backup_request || {};
       if (br.pending) {
-        snap += '<div class="backup-box">' +
+        snapFoot += '<div class="backup-box">' +
           '<button class="btn btn-mini btn-backup pending" disabled><i class="spin"></i> 备份中</button>' +
           '<div class="muted backup-note" data-tip="请求已于 ' + esc(br.requested_at || "刚刚") +
           ' 下发（by ' + esc(br.requested_by || "workbench") +
           '）。机器保活循环每分钟取走执行，完成后此行会恢复为可点击">已下发，等待执行</div></div>';
       } else {
-        snap += '<div class="backup-box">' +
+        snapFoot += '<div class="backup-box">' +
           '<button class="btn btn-mini btn-backup" data-backup="' + esc(m.ip) +
           '" data-host="' + esc(m.hostname) +
           '" data-tip="立即在机器上执行：① 把数据目录（D:\\a\\cloud-rdp）下新增/有变化的文件增量上传到 139 云盘（rclone copy --update：已存在的相同文件会跳过、不重复上传，也不删远端）② 抓一次快速快照并推送。机器保活循环每分钟取走一次，通常 ≤1 分钟开始，约 1~3 分钟完成">☁ 一键备份</button>' +
           "</div>";
       }
     }
-    var lastSeen = online ? '<span class="muted">—</span>'
+    // 文件数与按钮同一行、放不下就自动折行（flex-wrap）
+    var snap = snapTop + (snapFoot ? '<div class="snap-foot">' + snapFoot + "</div>" : "");
+    var lastSeen = online ? '<span class="none">—</span>'
       : '<span class="muted" title="最后在线（实时北京时间 UTC+8）；原始 UTC：' + esc(m.last_seen || "?") + '">' +
         esc(bjTime(m.last_seen) || m.last_seen_human || "未知") + "</span>";
     var ops = online
       ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(nodeName) + '">一键登录</button>' +
         ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(nodeName) + '">查看信息</button>'
-      : '<span class="muted">离线</span>';
+      : '<span class="none">离线</span>';
     // 主机列第二行：机器归属的账号
     //   来源① 池机器写的 _state\pool-info.txt（pool_owner）→ 映射成账号池 id
     //   来源② 单机/老机器：runner 工作区 .git\config 的 origin owner（owner_source 标明来源）
@@ -465,7 +470,7 @@ function renderMachines() {
       "<td>" + restoreBadge(m.restore) + "</td>" +
       "<td>" + snap + "</td>" +
       "<td>" + lastSeen + "</td>" +
-      '<td class="right nowrap">' + ops + "</td>" +
+      '<td class="right ops-cell">' + ops + "</td>" +
       "</tr>";
   }).join("");
 }

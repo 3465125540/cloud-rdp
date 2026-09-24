@@ -295,11 +295,17 @@ if ($SkipUserData) {
         $ud = Invoke-UserDataVerifyAndRepair -Stage $Stage -RdpUser $rdpUser -ConfigPath $ConfigPath `
                 -Log { param($m) Log ("  " + $m); Say $m } -Quiesce -EvidenceLogPath $LogFile
         $udState = [string]$ud.state
+        # Edge 加密密钥状态由还原阶段（restore-snapshot.ps1 4d / user 作用域）探测并写进
+        # GITHUB_ENV。这里**不再重探**：此时 Edge 可能已经启动并重建了 Local State，
+        # 重探会得到假 OK。只把既有结论透出，让用户知道「密码/Cookie 到底能不能用」。
+        $edgeCrypt = [string]$env:EDGE_CRYPT
+        if ([string]::IsNullOrWhiteSpace($edgeCrypt)) { $edgeCrypt = 'UNKNOWN' }
         $udObj = [ordered]@{
             state    = $ud.state
             detail   = $ud.detail
             edge     = $ud.edge
             wb       = $ud.wb
+            crypt    = $edgeCrypt
             repaired = $ud.repaired
             failed   = $ud.failed
             skipped  = $ud.skipped
@@ -308,6 +314,14 @@ if ($SkipUserData) {
         }
         Say ("用户数据：{0} —— {1}" -f $ud.state, $ud.detail)
         Log ("用户数据：{0} —— {1}" -f $ud.state, $ud.detail)
+        if ($edgeCrypt -eq 'BROKEN') {
+            $tip = 'Edge 已保存的密码 / Cookie 跨机解不开（Windows DPAPI 绑旧机器+旧用户）；历史/收藏夹/偏好/自动填充/站点本地存储已恢复；要恢复登录态请在 Edge 开启账号同步。'
+            Say ("  ⚠ " + $tip)
+            Log ("  ⚠ " + $tip)
+        } elseif ($edgeCrypt -ne 'UNKNOWN') {
+            Say ("  Edge 加密密钥：{0}" -f $edgeCrypt)
+            Log  ("  Edge 加密密钥：{0}" -f $edgeCrypt)
+        }
         if ($ud.state -ne 'OK') {
             Warn ("用户数据未完全到位（{0}）：详见日志 {1}" -f $ud.state, $LogFile)
         }

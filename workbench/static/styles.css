@@ -29,7 +29,9 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-#app { max-width: 1560px; margin: 0 auto; padding: 18px 22px 40px; }
+/* 宽屏别浪费：1560 的封顶让「机器运行实况」（span-7）只有 878px，8 列表格必然拥挤。
+   放到 1720 —— 1920 屏下 span-7 ≈ 972px，8 列都能舒展；账号卡也跟着变宽。 */
+#app { max-width: 1720px; margin: 0 auto; padding: 18px 22px 40px; }
 
 /* ---------------- 顶栏 ---------------- */
 .topbar {
@@ -127,6 +129,66 @@ html, body {
 .strong { font-weight: 600; }
 .nowrap { white-space: nowrap; }
 .empty { padding: 22px; text-align: center; color: var(--fg-mute); font-size: 12.5px; }
+
+/* ---------------- 「机器运行实况」：固定列宽 + 统一纵向节奏 ----------------
+   这张表 8 列挤在 span-7 卡片里，用 auto 布局时有两个硬伤（都是实测）：
+     ① 列宽随内容/行数抖动 —— 同一张表 2 行时「最后在线」31.5px，48 行时 77px；
+     ② 总宽顶破卡片 → 出现横向滚动条（实测溢出 37~83px）。
+   所以列宽一律写死（配合 index.html 的 <colgroup>），超长内容就地换行。 */
+.tbl-machines { table-layout: fixed; min-width: 820px; }
+/* 列宽按各列「内容自然宽 + 18px 内边距」的实测需求分配，合计 ≈945px：
+     主机 149 / IP 118 / 状态 108 / 角色 90 / 恢复 103 / 快照 109 / 最后在线 102 / 操作 154
+   宽屏（≥1720 视口，表格 ≈958px）下八列都排得下、不换行；
+   再窄就交给下面的 @media 让卡片占整行。 */
+.tbl-machines .c-host    { width: 16%; }
+.tbl-machines .c-ip      { width: 12.5%; }
+.tbl-machines .c-state   { width: 11.5%; }
+.tbl-machines .c-role    { width: 10%; }
+.tbl-machines .c-restore { width: 11%; }
+.tbl-machines .c-snap    { width: 11.5%; }
+.tbl-machines .c-seen    { width: 11%; }
+.tbl-machines .c-ops     { width: 16.5%; }
+
+/* 内容顶端对齐：各列行数不同（主机 2 行 / 快照 2 行 / IP 1 行），
+   居中对齐会让每列基线互相错位；顶端对齐才有统一的行首基准线。 */
+.tbl-machines td { vertical-align: top; padding: 10px 9px; }
+.tbl-machines th { vertical-align: middle; padding: 9px; }
+/* 单行行（离线机器只有徽标 + 一行文字）给个下限，别和在线机器差出一倍高度 */
+.tbl-machines tbody tr { height: 54px; }
+/* 状态详情（run 号 / 起跑时间）在窄列里换行，而不是把表格撑宽 */
+.tbl-machines .uptime { white-space: normal; }
+/* 操作列按钮允许换行（不再用 nowrap 硬撑列宽） */
+.tbl-machines td.ops-cell { white-space: normal; }
+/* 机器表里的按钮 / 徽章收一点：既让「一键登录 + 查看信息」并排放下，
+   也让「快照」列的备份按钮不撑破列宽（8 列的内容总宽是硬需求，只能从内边距里省） */
+.tbl-machines .btn-mini { padding: 3px 7px; }
+.tbl-machines .badge { padding: 2px 7px; }
+.tbl-machines .btn-backup { padding: 2px 6px; font-size: 11px; }
+
+/* 斑马纹 + 悬停：8 列、行高又不一样，没有底色引导很容易串行 */
+.tbl-machines tbody tr:nth-child(even) { background: rgba(255, 255, 255, .016); }
+.tbl-machines tbody tr:hover { background: rgba(76, 141, 255, .075); }
+
+/* 「无数据」占位统一成安静的小横线，别跟真内容抢注意力 */
+.none { color: var(--fg-mute); font-size: 11px; opacity: .7; }
+
+/* 卡片头的概览行（「在线 2 / 共 48 个节点…」）独占一行 —— 
+   以前塞在 head-right 里，机器一多就把开关和按钮挤到换行。 */
+.card-sub {
+  padding: 7px 15px; border-bottom: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, .014); line-height: 1.45;
+}
+.card-sub .muted { font-size: 11.5px; }
+
+/* 八列的「内容自然宽 + 内边距」合计 ≈945px（实测，见上），这是硬需求：
+   span-7 卡片只有在视口 ≳1700px 时才够宽，再窄就会把「快照」列挤到溢出
+   （实测 1680 视口卡片仅 934.5px → 快照列溢出 3px，1560 视口溢出 11px）。
+   所以视口 ≤1720px 时干脆让机器表（和它下面的账号卡）各占整行 ——
+   与其让表格挤成横向滚动条 / 单元格内容顶破列边框，不如给它整行宽度。
+   （阈值取 1720 而非 1700，是给 12px 余量，避免内容稍长就又贴边。） */
+@media (max-width: 1720px) {
+  .card-machines, .card-accounts { grid-column: span 12; }
+}
 
 /* ---------------- 徽章 ---------------- */
 .badge {
@@ -268,6 +330,10 @@ html, body {
 /* ---------------- 「恢复」列：数据/快照两行徽章 ---------------- */
 .rs { margin-top: 3px; white-space: nowrap; }
 .rs:first-child { margin-top: 0; }
+
+/* 快照栏第二行：一键备份按钮（与「文件数」等元素共用，放不下自动折行） */
+.snap-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 3px; }
+.tbl-machines .backup-box { margin-top: 0; }
 
 /* ---------------- 日志「缩略」提示行 ---------------- */
 .more-row td { text-align: center; padding: 8px 10px; font-style: italic; }

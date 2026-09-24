@@ -88,6 +88,14 @@ $script:HasUserHiveLib = $false
 if (Test-Path -LiteralPath $userHiveLib) { . $userHiveLib; $script:HasUserHiveLib = $true }
 else { Write-Warning '[chinese] 未找到 userhive-lib.ps1，用户已登录时的兜底不可用' }
 
+# 用户配置文件预创建共享库。为什么需要：写用户 HKCU 语言键的前提是 NTUSER.DAT 存在；
+# 旧代码用 `Start-Process -Credential`（**缺 -LoadUserProfile**）预创建，进程起得来、
+# 不报错，但 profile 根本没被创建 → 中文输入法这一轮落空（与用户数据丢失同一个根因）。
+$userProfileLib = Join-Path $PSScriptRoot 'userprofile-lib.ps1'
+$script:HasUserProfileLib = $false
+if (Test-Path -LiteralPath $userProfileLib) { . $userProfileLib; $script:HasUserProfileLib = $true }
+else { Write-Warning '[chinese] 未找到 userprofile-lib.ps1，用户配置文件预创建不可用' }
+
 # 微软拼音输入法 TIP（简体中文默认输入法）
 $PinyinTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
 # 语言 -> 键盘布局 LCID（写入 Keyboard Layout\Preload）
@@ -231,6 +239,9 @@ function Start-LangPackBackground {
 
 # 在指定用户会话里跑一条命令。老代码用 -Wait，一旦凭证/二次登录服务有问题就永久挂住 ——
 # 这里改成 -PassThru + Wait-Process -Timeout，超时就杀掉，绝不拖死开机。
+# ⚠️ 必须带 -LoadUserProfile：缺了它 = LOGON_NETCREDENTIALS_ONLY，
+#    进程起得来、不报错，但**目标用户的 profile 不会被创建/加载**
+#    （这正是「用户数据/中文设置整段丢失」的根因，详见 userprofile-lib.ps1）。
 function Invoke-AsUser {
     param(
         [System.Management.Automation.PSCredential]$Cred,
@@ -240,7 +251,7 @@ function Invoke-AsUser {
         [string]$What = 'user-cmd'
     )
     $p = $null
-    try { $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Credential $Cred -WindowStyle Hidden -PassThru -ErrorAction Stop }
+    try { $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Credential $Cred -LoadUserProfile -WindowStyle Hidden -PassThru -ErrorAction Stop }
     catch { Note ("  {0} 启动失败：{1}" -f $What, $_.Exception.Message); return $null }
     if (-not $p) { return $null }
     try { Wait-Process -Id $p.Id -Timeout $TimeoutSec -ErrorAction Stop }
@@ -426,9 +437,16 @@ if (-not $SkipUserHive -and -not $DryRun) {
     $ntuser   = Join-Path $userHome 'NTUSER.DAT'
     try {
         # ① 确保用户配置文件存在（首次运行 / 预还原未跑时）
+        #    走共享库：内部用 Start-Process -Credential **-LoadUserProfile** 真正创建 profile，
+        #    并在失败时退化为「手工登记 ProfileList」。旧的内联写法缺 -LoadUserProfile，
+        #    进程起得来却不创建 profile → 这一轮语言键全部落空（真机事故根因）。
         if (-not (Test-Path -LiteralPath $ntuser)) {
             Say "用户配置文件不存在，先创建：$userHome"
-            if (-not [string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            if ($script:HasUserProfileLib -and (Get-Command Initialize-RdpUserProfile -ErrorAction SilentlyContinue)) {
+                $prof = Initialize-RdpUserProfile -RdpUser $RdpUser -Log { param($m) Note ('  ' + $m) }
+                Say ("  用户配置文件：{0}（方式 {1}）" -f $(if ($prof.ok) { '就绪' } else { '未就绪' }), $prof.method)
+                if (-not $prof.ok) { Warn ('  预创建用户配置文件未成功：' + $prof.note) }
+            } elseif (-not [string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
                 $ssPw = New-Object System.Security.SecureString
                 foreach ($ch in $env:RDP_PASSWORD.ToCharArray()) { $ssPw.AppendChar($ch) }
                 $ssPw.MakeReadOnly()

@@ -29,7 +29,7 @@ $script:UD_DefaultTargets = @(
     [pscustomobject]@{
         name     = 'Edge 浏览器'
         path     = '%RDPUSERPROFILE%\AppData\Local\Microsoft\Edge\User Data'
-        required = @('Local State', 'Default\Bookmarks', 'Default\History', 'Default\Login Data', 'Default\Preferences', 'Default\Web Data')
+        required = @('Local State', 'Default\Bookmarks', 'Default\History', 'Default\Login Data', 'Default\Preferences', 'Default\Web Data', 'Default\Cookies', 'Default\Local Storage', 'Default\Session Storage')
     },
     [pscustomobject]@{ name = 'WorkBuddy 用户数据';           path = '%RDPUSERPROFILE%\.workbuddy';                       required = @() },
     [pscustomobject]@{ name = 'WorkBuddy 用户数据（旧路径）'; path = '%RDPUSERPROFILE%\.workbuddy-ai';                    required = @() },
@@ -241,6 +241,101 @@ function Invoke-UserDataRepair {
     return $r
 }
 
+# ---------------------------------------------------------------- Edge 加密密钥（DPAPI）能力探测
+# 为什么必须单独探测（用户最痛的点）：
+#   Edge 的「已保存密码」在 Default\Login Data 里、「Cookie」在 Default\Cookies 里，
+#   两者都用 Local State 里的 os_crypt.encrypted_key 加密，而该 key 由
+#   Windows DPAPI（CryptProtectData，CurrentUser 作用域）保护 —— 密钥派生自
+#   「旧机器 + 旧用户」。换机器后 DPAPI 解不开 → Edge 把这些密文当损坏数据丢弃
+#   → 用户看到的就是「所有网页账号数据丢失」。
+#   这件事在文件层面完全看不出来（文件在、字节也在，就是解不开），
+#   所以必须真去解一次：以 RDP 用户身份（-LoadUserProfile）调 ProtectedData.Unprotect。
+#   解不开 = BROKEN（跨机必然如此，属预期）；解开 = OK（同机 / 同 profile 复跑）。
+#
+# ⚠️ 时序要求：探测必须在 Edge 启动之前做（还原阶段），否则 Edge 会重建 Local State，
+#    探到的是新机器的 key（假 OK）。restore-snapshot.ps1 的 4d 段正好满足。
+function Get-UDEdgeUserDataDir {
+    param([string]$RdpUser, [string]$ConfigPath)
+    $targets = Get-UserDataTargets -ConfigPath $ConfigPath
+    foreach ($t in $targets) {
+        if ([string]$t.name -like 'Edge*') { return (Expand-UDPath -Path ([string]$t.path) -RdpUser $RdpUser) }
+    }
+    return (Expand-UDPath -Path '%RDPUSERPROFILE%\AppData\Local\Microsoft\Edge\User Data' -RdpUser $RdpUser)
+}
+
+function Format-UDCryptGuidance {
+    return ('Edge 已保存的密码 / Cookie 跨机解不开（Windows DPAPI 把密钥绑在旧机器+旧用户上）。' +
+            '已恢复：历史 / 收藏夹 / 偏好设置 / 自动填充(Web Data) / 站点本地存储(Local Storage、IndexedDB、Service Worker)。' +
+            '要恢复登录态：在 Edge 登录 Microsoft 或 Google 账号并开启「同步」（设置 → 个人资料 → 同步）。')
+}
+
+# 以 RDP 用户身份解一次 Local State 里的 os_crypt.encrypted_key
+# 返回 [pscustomobject]@{ state='OK'|'BROKEN'|'UNKNOWN'; note='' }
+function Test-EdgeCryptState {
+    param(
+        [string]$RdpUser,
+        [string]$EdgeUserDataDir,
+        [scriptblock]$Log,
+        [int]$TimeoutSec = 60
+    )
+
+    $res = [pscustomobject]@{ state = 'UNKNOWN'; note = '' }
+    if ([string]::IsNullOrWhiteSpace($EdgeUserDataDir)) { $res.note = '未指定 Edge User Data 目录'; return $res }
+    $ls = Join-Path $EdgeUserDataDir 'Local State'
+    if (-not (Test-Path -LiteralPath $ls)) { $res.note = '没有 Local State（Edge 数据未还原，或该机从未用过 Edge）'; return $res }
+    if (-not (Get-Command Invoke-AsRdpUser -ErrorAction SilentlyContinue)) {
+        $res.note = '未加载 userprofile-lib.ps1，无法以用户身份探测'
+        return $res
+    }
+
+    # 探测脚本 + 结果文件都放用户自己的 Temp（该用户可读写；-Credential 不支持输出重定向）
+    $tmpDir = Join-Path (Join-Path 'C:\Users' $RdpUser) 'AppData\Local\Temp'
+    try { New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null } catch { }
+    $tag     = [guid]::NewGuid().ToString('N')
+    $probe   = Join-Path $tmpDir ("crdp-edge-crypt-" + $tag + ".ps1")
+    $outFile = Join-Path $tmpDir ("crdp-edge-crypt-" + $tag + ".out")
+    try { if (Test-Path -LiteralPath $outFile) { Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue } } catch { }
+
+    # 正文刻意保持纯 ASCII：-File 启动的 UTF-8 无 BOM 脚本会被当成 ANSI，含中文会乱码。
+    $body = @'
+$ErrorActionPreference = 'Stop'
+function Emit([string]$s) { try { $s | Out-File -LiteralPath '<OUT>' -Encoding ascii -Force } catch { } }
+try {
+    $ls = Get-Content -LiteralPath '<LS>' -Raw -Encoding UTF8 | ConvertFrom-Json
+    $b64 = [string]$ls.os_crypt.encrypted_key
+    if ([string]::IsNullOrWhiteSpace($b64)) { Emit 'UNKNOWN:no-key'; exit 0 }
+    $raw = [Convert]::FromBase64String($b64)
+    if ($raw.Length -le 5) { Emit 'UNKNOWN:short-blob'; exit 0 }
+    # 前 5 字节固定是 'DPAPI' 标记
+    $blob = New-Object byte[] ($raw.Length - 5)
+    [Array]::Copy($raw, 5, $blob, 0, $blob.Length)
+    Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+    $null = [System.Security.Cryptography.ProtectedData]::Unprotect($blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    Emit 'OK'
+} catch {
+    Emit ('BROKEN:' + $_.Exception.GetType().Name)
+}
+'@
+    $body = $body.Replace('<LS>', $ls).Replace('<OUT>', $outFile)
+    try { [System.IO.File]::WriteAllText($probe, $body, (New-Object System.Text.UTF8Encoding $false)) }
+    catch { $res.note = ('写探测脚本失败：' + $_.Exception.Message); return $res }
+
+    $pwshExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $pwshExe)) { $pwshExe = 'powershell.exe' }
+    $r = Invoke-AsRdpUser -RdpUser $RdpUser -FilePath $pwshExe `
+            -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $probe) `
+            -Log $Log -TimeoutSec $TimeoutSec -What 'Edge DPAPI 探测'
+
+    $txt = ''
+    try { if (Test-Path -LiteralPath $outFile) { $txt = (Get-Content -LiteralPath $outFile -Raw -ErrorAction Stop).Trim() } } catch { }
+    foreach ($f in @($probe, $outFile)) { try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { } }
+
+    if ($txt -eq 'OK')        { $res.state = 'OK';      $res.note = '密钥可解（同机 / 同 profile）'; return $res }
+    if ($txt -like 'BROKEN*') { $res.state = 'BROKEN';  $res.note = $txt; return $res }
+    $res.note = $(if ($txt) { $txt } else { '探测无结果' }) + $(if ($r.note) { '（' + $r.note + '）' } else { '' })
+    return $res
+}
+
 # 唯一对外入口：校验 → （可选）补漏 → 再校验 → 写 GITHUB_ENV
 function Invoke-UserDataVerifyAndRepair {
     param(
@@ -248,6 +343,7 @@ function Invoke-UserDataVerifyAndRepair {
         [scriptblock]$Log,
         [switch]$NoRepair,
         [switch]$Quiesce,
+        [switch]$ProbeCrypt,
         [string]$EvidenceLogPath = ''
     )
     $before = @(Get-UserDataEvidence -RdpUser $RdpUser -ConfigPath $ConfigPath -Stage $Stage)
@@ -275,12 +371,30 @@ function Invoke-UserDataVerifyAndRepair {
     $detail = ('{0}/{1} 目标完整' -f $okCount, $judge.Count)
     if ($repair) { $detail += ('；补漏 {0} 个 / 失败 {1} 个 / 跳过 {2} 个' -f $repair.repaired, $repair.failed, $repair.skipped) }
 
+    # Edge 加密能力探测（可选）：文件「在不在」看不出「解不解得开」，
+    # 密码/Cookie 跨机必然解不开 —— 这里把它变成一条可见、可行动的结论。
+    $cryptState = 'UNKNOWN'
+    $cryptNote  = ''
+    if ($ProbeCrypt) {
+        $edgeDir = Get-UDEdgeUserDataDir -RdpUser $RdpUser -ConfigPath $ConfigPath
+        $cr = Test-EdgeCryptState -RdpUser $RdpUser -EdgeUserDataDir $edgeDir -Log $Log
+        $cryptState = [string]$cr.state
+        $cryptNote  = [string]$cr.note
+        Write-UDMsg ('Edge 加密密钥探测：{0}（{1}）' -f $cryptState, $cryptNote) -Log $Log
+        if ($cryptState -eq 'BROKEN') { Write-UDMsg ('  ⚠ ' + (Format-UDCryptGuidance)) -Log $Log }
+        $detail += ('；Edge 加密密钥 {0}' -f $cryptState)
+    }
+
     if ($env:GITHUB_ENV) {
         try {
             ('USERDATA_RESTORE=' + $state)         | Out-File $env:GITHUB_ENV -Append -Encoding ascii
             ('USERDATA_RESTORE_DETAIL=' + $detail) | Out-File $env:GITHUB_ENV -Append -Encoding ascii
             ('EDGE_RESTORE=' + $edgeState)         | Out-File $env:GITHUB_ENV -Append -Encoding ascii
             ('WBAI_RESTORE=' + $wbState)           | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+            if ($ProbeCrypt) {
+                ('EDGE_CRYPT=' + $cryptState)      | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+                ('EDGE_CRYPT_NOTE=' + $cryptNote)  | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+            }
         } catch { }
     }
     if (-not [string]::IsNullOrWhiteSpace($EvidenceLogPath)) {
@@ -296,6 +410,8 @@ function Invoke-UserDataVerifyAndRepair {
         ok       = ($state -eq 'OK')
         edge     = $edgeState
         wb       = $wbState
+        crypt    = $cryptState
+        cryptNote= $cryptNote
         repaired = $(if ($repair) { $repair.repaired } else { 0 })
         failed   = $(if ($repair) { $repair.failed }   else { 0 })
         skipped  = $(if ($repair) { $repair.skipped }  else { 0 })

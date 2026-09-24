@@ -980,7 +980,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.5.4", server.VERSION == "1.5.4", server.VERSION)
+    check("T168 server.py 版本 1.5.5", server.VERSION == "1.5.5", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -1089,6 +1089,132 @@ def main():
           "本次不处理语言包，沿用上一步状态" in sc_txt
           and "$prevLp = [string]$env:CHINESE_LANGPACK" in sc_txt
           and "$prevSys = [string]$env:CHINESE_SYSTEMLOCALE" in sc_txt)
+
+    # ---------------- 「机器运行实况」排版（8 列固定列宽 + 统一纵向节奏） ----------------
+    # 目标：8 列挤在 span-7 卡片里也要视觉协调。实测两处硬伤（见 styles.css 注释）：
+    #   ① auto 布局列宽随内容/行数抖动（同一张表 2 行时「最后在线」31.5px，48 行时 77px）；
+    #   ② 内容顶破卡片 → 横向滚动条（实测溢出 37~83px）。
+    # 以下断言把「列宽写死 + 顶端对齐 + 窄视口回退整行」三条设计钉死，防止改回 auto。
+    print("[机器运行实况 排版]")
+    check("T206 styles.css 机器表改 table-layout:fixed（列宽不再随内容/行数抖动）",
+          ".tbl-machines { table-layout: fixed" in css_txt and "min-width: 820px" in css_txt)
+    check("T207 index.html 机器表带 <colgroup> + 8 个 c-* 列（写死列宽的载体）",
+          "<colgroup>" in idx_txt and idx_txt.count('class="c-') == 8,
+          "c-* 列 %d 个" % idx_txt.count('class="c-'))
+    check("T208 styles.css 八列宽度全部显式定义（c-host…c-ops 各一条）",
+          all((".tbl-machines .c-%s" % c) in css_txt
+              for c in ("host", "ip", "state", "role", "restore", "snap", "seen", "ops")),
+          "缺列宽定义")
+    check("T209 纵向节奏：td 顶端对齐 + 单行行高下限 54px + 详情/操作列允许换行",
+          ".tbl-machines td { vertical-align: top;" in css_txt
+          and ".tbl-machines tbody tr { height: 54px; }" in css_txt
+          and ".tbl-machines .uptime { white-space: normal; }" in css_txt
+          and ".tbl-machines td.ops-cell { white-space: normal; }" in css_txt)
+    check("T210 斑马纹 + 悬停 + 安静占位 .none + 卡片副行 .card-sub",
+          ".tbl-machines tbody tr:nth-child(even)" in css_txt
+          and ".tbl-machines tbody tr:hover" in css_txt
+          and ".none {" in css_txt and ".card-sub {" in css_txt)
+    check("T211 窄视口（≤1720px）机器表/账号卡各占整行（避免挤成横向滚动条）",
+          "@media (max-width: 1720px)" in css_txt
+          and ".card-machines, .card-accounts { grid-column: span 12; }" in css_txt)
+    check("T212 快照列拆两行（徽章 + 备份按钮），文件数移到 tooltip 不再撑列宽",
+          'class="snap-foot"' in app_txt and "snapTop" in app_txt and "snapFoot" in app_txt
+          and "文件数 " in app_txt)
+    check("T213 操作列去掉 nowrap（renderMachines + poolOnlyRow 两处都用 ops-cell）",
+          app_txt.count("right ops-cell") >= 2,
+          "right ops-cell 出现 %d 次" % app_txt.count("right ops-cell"))
+
+    # ---------------- 用户配置文件预创建（「用户数据整段丢失」的根因修复） ----------------
+    # 背景（真机 run 35780696116）：整轮 run 里 C:\Users\a 从未出现 —— Edge User Data /
+    # 桌面 / 文档 / .workbuddy 全程零还原，日志只有一句「用户配置文件未创建成功（将交给登录任务）」。
+    # 根因：Start-Process -Credential 不会顺手加载目标用户 profile —— -LoadUserProfile 是
+    # 独立参数、默认 $false（官方文档：The default value is FALSE）；缺了它 .NET 走
+    # LOGON_NETCREDENTIALS_ONLY，进程起得来、不报错，但 profile 根本没被创建。
+    # 以下断言把「必须显式 -LoadUserProfile + 必须有兜底 + 失败必须可见」三条钉死。
+    print("[用户配置文件预创建 userprofile-lib]")
+    up_lib = os.path.join(repo_dir, "scripts", "userprofile-lib.ps1")
+    check("T214 存在共享库 userprofile-lib.ps1（profile 预创建的唯一实现）",
+          os.path.isfile(up_lib))
+    up_txt = open(up_lib, encoding="utf-8-sig").read() if os.path.isfile(up_lib) else ""
+    check("T215 userprofile-lib 导出 Initialize-RdpUserProfile",
+          "function Initialize-RdpUserProfile" in up_txt)
+    check("T216 Initialize-RdpUserProfile 用 -LoadUserProfile 真正创建 profile",
+          "Initialize-RdpUserProfile" in up_txt
+          and "-Credential $cred" in up_txt and "-LoadUserProfile" in up_txt)
+    check("T217 兜底：手工登记 ProfileList（ProfileImagePath，否则登录会另建 <user>.<机器名>）",
+          "Register-UPProfileManually" in up_txt
+          and "ProfileImagePath" in up_txt and "NTUSER.DAT" in up_txt)
+    check("T218 预创建后轮询等待 NTUSER.DAT 落盘（首次要复制 Default profile）",
+          "WaitSec" in up_txt and "Start-Sleep -Seconds 1" in up_txt)
+    check("T219 userprofile-lib 提供 Invoke-AsRdpUser（以用户身份跑探测，需真实用户上下文）",
+          "function Invoke-AsRdpUser" in up_txt)
+
+    # 铁律：任何 Start-Process -Credential 都必须带 -LoadUserProfile。
+    # 先剥掉 <# 块注释 #>，再剥掉 # 行注释，避免把「反面教材」的注释误判成代码。
+    _sp_bad = []
+    for _nm in ("restore-snapshot.ps1", "setup-chinese.ps1", "userprofile-lib.ps1",
+                "userdata-lib.ps1", "backup-snapshot.ps1", "reinstall-apps.ps1"):
+        _p = os.path.join(repo_dir, "scripts", _nm)
+        if not os.path.isfile(_p):
+            continue
+        _t = re.sub(r"<#.*?#>", "", open(_p, encoding="utf-8-sig").read(), flags=re.S)
+        _cur = ""
+        for _ln in _t.splitlines():
+            _s = _ln.rstrip()
+            if _s.lstrip().startswith("#"):
+                continue
+            if _s.endswith("`"):
+                _cur += _s[:-1] + " "
+                continue
+            _cur += _s
+            if "Start-Process" in _cur and "-Credential" in _cur and "-LoadUserProfile" not in _cur:
+                _sp_bad.append("%s: %s" % (_nm, _cur.strip()[:110]))
+            _cur = ""
+    check("T220 所有 Start-Process -Credential 都显式带 -LoadUserProfile（缺它 profile 不创建）",
+          not _sp_bad, str(_sp_bad))
+
+    check("T221 restore-snapshot dot-source userprofile-lib 并调用 Initialize-RdpUserProfile",
+          "userprofile-lib.ps1" in restore_txt and ". $userProfileLib" in restore_txt
+          and "Initialize-RdpUserProfile" in restore_txt)
+    check("T222 restore-snapshot 里旧的裸 Start-Process -Credential 已删除",
+          "Start-Process -FilePath \"cmd.exe\" -ArgumentList \"/c exit\" -Credential" not in restore_txt)
+    check("T223 setup-chinese dot-source userprofile-lib 并调用 Initialize-RdpUserProfile",
+          "userprofile-lib.ps1" in sc_txt and "Initialize-RdpUserProfile" in sc_txt)
+    check("T224 用户级目录被跳过时**报数**（不再静默：历史事故里 12 个目录无声消失）",
+          "用户级目录" in restore_txt and "$userScopeDirs" in restore_txt)
+    check("T225 profile 创建失败计入 problems（SNAPSHOT_STATUS 变 PARTIAL，汇总可见）",
+          'Add("user-profile-missing")' in restore_txt)
+
+    # ---------------- Edge 站点数据 + DPAPI 诚实告知 ----------------
+    # excludeDirNames 按目录名全局匹配，会把 Edge 的 IndexedDB / Service Worker / File System
+    # 一起排掉 —— 而很多站点的登录态正存在 IndexedDB/Service Worker 里（不走 Cookie）。
+    # 另外 Edge 的密码/Cookie 是 DPAPI 加密的、跨机解不开，必须探测 + 明确告知，
+    # 而不是让用户在「文件都在」的假象里以为数据没丢。
+    print("[Edge 站点数据 + DPAPI]")
+    check("T226 Edge User Data 进 noExcludeDirs（保住 IndexedDB / Service Worker / Local Storage）",
+          any("Microsoft\\Edge\\User Data" in d for d in noex), str(noex))
+    check("T227 Edge 必检项含 Cookies", "Default\\Cookies" in reqd, str(reqd))
+    check("T228 Edge 必检项含 Local Storage / Session Storage（站点登录态）",
+          "Default\\Local Storage" in reqd and "Default\\Session Storage" in reqd, str(reqd))
+    check("T229 userdata-lib 提供 Test-EdgeCryptState（真去解一次 os_crypt.encrypted_key）",
+          "function Test-EdgeCryptState" in ud_txt
+          and "os_crypt" in ud_txt and "ProtectedData" in ud_txt)
+    check("T230 userdata-lib 透出 EDGE_CRYPT（OK|BROKEN|UNKNOWN）",
+          "'EDGE_CRYPT='" in ud_txt or '"EDGE_CRYPT="' in ud_txt or "EDGE_CRYPT=" in ud_txt)
+    check("T231 DPAPI 结论带可操作指引（引导用户开启 Edge 账号同步）",
+          "同步" in ud_txt and "Microsoft" in ud_txt)
+    check("T232 restore-snapshot 两处取证都传 -ProbeCrypt（还原阶段 Edge 未启动，探的是快照密钥）",
+          restore_txt.count("-ProbeCrypt") >= 3)
+    check("T233 ENV READY 打印 EDGE_CRYPT 并给出账号同步指引",
+          "EDGE_CRYPT" in wf_txt and "账号并开启「同步」" in wf_txt)
+
+    # ---------------- _tools 共享库拷贝改成 glob（曾硬编码漏掉 userdata-lib） ----------------
+    # 登录任务跑的是 $Stage\_tools\restore-snapshot.ps1；硬编码清单漏掉新库 →
+    # 用户级还原的取证/补漏/DPAPI 探测整段静默不可用。改成 glob 后不会再漏。
+    check("T234 backup 侧 _tools 用 glob 拷全部 *-lib.ps1（不再硬编码清单）",
+          '-Filter "*-lib.ps1"' in backup_txt and "$toolsFiles" in backup_txt)
+    check("T235 restore 侧 _tools 自愈也用 glob 拷全部 *-lib.ps1",
+          '-Filter "*-lib.ps1"' in restore_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

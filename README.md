@@ -215,10 +215,18 @@
 | `machine` | 开机第 8 步 | `runneradmin` | 拉快照、还原机器级文件、导入机器注册表、恢复时区/电源/关防火墙、还原公共桌面、**预创建用户配置文件并把个人桌面/文档/HKCU 直接还原到位**，再注册登录任务作兜底 |
 | `user` | RDP 用户**首次登录**时 | `a` | 兜底重放个人目录文件、HKCU、个人快捷方式与壁纸；**成功才自注销，失败保留任务下次重试**并在公共桌面写标记 |
 
-> **开机即预还原**：先用 `Start-Process -Credential` 让 Windows 真正创建并注册该用户的配置文件
-> （`CreateProcessWithLogonW` 会 `LoadUserProfile`），再 `reg load` 它的 `NTUSER.DAT` 导入 HKCU
-> （把 `__RDPUSER__` 换成 `HKEY_USERS\_Restore`），最后 robocopy 个人文件。
+> **开机即预还原**：先用 `Initialize-RdpUserProfile`（`userprofile-lib.ps1`）**真正创建并注册**该用户的配置文件，
+> 再 `reg load` 它的 `NTUSER.DAT` 导入 HKCU（把 `__RDPUSER__` 换成 `HKEY_USERS\_Restore`），最后 robocopy 个人文件。
 > 这样**一开机桌面就是满的**，不用等首次登录。失败会自动回退到登录任务，行为与旧版一致。
+>
+> ⚠️ **踩过的坑（曾导致「Edge 还原后用户数据全丢」）**：`Start-Process -Credential` **不会**自动加载用户配置文件 ——
+> `-LoadUserProfile` 是个**独立开关、默认 `$false`**；不传就只走 `CreateProcessWithLogonW` + `LOGON_NETCREDENTIALS_ONLY`：
+> **进程能起来、不报任何错，但 `C:\Users\<用户>\NTUSER.DAT` 永远不生成**。于是用户级还原被静默跳过
+> （旧日志里 `SNAPSHOT_USER_PRERESTORE=SKIPPED`、`EDGE_RESTORE: MISSING`），首次登录任务也依赖 profile 而一并失效。
+> 现在统一由 `userprofile-lib.ps1` 处理：显式 `-LoadUserProfile` + `Wait-Process` + 轮询 `NTUSER.DAT`，
+> 并带 **手动注册 `ProfileList`** 兜底（拷 `Default\NTUSER.DAT` + 写 `ProfileImagePath` + `icacls` 改属主）——
+> 只建目录不注册，会让 Windows 首次登录改去 `C:\Users\<用户>.<计算机名>`，数据照样看不见。
+> 创建失败会计入 `problems`，`SNAPSHOT_STATUS` 变 `PARTIAL`（不再无声）。
 >
 > HKCU 导出时会把 SID 归一化成 `__RDPUSER__` 占位符，换机后 SID 变了也能正确导入。
 
@@ -228,8 +236,10 @@
 
 - 需要**授权码/硬件绑定**的商业软件，激活状态无法复刻
 - Windows 更新状态、驱动、运行中的进程状态不涉及
-- **Edge cookie / 密码跨机大概率解不开**（DPAPI 绑「用户+本机」）：历史、书签、偏好、`Web Data`、图标能回来，
-  但 cookie 与已保存密码需靠 **Edge 账号同步**恢复登录态。另外 cookie 属敏感凭证，会被上传到 139
+- **Edge cookie / 密码跨机大概率解不开**（DPAPI 绑「用户+本机」）：历史、书签、偏好、`Web Data`、
+  `Local Storage` / `IndexedDB`（不少站点把登录态存在这里）能回来，但 cookie 与已保存密码需靠 **Edge 账号同步**恢复登录态。
+  还原阶段会**真去解一次** `Local State` 里的 `os_crypt.encrypted_key`，报 `EDGE_CRYPT=OK|BROKEN|UNKNOWN`
+  （见日志 / ENV READY / `apps-status.json`），`BROKEN` 时直接提示去开 Edge 账号同步。另外 cookie 属敏感凭证，会被上传到 139
 - **体积不设上限**（`files.maxTotalMB` / `programs.maxMBPerApp` / `programs.maxTotalMB` 全为 `0 = 不限`）。
   139 实测约 0.45 MB/s：10 GB 约 6.3 小时，可能超出 6 小时 job 上限。推送前会估算 `SNAPSHOT_ETA_MIN`，
   并按剩余时间给 rclone 设 `--max-duration`；大目录用 `rclone copy`（**可断点续传、被中断也不会毁远端**）
@@ -438,13 +448,14 @@ Windows 更新缓存、安装包残留。
 | **AppData / ProgramData** | 由 `DisplayName`（去版本号）+ `Publisher`（非微软）生成候选名，在 `%APPDATA%`、`%LOCALAPPDATA%`、`%LOCALAPPDATA%\Programs`、`%PROGRAMDATA%` 下**只匹配一级子目录**；发布商目录下再做二级匹配。可用 `programs.dataGlobs` 显式补充 |
 | **绝不遍历整个 LocalAppData** | 硬排除 `Microsoft` / `Packages` / `Temp` / `Programs` 根；缓存目录继续走 `files.excludeDirNames` |
 | **文件关联 / COM** | 只导出**命中被备份程序 installLocation** 的 ProgID/CLSID（读顶层键默认值与 `shell\open\command` 做子串匹配），**绝不导整棵 HKCR**；可用 `registry.hkcrProgIds` 手动补 |
-| **Edge 数据** | `files.dirs` 里加了 `%LOCALAPPDATA%\Microsoft\Edge\User Data`，并排除 `Service Worker` / `IndexedDB` / `File System` / `ShaderCache` / `Media Cache` / `Crashpad` 等缓存目录 |
+| **Edge 数据** | `files.dirs` 里加了 `%LOCALAPPDATA%\Microsoft\Edge\User Data`，并把它列入 `files.noExcludeDirs` —— **保住** `IndexedDB` / `Service Worker` / `File System`（很多站点的登录态存在这里，不只是 cookie）；纯缓存 `ShaderCache` / `Media Cache` / `Crashpad` 仍照删 |
 
 - 开关：`programs.dataGlobs`、`registry.hkcr`
 - **不做**：服务（`HKLM\SYSTEM\...\Services`）与计划任务（`System32\Tasks`）—— 按需求排除
 
 > ⚠️ Edge 的 cookie / 密码由 **DPAPI**（绑「用户+本机」）加密，跨机后 SID 与机器密钥都不同 → **解不开**。
-> 历史 / 书签 / 偏好 / `Web Data` 能正常回来。要恢复登录态请用 Edge 账号同步。
+> 历史 / 书签 / 偏好 / `Web Data` / `Local Storage` / `IndexedDB` 能正常回来。要恢复登录态请用 Edge 账号同步。
+> 还原阶段会真去解一次密钥并报 `EDGE_CRYPT`（见上「已知边界」）。
 - 开机基线由 `pre-restore.ps1` 的**第 0 阶段**在任何还原动作之前记录；上次备份过的程序清单也会带过来，
   保证「跨运行持久」——已还原的程序下次关机时仍会被备份，不会因为「基线里有」而被漏掉
 
@@ -675,7 +686,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（273 项）
+python workbench\selftest.py   :: 离线自测（303 项）
 ```
 
 | 面板 | 内容 |
@@ -754,10 +765,10 @@ WebDAV `PROPFIND` 打成 `404`，rclone **同样**映射成码 3 —— 于是�
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（22 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（273 项）
+│   ├── selftest.py                     #   离线自测（303 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -782,13 +793,14 @@ cloud-rdp/
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
     ├── reinstall-apps.ps1              # 第 10 步：winget 后台逐包重装 + Edge/WorkBuddy 用户数据校验补漏
     ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
+    ├── userprofile-lib.ps1             # 【新】用户配置文件预创建（显式 -LoadUserProfile + ProfileList 兜底；修「还原后用户数据全丢」）
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
     ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
     ├── pool-coordinator.ps1            # 【新】hub 协调器：补机 + 轮换 + 发布权威角色
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 22 步。**0d 之后就能连**，其余在后台继续跑：
+工作流 25 步。**0d 之后就能连**，其余在后台继续跑：
 
 | # | 步骤 | 说明 |
 |---|------|------|
@@ -809,7 +821,8 @@ cloud-rdp/
 | **10** | **后台重装软件 + 恢复 Edge/WorkBuddy 用户数据** | `reinstall-apps.ps1 -Background`（异步，不阻塞）：winget 逐包重装 → 再对 Edge（浏览记录 / 已存密码 / 全部设置含下载位置）与 WorkBuddy（用户数据 / 缓存 / 安装目录）做完整性校验 + 缺失补漏 |
 | **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
-| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 WorkBuddy 用户数据取证（`USERDATA_RESTORE`）** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
+| **12b** | **中文语言包收尾核对** | `setup-chinese.ps1 -CheckOnly`：0f 转后台的语言包若已装完，这里补报一次；**保活循环**每 10 分钟也补查一次 |
+| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 WorkBuddy 用户数据取证（`USERDATA_RESTORE`）** / **Edge 登录态（`EDGE_CRYPT`：`os_crypt` 加密密钥能否解开）** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
 | 14 | 保活 | **主/单机**：每 10 分钟同步数据、每 60 分钟快照并推送；**备机**：每 10 分钟**重拉**、每 60 分钟只做本地快照（不写 139），每 5 分钟核对权威角色、主下线即自升为主。每 30 分钟 C 盘守卫。时长收敛到 `360 − 已用 − 8(余量)`。**最后 15 分钟在后台启动收尾**，主循环继续跑 → 远程连接全程不中断 |
 | 15 | 等待后台收尾 | `if: always()`：等 finalize 后台作业完成（最多 4 分钟）；未启动才前台补跑。收尾 = C 盘清理 + 全量同步 + 整机快照（**备机**跳过同步/推送，只做本地快照） |
 
@@ -834,8 +847,9 @@ cloud-rdp/
 | 瘦身后某个程序打不开 | 它依赖被删掉的镜像组件（如 .NET / Java 运行时） | 把对应项在 `slim.targets` 里改 `enabled: false`，或让它装到 D 盘 |
 | 瘦身太慢 | 删除 ~70 GB 需要几分钟；开了 DISM 更久 | 正常。想更快就把 `slim.targets` 里的大件精简 |
 | 桌面 / 文档没了 | 旧版：有一次开机用户没登录 → 暂存被清空 → `rclone sync` 把云端那份删了 | **已修**：profile 不存在时保留上一份用户数据。若已丢，只能靠更早的备份 |
-| 开机后桌面是空的 | `SNAPSHOT_USER_PRERESTORE=SKIPPED`（预创建 profile 失败） | 看 `D:\cloudrdp-sys\_state\user-restore.log`；登录任务会兜底重试，公共桌面会有失败标记 |
-| Edge 登录态没了 | cookie/密码由 DPAPI 加密，跨机解不开 | 正常。用 Edge 账号同步恢复；历史/书签/偏好应该都在 |
+| 开机后桌面是空的 | `SNAPSHOT_USER_PRERESTORE=SKIPPED`（预创建 profile 失败） | **已修**（`userprofile-lib.ps1` 显式 `-LoadUserProfile` + ProfileList 兜底）。若仍出现：看 `D:\cloudrdp-sys\_state\user-restore.log`；登录任务会兜底重试，公共桌面会有失败标记 |
+| Edge 登录态没了 | cookie/密码由 DPAPI 加密，跨机解不开（日志 `EDGE_CRYPT=BROKEN`） | 正常。用 Edge 账号同步恢复；历史/书签/偏好/`Local Storage` 应该都在 |
+| Edge 数据**整个**没了（连历史/书签都没有） | profile 没预创建成功 → 用户级还原被整段跳过（`SNAPSHOT_USER_PRERESTORE=SKIPPED`、`EDGE_RESTORE: MISSING`） | **已修**：`userprofile-lib.ps1` 显式 `-LoadUserProfile` + `ProfileList` 兜底，失败计入 `SNAPSHOT_STATUS=PARTIAL`；看 `D:\cloudrdp-sys\_state\user-restore.log` |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
 | 定时场不跑额度检测 | 按需求跳过（`if: workflow_dispatch`） | 正常。手动 Run workflow 才显示额度 |

@@ -75,7 +75,7 @@
     </section>
 
     <!-- 机器运行实况 -->
-    <section class="card span-7">
+    <section class="card span-7 card-machines">
       <div class="card-head">
         <h2>&#128421;&#65039; 机器运行实况</h2>
         <div class="head-right">
@@ -85,11 +85,19 @@
           </label>
           <button class="btn btn-mini btn-ghost" id="btn-fold-all"
                   data-tip="把所有机器的「状态详情」行（run 号 / 起跑时间 / 运行时长）一次性收起或展开。单行也能折叠：点状态栏徽标旁的小箭头（▾ 展开中 / ▸ 已折叠）。折叠状态记在本地，刷新后保持。">折叠详情</button>
-          <span class="muted" id="machines-meta"></span>
         </div>
       </div>
+      <!-- 概览文字独占一行：以前塞在 head-right 里，机器一多就把开关/按钮挤到换行 -->
+      <div class="card-sub"><span class="muted" id="machines-meta"></span></div>
       <div class="card-body">
-        <table class="tbl" id="tbl-machines">
+        <!-- 列宽写死（配合 styles.css 的 table-layout:fixed）。
+             auto 布局下列宽会随「行数 / 内容」抖动（同一张表 2 行时「最后在线」31px、48 行时 77px），
+             总宽还会顶破卡片出现横向滚动条。写死后列宽恒定，超长内容就地换行/省略。 -->
+        <table class="tbl tbl-machines" id="tbl-machines">
+          <colgroup>
+            <col class="c-host" /><col class="c-ip" /><col class="c-state" /><col class="c-role" />
+            <col class="c-restore" /><col class="c-snap" /><col class="c-seen" /><col class="c-ops" />
+          </colgroup>
           <thead>
             <tr>
               <th data-tip="Tailscale 节点名（一次性 runner 的设备主机名都叫 github-rdp-server，故显示带去重后缀的唯一短名，如 github-rdp-server-11）；下方小字是该机器归属的 GitHub 账号（派发它的账号）。「池内机器」行 = 账号池里已派发/在跑、但本机 Tailscale 视图看不到其节点的机器">主机</th>
@@ -109,7 +117,7 @@
     </section>
 
     <!-- GitHub 账号管理 -->
-    <section class="card span-5">
+    <section class="card span-5 card-accounts">
       <div class="card-head">
         <h2>&#128273; GitHub 账号管理</h2>
         <div class="head-right">

@@ -95,12 +95,14 @@
     ],
 
     "_comment_noExcludeDirs": "豁免排除清单：列出的目录只禁用 excludeDirNames（目录名排除），仍应用 excludeFilePatterns。用于「必须完整保留」的用户数据目录 —— 例：.workbuddy 里的 Cache/GPUCache/Temp 也要抓（Electron 缓存里含登录态与离线数据，丢了等于重装）。",
+    "_comment_noExcludeDirs_edge": "Edge 的 User Data 必须在这里：excludeDirNames 按目录名全局匹配，会把 Edge 的 IndexedDB / Service Worker / File System 一起排掉 —— 而这三处正是「网页账号数据」（很多站点的登录态、离线数据存在 IndexedDB/Service Worker 里，不走 Cookie）。漏掉它们 = 还原后各站点全部掉登录。Cache / Code Cache / GPUCache 这类纯缓存本来就不该进快照，但为了让 IndexedDB 一起过，这里整体豁免（体积换完整性，本项目 maxTotalMB=0）。",
     "noExcludeDirs": [
       "%RDPUSERPROFILE%\\.workbuddy",
       "%RDPUSERPROFILE%\\.workbuddy-ai",
       "%RDPUSERPROFILE%\\AppData\\Local\\Programs\\WorkBuddy",
       "%RDPUSERPROFILE%\\AppData\\Local\\WorkBuddy",
-      "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy"
+      "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy",
+      "%RDPUSERPROFILE%\\AppData\\Local\\Microsoft\\Edge\\User Data"
     ]
   },
 
@@ -202,6 +204,7 @@
     "_comment_userData": "第 10 步（后台重装软件）收尾时对下列「用户数据目标」做完整性校验；缺失/不完整就从快照补漏。这是「Edge 浏览记录/已存密码/全部设置 + WorkBuddy 用户数据/缓存/安装目录」的兜底保险 —— 即使第 8 步预还原漏了，这里也会补齐并留下可见日志。",
     "userData": true,
     "_comment_userDataTargets": "name=显示名；path=目标路径（支持 %RDPUSERPROFILE%）；required=必须存在的相对文件；required 为空表示「目录存在即算通过」。",
+    "_comment_userDataTargets_dpapi": "⚠ 文件「在不在」不等于「用不用得上」：Edge 的 Default\\Login Data（已存密码）与 Default\\Cookies 都是用 Local State 里 os_crypt.encrypted_key 加密的，而该 key 由 Windows DPAPI（CryptProtectData/CurrentUser）保护、派生自「旧机器 + 旧用户」。换机器后 DPAPI 解不开 → Edge 把这些密文当损坏数据丢弃 → 表现就是「所有网页账号数据丢失」。这一步无法靠文件校验发现，所以 restore-snapshot.ps1 会额外做一次真实解密探测（EDGE_CRYPT=OK|BROKEN），并把结论与「开启 Edge 账号同步」的指引写进日志与 ENV READY。不加密的那部分（History/Bookmarks/Preferences/Web Data/Local Storage/IndexedDB/Service Worker）是可以完整还原的 —— 这也是必须把 Edge User Data 加进 noExcludeDirs 的原因。",
     "userDataTargets": [
       {
         "name": "Edge 浏览器",
@@ -212,7 +215,10 @@
           "Default\\History",
           "Default\\Login Data",
           "Default\\Preferences",
-          "Default\\Web Data"
+          "Default\\Web Data",
+          "Default\\Cookies",
+          "Default\\Local Storage",
+          "Default\\Session Storage"
         ]
       },
       {

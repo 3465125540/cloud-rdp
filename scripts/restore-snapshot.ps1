@@ -90,6 +90,17 @@ $script:HasUserDataLib = $false
 if (Test-Path -LiteralPath $userDataLib) { . $userDataLib; $script:HasUserDataLib = $true }
 else { Write-Warning "[restore] 未找到 userdata-lib.ps1，Edge/WorkBuddy 用户数据取证不可用" }
 
+# 用户配置文件（C:\Users\<user> + NTUSER.DAT）预创建共享库。
+# 为什么是「根因库」：用户级数据（Edge User Data / 桌面 / 文档 / .workbuddy）只有在
+# profile 已存在时才能还原；而 profile 的创建一直依赖
+# `Start-Process -Credential cmd /c exit` —— 该写法**缺 -LoadUserProfile**，
+# 于是进程起得来、不报错，profile 却没被创建 → 用户数据整段静默丢失
+# （真机 run 35780696116 里 C:\Users\a 全轮 run 从未出现）。详见 userprofile-lib.ps1 头注。
+$userProfileLib = Join-Path $PSScriptRoot "userprofile-lib.ps1"
+$script:HasUserProfileLib = $false
+if (Test-Path -LiteralPath $userProfileLib) { . $userProfileLib; $script:HasUserProfileLib = $true }
+else { Write-Warning "[restore] 未找到 userprofile-lib.ps1，用户配置文件预创建不可用（用户数据可能无法还原）" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -114,17 +125,19 @@ function Invoke-RestoreQuiesce {
 # 光看「还原了几个目录」是发现不了的。现在取证口径由 userdata-lib.ps1 统一提供，
 # 与第 10 步（reinstall-apps.ps1）同源，不会两处标准不一致。
 function Get-RestoreEvidence {
-    param([string]$RdpUser, [string]$Stage = '', [string]$ConfigPath = '')
+    param([string]$RdpUser, [string]$Stage = '', [string]$ConfigPath = '', [switch]$ProbeCrypt)
 
-    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = ''; state = 'MISSING'; detail = '' }
+    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = ''; state = 'MISSING'; detail = ''; crypt = 'UNKNOWN'; cryptNote = '' }
     if (-not $script:HasUserDataLib) { return $out }
     try {
         $r = Invoke-UserDataVerifyAndRepair -Stage $Stage -RdpUser $RdpUser -ConfigPath $ConfigPath `
-                 -Log { param($m) Say ("  " + $m) } -NoRepair
+                 -Log { param($m) Say ("  " + $m) } -NoRepair -ProbeCrypt:$ProbeCrypt
         $out.edge   = [string]$r.edge
         $out.wbai   = [string]$r.wb
         $out.state  = [string]$r.state
         $out.detail = [string]$r.detail
+        $out.crypt  = [string]$r.crypt
+        $out.cryptNote = [string]$r.cryptNote
         foreach ($e in @($r.after)) {
             if ($e.name -like 'Edge*') { $out.edgeDetail = [string]$e.detail }
             if ($e.name -like 'WorkBuddy*' -and $e.name -notlike '*旧路径*') { $out.wbaiDetail = [string]$e.detail }
@@ -136,18 +149,23 @@ function Get-RestoreEvidence {
 # 把取证结果同时写日志与 GITHUB_ENV
 # （EDGE_RESTORE / WBAI_RESTORE 保留原名供老工作流兼容，新增 USERDATA_RESTORE）
 function Write-RestoreEvidence {
-    param([string]$RdpUser, [string]$LogPath = '', [string]$Stage = '', [string]$ConfigPath = '')
-    $ev = Get-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath
+    param([string]$RdpUser, [string]$LogPath = '', [string]$Stage = '', [string]$ConfigPath = '', [switch]$ProbeCrypt)
+    $ev = Get-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -ProbeCrypt:$ProbeCrypt
     Say ("用户数据取证：Edge {0}（{1}）| WorkBuddy {2}（{3}）| 合计 {4}（{5}）" -f `
          $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.state, $ev.detail)
+    if ($ProbeCrypt) { Say ("  Edge 加密密钥：{0}（{1}）" -f $ev.crypt, $ev.cryptNote) }
     Set-GhEnv ("EDGE_RESTORE=" + $ev.edge)
     Set-GhEnv ("WBAI_RESTORE=" + $ev.wbai)
     Set-GhEnv ("USERDATA_RESTORE=" + $ev.state)
     Set-GhEnv ("USERDATA_RESTORE_DETAIL=" + $ev.detail)
+    if ($ProbeCrypt) {
+        Set-GhEnv ("EDGE_CRYPT=" + $ev.crypt)
+        Set-GhEnv ("EDGE_CRYPT_NOTE=" + $ev.cryptNote)
+    }
     if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
         try {
-            ("[{0}] evidence userdata={1}({2}) edge={3}({4}) wb={5}({6})" -f (Get-Date).ToString('o'), `
-             $ev.state, $ev.detail, $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail) |
+            ("[{0}] evidence userdata={1}({2}) edge={3}({4}) wb={5}({6}) crypt={7}" -f (Get-Date).ToString('o'), `
+             $ev.state, $ev.detail, $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.crypt) |
                 Out-File -LiteralPath $LogPath -Append -Encoding utf8
         } catch { }
     }
@@ -317,14 +335,17 @@ function Invoke-MachineRestore {
     $restored = 0
 
     # ---------- 1. 机器级文件（排除 C:\Users\<RdpUser>\... ，那部分交给登录任务） ----------
+    # 注意：被跳过的用户级目录数要**报出来**。历史事故里这 12 个目录被静默跳过，
+    # 日志只留一句「还原了 1 个目录」，用户数据丢失完全不可见（见 userprofile-lib.ps1）。
     $userPrefix = ("C\Users\" + $RdpUser).ToLower()
     # 覆盖文件前先关掉占用程序，否则 robocopy 覆盖失败（码 >= 8）→ 整目录被判还原失败
     Set-GhEnv ("SNAP_QUIESCE=" + (Invoke-RestoreQuiesce -ConfigPath $ConfigPath))
+    $userScopeDirs = New-Object System.Collections.Generic.List[string]
     if ($doFiles) {
         foreach ($e in @($mf.files.entries)) {
             $rel = [string]$e.mirror
             if ([string]::IsNullOrWhiteSpace($rel)) { continue }
-            if ($rel.ToLower().StartsWith($userPrefix)) { continue }   # 个人目录 → 留给 user 作用域
+            if ($rel.ToLower().StartsWith($userPrefix)) { $userScopeDirs.Add($rel); continue }   # 个人目录 → 留给 4d / user 作用域
 
             $src = Join-Path (Join-Path $Stage "files") $rel
             $dst = Get-AbsFromMirror -Rel $rel
@@ -333,6 +354,10 @@ function Invoke-MachineRestore {
             else { $restored++; Say "  还原 $rel  ->  $dst" }
         }
     } else { Say "  文件还原已关闭（restore.files=false）" }
+    if ($userScopeDirs.Count -gt 0) {
+        Say ("  用户级目录 {0} 个由 4d 预还原 / 首次登录任务处理（本段不碰）：{1}" -f `
+              $userScopeDirs.Count, (($userScopeDirs | Select-Object -First 8) -join ', '))
+    }
 
     # ---------- 2. 机器级注册表 ----------
     if ($doRegistry) {
@@ -449,22 +474,26 @@ function Invoke-MachineRestore {
     } else { Say "  安装型程序还原已关闭（programs.enabled=false）" }
 
     # ---------- 4d. 个人配置预还原（开机即还原，不依赖首次登录任务）----------
-    # 做法：先用 Start-Process -Credential 强制 Windows 创建并注册该用户的配置文件
-    # （.NET 会带 LOGON_WITH_PROFILE，即 LoadUserProfile），再 reg load 它的 NTUSER.DAT
-    # 导入 HKCU，最后 robocopy 个人文件（无 /PURGE）。失败则交给登录任务兜底。
+    # 做法：先用备用凭据「预创建」该用户的配置文件（userprofile-lib.ps1，内部用
+    # Start-Process -Credential **-LoadUserProfile** 真正创建 profile），再 reg load 它的
+    # NTUSER.DAT 导入 HKCU，最后 robocopy 个人文件（无 /PURGE）。失败则交给登录任务兜底。
+    #
+    # ⚠️ 历史坑（真机事故根因）：旧代码写的是
+    #     Start-Process ... -Credential $cred -Wait          ← 缺 -LoadUserProfile
+    #   -LoadUserProfile 是独立参数、默认 $false，缺了它就等于 LOGON_NETCREDENTIALS_ONLY：
+    #   进程起得来、不抛异常，但 profile 根本没被创建 → 用户级数据（Edge User Data /
+    #   桌面 / 文档 / .workbuddy）整段静默丢失。详见 userprofile-lib.ps1 头注。
     $userHome    = ("C:\Users\" + $RdpUser)
     $userPreOk   = $false
     if ($doFiles -or $doRegistry) {
         try {
-            if (-not [string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-                $ssPw = New-Object System.Security.SecureString
-                foreach ($ch in $env:RDP_PASSWORD.ToCharArray()) { $ssPw.AppendChar($ch) }
-                $ssPw.MakeReadOnly()
-                $credU = New-Object System.Management.Automation.PSCredential($RdpUser, $ssPw)
-                Start-Process -FilePath "cmd.exe" -ArgumentList "/c exit" -Credential $credU `
-                    -Wait -WindowStyle Hidden -ErrorAction Stop
-                Start-Sleep -Seconds 2
-            } else { Warn "  缺少 RDP_PASSWORD，无法预创建用户配置文件" }
+            if ($script:HasUserProfileLib -and (Get-Command Initialize-RdpUserProfile -ErrorAction SilentlyContinue)) {
+                $prof = Initialize-RdpUserProfile -RdpUser $RdpUser -Log { param($m) Say ("  " + $m) }
+                Say ("  用户配置文件：{0}（方式 {1}）" -f $(if ($prof.ok) { "就绪" } else { "未就绪" }), $prof.method)
+                if (-not $prof.ok -and $prof.note) { Warn ("  预创建用户配置文件未成功：{0}" -f $prof.note) }
+            } else {
+                Warn "  未加载 userprofile-lib.ps1，无法预创建用户配置文件（用户数据可能无法还原）"
+            }
 
             $ntuser = Join-Path $userHome "NTUSER.DAT"
             if (Test-Path -LiteralPath $ntuser) {
@@ -582,9 +611,12 @@ function Invoke-MachineRestore {
                 } catch { }
                 $userPreOk = $true
             } else {
-                Warn "  用户配置文件未创建成功（将交给登录任务）"
+                # 这一步失败 = 用户级数据（Edge User Data / 桌面 / 文档 / .workbuddy）本次全部落空，
+                # 绝不能只留一行日志：计入 problems → SNAPSHOT_STATUS 变 PARTIAL，汇总里可见。
+                $problems.Add("user-profile-missing")
+                Warn "  用户配置文件未创建成功（将交给登录任务）—— 用户级数据本次未还原"
             }
-        } catch { Warn "开机预还原个人配置失败（将交给登录任务）：$_" }
+        } catch { Warn "开机预还原个人配置失败（将交给登录任务）：$_"; $problems.Add("user-prerestore-failed") }
     }
     Set-GhEnv ("SNAPSHOT_USER_PRERESTORE=" + $(if ($userPreOk) { "OK" } else { "SKIPPED" }))
 
@@ -634,15 +666,12 @@ function Invoke-MachineRestore {
             if (-not (Test-Path -LiteralPath $cfgSrc) -and (Test-Path -LiteralPath $ConfigPath)) {
                 Copy-Item -LiteralPath $ConfigPath -Destination $cfgSrc -Force -ErrorAction SilentlyContinue
             }
-            # 共享库也要在 _tools 里，否则登录任务跑的 user 作用域会因缺库而静默降级
-            foreach ($lib in @("programs-lib.ps1", "portable-lib.ps1", "userhive-lib.ps1",
-                               "regimport-lib.ps1", "lockcopy-lib.ps1", "app-quiesce-lib.ps1")) {
-                $libDst = Join-Path $toolsDir $lib
+            # 共享库也要在 _tools 里，否则登录任务跑的 user 作用域会因缺库而静默降级。
+            # 用 glob「所有 *-lib.ps1」而不是硬编码清单 —— 硬编码清单曾漏掉 userdata-lib.ps1。
+            foreach ($lib in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter "*-lib.ps1" -File -ErrorAction SilentlyContinue)) {
+                $libDst = Join-Path $toolsDir $lib.Name
                 if (-not (Test-Path -LiteralPath $libDst)) {
-                    $libSrc = Join-Path $PSScriptRoot $lib
-                    if (Test-Path -LiteralPath $libSrc) {
-                        Copy-Item -LiteralPath $libSrc -Destination $libDst -Force -ErrorAction SilentlyContinue
-                    }
+                    Copy-Item -LiteralPath $lib.FullName -Destination $libDst -Force -ErrorAction SilentlyContinue
                 }
             }
 
@@ -694,7 +723,9 @@ function Invoke-MachineRestore {
 
     # 取证：Edge 配置/历史/收藏夹 + .workbuddy-ai 是否真的回来了
     # （个人目录由 user 作用域还原，这里只当「早测」；登录任务的日志里有最终结论）
-    Write-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null
+    # -ProbeCrypt 仅在 profile 就绪时做：这时 Edge 数据是刚从快照铺回来的、且 Edge 还没启动，
+    # 探到的是「快照里那把密钥能不能在本机解开」——即密码/Cookie 到底能不能用。
+    Write-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -LogPath (Join-Path $SysDir "_state\user-restore.log") -ProbeCrypt:$userPreOk | Out-Null
 }
 
 # ================================================================ user 作用域
@@ -866,7 +897,7 @@ function Invoke-UserRestore {
     # ---------- 5c. 取证：Edge 配置/历史/收藏夹 + .workbuddy-ai 是否真的回来了 ----------
     # 这里是权威结论（个人目录就是在 user 作用域还原的）。光看「还原了几个目录」
     # 发现不了「Edge 历史缺了」「程序本体没回来」这类静默漏项。
-    try { Write-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -LogPath (Join-Path $SysDir "_state\user-restore.log") | Out-Null } catch { }
+    try { Write-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -LogPath (Join-Path $SysDir "_state\user-restore.log") -ProbeCrypt | Out-Null } catch { }
 
     # ---------- 6. 只在成功时自注销；失败则保留任务，下次登录自动重试 ----------
     if ($problems.Count -eq 0) {
