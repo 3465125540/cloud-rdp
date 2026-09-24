@@ -1,7 +1,7 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-09-24T07:25:20.8942572Z",
+  "updated_utc": "2026-09-24T12:11:33.6376823Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
@@ -17,6 +17,20 @@
       "repo": "cloud-rdp",
       "run_id": 35961080359,
       "since": "2026-09-24T05:41:47Z"
+    },
+    {
+      "account": "acc-3",
+      "owner": "3465125540",
+      "repo": "cloud-rdp",
+      "run_id": 35987028997,
+      "since": "2026-09-24T10:24:25Z"
+    },
+    {
+      "account": "acc-5",
+      "owner": "code19698fgh",
+      "repo": "cloud-rdp",
+      "run_id": null,
+      "since": "2026-09-24T12:11:28.6749545Z"
     }
   ],
   "accounts": [
@@ -60,18 +74,18 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_3",
       "token_state": "ok",
-      "alive_count": 1,
+      "alive_count": 2,
       "total": 20,
       "last_run": {
-        "run_id": 35958738011,
-        "status": "in_progress",
+        "run_id": 35987028997,
+        "status": "pending",
         "conclusion": "",
-        "created_at": "2026-09-24T05:09:56Z",
+        "created_at": "2026-09-24T10:24:25Z",
         "event": "schedule",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/35958738011"
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/35987028997"
       },
       "note": "",
-      "role": "primary"
+      "role": "standby"
     },
     {
       "id": "acc-4",
@@ -97,14 +111,15 @@
       "total": 0,
       "last_run": null,
       "note": "",
-      "role": ""
+      "role": "standby"
     }
   ],
   "recent_dispatches": {
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "3465125540": "2026-09-24T01:21:36.5912945Z",
     "code1969sda": "2026-09-23T06:51:01.8204238Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "yc1966asgf": "2026-09-23T17:13:36.8496917Z"
+    "3465125540": "2026-09-24T01:21:36.5912945Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "yc1966asgf": "2026-09-23T17:13:36.8496917Z",
+    "code19698fgh": "2026-09-24T12:11:28.6749545Z"
   }
 }
