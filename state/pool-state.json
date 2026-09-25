@@ -1,22 +1,22 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-09-25T20:41:57.7068722Z",
+  "updated_utc": "2026-09-25T23:37:45.8698100Z",
   "target_machines": 2,
   "primary": {
-    "account": "acc-3",
-    "owner": "3465125540",
+    "account": "acc-1",
+    "owner": "yc1966asgf",
     "repo": "cloud-rdp",
-    "run_id": 36159847007,
-    "since": "2026-09-25T16:17:51Z"
+    "run_id": null,
+    "since": "2026-09-25T23:37:40.4959516Z"
   },
   "standby": [
     {
-      "account": "acc-1",
-      "owner": "yc1966asgf",
+      "account": "acc-3",
+      "owner": "3465125540",
       "repo": "cloud-rdp",
-      "run_id": 36167283058,
-      "since": "2026-09-25T17:27:54Z"
+      "run_id": null,
+      "since": "2026-09-25T23:37:40.4959516Z"
     }
   ],
   "accounts": [
@@ -27,20 +27,20 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_1",
       "token_state": "ok",
-      "alive_count": 1,
-      "running_count": 1,
+      "alive_count": 0,
+      "running_count": 0,
       "queued_count": 0,
       "total": 13,
       "last_run": {
         "run_id": 36167283058,
-        "status": "in_progress",
-        "conclusion": "",
+        "status": "completed",
+        "conclusion": "success",
         "created_at": "2026-09-25T17:27:54Z",
         "event": "workflow_dispatch",
         "url": "https://github.com/yc1966asgf/cloud-rdp/actions/runs/36167283058"
       },
       "note": "",
-      "role": "standby"
+      "role": "primary"
     },
     {
       "id": "acc-2",
@@ -64,20 +64,20 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_3",
       "token_state": "ok",
-      "alive_count": 1,
-      "running_count": 1,
+      "alive_count": 0,
+      "running_count": 0,
       "queued_count": 0,
       "total": 20,
       "last_run": {
         "run_id": 36159847007,
-        "status": "in_progress",
-        "conclusion": "",
+        "status": "completed",
+        "conclusion": "success",
         "created_at": "2026-09-25T16:17:51Z",
         "event": "workflow_dispatch",
         "url": "https://github.com/3465125540/cloud-rdp/actions/runs/36159847007"
       },
       "note": "",
-      "role": "primary"
+      "role": "standby"
     },
     {
       "id": "acc-4",
@@ -118,11 +118,11 @@
     }
   ],
   "recent_dispatches": {
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "3465125540": "2026-09-25T16:17:47.8502410Z",
     "code19698fgh": "2026-09-24T12:11:28.6749545Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "yc1966asgf": "2026-09-25T23:37:40.4959516Z",
+    "code1969sda": "2026-09-23T06:51:01.8204238Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "yc1966asgf": "2026-09-25T17:27:49.6989604Z",
-    "code1969sda": "2026-09-23T06:51:01.8204238Z"
+    "3465125540": "2026-09-25T23:37:40.4959516Z"
   }
 }
