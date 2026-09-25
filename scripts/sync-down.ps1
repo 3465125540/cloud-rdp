@@ -56,6 +56,17 @@ if (-not (Test-Path -LiteralPath $lib)) {
 }
 . $lib
 
+# ---------------------------------------------------------------- 长任务保命库（可缺省）
+# 为什么需要：本步的 rclone 拉取要跑 2 小时以上、落地上万个小文件。实测有 3 次 job
+# 死在拉取期间，GitHub 报「The hosted runner lost communication with the server」——
+# 官方口径是「进程被终结 / CPU 内存饥饿 / 网络被掐断」。watchdog-lib 负责前两条：
+#   ① 重 IO 之前加好 Defender 排除项（默认关实时扫描）→ 别让杀软把 runner 饿死；
+#   ② 起一个看门狗子进程，每分钟把「GitHub 可达性 + 空闲内存 + 磁盘」打进 job 日志。
+$wdLib    = Join-Path $PSScriptRoot "watchdog-lib.ps1"
+$hasWdLib = Test-Path -LiteralPath $wdLib
+if ($hasWdLib) { . $wdLib }
+else { Warn "未找到 watchdog-lib.ps1 —— 长任务保命能力退化为「沿用旧 rclone 参数」" }
+
 if ([string]::IsNullOrWhiteSpace($Remote)) { $Remote = $RemoteBase.TrimEnd('/') + "/CloudRDP" }
 
 New-Item -ItemType Directory -Force -Path $Local | Out-Null
@@ -116,24 +127,36 @@ if ($probe.Verdict -ne 'OK') {
 # ---------------------------------------------------------------- ② 确认远端有东西，才真正拉
 $restored = $false
 $lastCode = 0
-for ($i = 1; $i -le $MaxAttempts; $i++) {
-    $rcArgs = @(
-        "copy", $Remote, $Local,
-        "--update",
-        "--transfers", "4", "--checkers", "8",
-        "--timeout", "0", "--contimeout", "0",
-        "--retries", "3", "--low-level-retries", "5",
-        "--stats-one-line", "-v"
-    )
-    foreach ($ex in $excludeList) { $rcArgs += @("--exclude", $ex) }
 
-    & $RcloneExe @rcArgs
-    $lastCode = $LASTEXITCODE
-    if ($lastCode -eq 0) { $restored = $true; break }
-    if ($i -lt $MaxAttempts) {
-        Warn "第 $i/$MaxAttempts 次拉取失败（rclone 码 $lastCode），$RetryDelaySec 秒后重试……"
-        Start-Sleep -Seconds $RetryDelaySec
+# 重 IO 之前先关掉杀软的逐字节扫描（这一步能省下大量 CPU —— runner 被饿死是官方点名的头号成因）
+$wdHandle = $null
+if ($hasWdLib) {
+    try { $null = Enable-RdpAvExclusions } catch { Warn "设置 Defender 排除项失败（可忽略）：$_" }
+    try { $wdHandle = Start-RdpConnWatchdog -IntervalSec 60 -FailThreshold 3 } catch { Warn "拉起看门狗失败（可忽略）：$_" }
+}
+
+# 拉取方向用「有限超时」：旧参数 --timeout 0 会让一条僵死连接吊到天亮，
+# rclone 不报错、step 不结束，最后撞 6 小时硬上限被判 cancelled（历史上真发生过）。
+$netArgs = if ($hasWdLib) { @(Get-RdpRcloneNetArgs -Mode pull) } else {
+    @('--timeout','5m','--contimeout','60s','--transfers','4','--checkers','8',
+      '--retries','5','--low-level-retries','10','--stats-one-line','-v')
+}
+
+try {
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        $rcArgs = @("copy", $Remote, $Local, "--update") + $netArgs
+        foreach ($ex in $excludeList) { $rcArgs += @("--exclude", $ex) }
+
+        & $RcloneExe @rcArgs
+        $lastCode = $LASTEXITCODE
+        if ($lastCode -eq 0) { $restored = $true; break }
+        if ($i -lt $MaxAttempts) {
+            Warn "第 $i/$MaxAttempts 次拉取失败（rclone 码 $lastCode），$RetryDelaySec 秒后重试……"
+            Start-Sleep -Seconds $RetryDelaySec
+        }
     }
+} finally {
+    if ($wdHandle) { try { $null = Stop-RdpConnWatchdog -Handle $wdHandle } catch { } }
 }
 
 if ($restored) {

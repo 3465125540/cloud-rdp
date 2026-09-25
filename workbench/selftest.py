@@ -980,7 +980,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.5.5", server.VERSION == "1.5.5", server.VERSION)
+    check("T168 server.py 版本 1.5.7", server.VERSION == "1.5.7", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -1215,6 +1215,133 @@ def main():
           '-Filter "*-lib.ps1"' in backup_txt and "$toolsFiles" in backup_txt)
     check("T235 restore 侧 _tools 自愈也用 glob 拷全部 *-lib.ps1",
           '-Filter "*-lib.ps1"' in restore_txt)
+
+    # ---------------- 「在跑」必须区分「真在跑 / 排队中」（瑀子 2026-09-24 反馈） ----------------
+    # 事故：账号卡写「在跑 2 台」，但「机器运行实况」只显示 1 台。
+    # 根因：alive_count 的口径其实是「**未结束**的 run 数」（含 pending/queued/waiting/requested），
+    #   排队中的 run 还没分到 runner、机器根本没起来 → tailnet 上没有节点 → 实况里看不到。
+    #   实测 acc-3 的 run 35958738011 状态就是 pending（windows-rdp.yml 配了 concurrency，同仓库串行）。
+    # 修法：把「真在跑（status=in_progress）」和「排队中」拆开，面板如实分开展示。
+    print("[「在跑」区分 真在跑 / 排队中]")
+    pcl_txt = open(os.path.join(repo_dir, "scripts", "pool-lib.ps1"), encoding="utf-8-sig").read()
+    pcp_txt = open(os.path.join(repo_dir, "scripts", "pool-coordinator.ps1"), encoding="utf-8-sig").read()
+    srv_txt = open(os.path.join(wb_dir, "server.py"), encoding="utf-8").read()
+    check("T236 协调器把「在跑」拆成 running_count / queued_count（pool-lib 发布 + coordinator 计算）",
+          "running_count" in pcl_txt and "queued_count" in pcl_txt
+          and "running_count" in pcp_txt and "queued_count" in pcp_txt
+          and "$_.status -eq 'in_progress'" in pcp_txt)
+    check("T237 server.py hub_live_probe 按真 status 拆（字段名 in_progress 其实是「未结束」，会骗人）",
+          'r.get("status")' in srv_txt and '"in_progress"' in srv_txt
+          and "running_count" in srv_txt and "queued_count" in srv_txt)
+    check("T238 app.js 渲染「在跑 X 台 · 排队 Y 台」+ styles.css 有 .mon-queued",
+          "running_count" in app_txt and "queued_count" in app_txt
+          and "mon-queued" in app_txt and ".mon-queued" in css_txt)
+    _code, _body, _ = req(base, "/api/overview")
+    _accs = (json.loads(_body).get("accounts") or {}).get("accounts") or []
+    _accs_ok = (not _accs) or all(("running_count" in a and "queued_count" in a) for a in _accs)
+    check("T239 /api/overview 账号条目带 running_count / queued_count（旧协调器状态可为 null）",
+          "running_count" in srv_txt and "queued_count" in srv_txt and _accs_ok,
+          "账号数 %d" % len(_accs))
+
+    # ---------------- 「定时计划运行日志」分账号展示（v1.5.7） ----------------
+    # 需求：日志面板原来只看主仓库（hub），但每个账号 = 一个 fork，各跑各的 run。
+    # 现在按账号分组展示：hub 账号直接复用主仓库那份结果（不重复请求），
+    # 其余账号用本机 .tools/pool/<owner>.token；都没有 → 匿名（公开仓库可读）。
+    # 匿名额度只有 60/h 而面板 30s 刷一次 → 匿名结果单独缓存 300s，免得把额度刷爆。
+    print("[定时计划运行日志 分账号展示]")
+    check("T240 server.py 有 account_token / account_runs / _account_run_groups（分账号拉 run）",
+          "def account_token(" in srv_txt and "def account_runs(" in srv_txt
+          and "def _account_run_groups(" in srv_txt)
+    check("T241 get_runs 支持 include_accounts（默认 False，hub_live_probe 不被顺带拖慢）",
+          "include_accounts=False" in srv_txt and "include_accounts=True" in srv_txt
+          and "accruns:%s:%s:%s" in srv_txt)
+    check("T242 gh_api_as 无 token 时不发 Authorization（否则拼出 'Bearer ' 白跑一趟）",
+          'if token:\n        headers["Authorization"]' in srv_txt)
+    check("T243 匿名结果缓存久一点（300s），别把 60/h 的匿名额度刷爆",
+          'CONFIG["cache_seconds"] if token else 300' in srv_txt)
+    check("T244 读不到的账号才去拉 pool-state 兜底（fallback_run，惰性 —— 别每 20s 白打一份）",
+          "fallback_run" in srv_txt and "（池状态记录的最近一次运行）" in srv_txt
+          and "broken = [e0 for e0 in entries" in srv_txt)
+    check("T245 index.html 有账号筛选行 #run-acc-tabs / #runs-meta",
+          'id="run-acc-tabs"' in idx_txt and 'id="runs-meta"' in idx_txt)
+    check("T246 app.js 有 RUN_ACC + runGroups/runGroupHead/renderRunAccTabs（分组渲染）",
+          "RUN_ACC" in app_txt and "function runGroups(" in app_txt
+          and "function runGroupHead(" in app_txt and "function renderRunAccTabs(" in app_txt)
+    check("T247 app.js 状态徽章中文化（不再渲染 in_progress/pending 原值）",
+          "RUN_STATE_LABEL" in app_txt and 'in_progress: "进行中"' in app_txt
+          and "RUN_QUEUED_STATES" in app_txt)
+    check("T248 styles.css 有 .runs-sub / tr.run-group / tr.run-note",
+          ".runs-sub" in css_txt and "tr.run-group" in css_txt and "tr.run-note" in css_txt)
+    _code, _body, _ = req(base, "/api/runs?accounts=1")
+    _rj = json.loads(_body)
+    check("T249 /api/runs?accounts=1 返回 accounts 列表（离线时为空但键必须在）",
+          isinstance(_rj.get("accounts"), list), "type=%s" % type(_rj.get("accounts")).__name__)
+    _code, _body, _ = req(base, "/api/overview")
+    _r2 = json.loads(_body).get("runs") or {}
+    check("T250 /api/overview 的 runs 带 accounts 键（分账号视图的数据来源）",
+          isinstance(_r2.get("accounts"), list))
+    check("T251 各账号 run 并行拉取（as_completed）—— 顺序拉 = 账号数 × 超时，面板 30s 自刷会被拖死",
+          "as_completed" in srv_txt and "max_workers=min(4" in srv_txt)
+
+    # ---------------- 「runner 掉线」保命四件套（瑀子 2026-09-25 反馈） ----------------
+    # 事故：build 报 "The hosted runner lost communication with the server"。
+    # 日志取证：三次失败的 build 全死在 step 7/8 的数小时 rclone 批量传输里 ——
+    #   日志在中途凭空截断、68,788 行里没有任何 ##[error]/##[warning]/##[section]，
+    #   job 却在 46 分钟后又报 failure。这是「runner 进程被饿死 / 心跳发不出去」的典型特征
+    #   （官方把 CPU/内存饿死列为首因，且日志表现就是「中途无错截断」）。
+    # 四条根因 + 对策：
+    #   ① Defender 实时扫描 step 7/8 落地的 ≈1.8 万个小文件 → CPU 饿死
+    #        → 0a + 三个长任务脚本里先 Enable-RdpAvExclusions（加排除 + 关实时扫描）；
+    #   ② Tailscale 默认接管系统 DNS → runner 自己解析 api.github.com 也走隧道
+    #        → 0c 的 tailscale up 加 --accept-dns=false；
+    #   ③ 拉取用 --timeout 0 → 一条僵死连接能吊几小时（rclone 不报错、step 不结束）
+    #        → pull 改 5m/60s；push 保留 0（139 WebDAV 上传 >5min，动了就回归旧事故）；
+    #   ④ 网络瞬断不可见 → 子进程看门狗每 60s 探一次，连续 3 次不可达就分级自愈 + 打印判定。
+    print("[runner 掉线 保命四件套]")
+    wd_lib = os.path.join(repo_dir, "scripts", "watchdog-lib.ps1")
+    cw_ps1 = os.path.join(repo_dir, "scripts", "conn-watchdog.ps1")
+    check("T252 存在共享库 watchdog-lib.ps1", os.path.isfile(wd_lib))
+    wd_txt = open(wd_lib, encoding="utf-8-sig").read() if os.path.isfile(wd_lib) else ""
+    check("T253 watchdog-lib 导出四个核心函数（探测 / 生命体征 / Defender 排除 / 网络参数）",
+          all(("function %s" % f) in wd_txt for f in
+              ["Test-RdpGithubReachable", "Get-RdpHostVitals",
+               "Enable-RdpAvExclusions", "Get-RdpRcloneNetArgs"]))
+    check("T254 watchdog-lib 导出看门狗 + 环境去重（Start-Process 撞 PATH/Path 重复键的兜底）",
+          "function Start-RdpConnWatchdog" in wd_txt and "function Stop-RdpConnWatchdog" in wd_txt
+          and "function Repair-RdpProcessEnvDupes" in wd_txt
+          and "function Invoke-RdpNetSelfHeal" in wd_txt)
+    check("T255 探测不含 ICMP（Azure 挡入站 ICMP，ping 恒假 → 会误判成断网）",
+          "BeginConnect" in wd_txt and "AsyncWaitHandle" in wd_txt)
+    check("T256 ★ pull 超时有限（5m/60s），不再用 --timeout 0 把整场吊死",
+          "'--timeout', '5m', '--contimeout', '60s'" in wd_txt)
+    check("T257 ★ push 仍保留 --timeout 0（139 WebDAV 上传 >5min，动了就回归旧事故）",
+          "'--timeout', '0', '--contimeout', '0'" in wd_txt)
+    check("T258 两个逃生开关齐备（AV_SKIP / WATCHDOG_SKIP）—— 本地联调别动本机杀软",
+          "CLOUDRDP_AV_SKIP" in wd_txt and "CLOUDRDP_WATCHDOG_SKIP" in wd_txt)
+    check("T259 存在子进程 conn-watchdog.ps1", os.path.isfile(cw_ps1))
+    cw_txt = open(cw_ps1, encoding="utf-8-sig").read() if os.path.isfile(cw_ps1) else ""
+    check("T260 conn-watchdog 声明 ParentPid / FailThreshold / StateFile，且 lib 启动时确实传了",
+          all(("$%s" % v) in cw_txt for v in ["ParentPid", "FailThreshold", "StateFile"])
+          and "-ParentPid" in wd_txt and "-StateFile" in wd_txt)
+    check("T261 conn-watchdog 打印明确判定（内存被吃光 vs 网络被掐断）",
+          "主机被饿死" in cw_txt and "网络被掐断" in cw_txt)
+
+    # 三个长任务脚本必须真接线（否则新库是死代码，等于没修）
+    pre_txt = open(os.path.join(repo_dir, "scripts", "pre-restore.ps1"),
+                   encoding="utf-8-sig").read()
+    for _nm, _t in [("sync-down", sd_txt), ("pre-restore", pre_txt), ("restore-snapshot", restore_txt)]:
+        check("T262-%s 接线 watchdog-lib（dot-source + Defender 排除 + 看门狗开关）" % _nm,
+              "watchdog-lib.ps1" in _t and "Enable-RdpAvExclusions" in _t
+              and "Start-RdpConnWatchdog" in _t and "Stop-RdpConnWatchdog" in _t)
+    check("T263 sync-down / pre-restore / restore-snapshot 都从 Get-RdpRcloneNetArgs 取参数（口径统一）",
+          "Get-RdpRcloneNetArgs" in sd_txt and "Get-RdpRcloneNetArgs" in pre_txt
+          and "Get-RdpRcloneNetArgs" in restore_txt)
+
+    # workflow 侧：0a 加排除、0c 关 MagicDNS
+    check("T264 workflow 0a 调 Enable-RdpAvExclusions（重 IO 之前先把 Defender 排除加好）",
+          "Enable-RdpAvExclusions" in wf_txt and "watchdog-lib.ps1" in wf_txt)
+    check("T265 workflow 0c 的 tailscale up 带 --accept-dns=false（别让 VPN 接管系统 DNS）",
+          any(("up --authkey" in _l and "--accept-dns=false" in _l) for _l in wf_txt.splitlines()))
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

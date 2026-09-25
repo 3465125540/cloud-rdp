@@ -52,6 +52,14 @@ $programsLib = Join-Path $PSScriptRoot "programs-lib.ps1"
 if (Test-Path -LiteralPath $programsLib) { . $programsLib }
 else { Write-Warning "[pre-restore] 未找到 programs-lib.ps1，将无法记录程序基线" }
 
+# 长任务保命共享库（可缺省）：Defender 排除 + 连接看门狗 + 有限超时的 rclone 参数。
+# 背景：本步的拉取要跑 40~50 分钟、落地上万个小文件；实测有 3 次 job 死在拉取期间，
+# GitHub 报「The hosted runner lost communication with the server」。
+$wdLib    = Join-Path $PSScriptRoot "watchdog-lib.ps1"
+$hasWdLib = Test-Path -LiteralPath $wdLib
+if ($hasWdLib) { . $wdLib }
+else { Write-Warning "[pre-restore] 未找到 watchdog-lib.ps1 —— 长任务保命能力退化（沿用旧 rclone 参数）" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -223,16 +231,27 @@ if ($Pull) {
     }
 
     # ---- ② 判定通过（OK 或库缺失退化为空串），正式拷贝（带重试）----
+    # 重 IO 之前：加 Defender 排除项 + 起连接看门狗（长任务保命，见 watchdog-lib.ps1）
+    $wdHandle = $null
+    if ($hasWdLib) {
+        try { $null = Enable-RdpAvExclusions } catch { Warn "设置 Defender 排除项失败（可忽略）：$_" }
+        try { $wdHandle = Start-RdpConnWatchdog -IntervalSec 60 -FailThreshold 3 } catch { Warn "拉起看门狗失败（可忽略）：$_" }
+    }
+    # 拉取方向用有限超时：--timeout 0 会把一条僵死连接吊到天亮（rclone 不报错、step 不结束）
+    $netArgs = if ($hasWdLib) { @(Get-RdpRcloneNetArgs -Mode pull) } else {
+        @('--timeout','5m','--contimeout','60s','--transfers','4','--checkers','8',
+          '--retries','5','--low-level-retries','10','--stats-one-line','-v')
+    }
     $code = 0
-    for ($i = 1; $i -le 3; $i++) {
-        & $RcloneExe copy $Remote $Stage `
-            --update --transfers 4 --checkers 8 `
-            --timeout 0 --contimeout 0 `
-            --retries 3 --low-level-retries 5 `
-            --stats-one-line -v
-        $code = $LASTEXITCODE
-        if ($code -eq 0) { break }
-        if ($i -lt 3) { Warn "第 $i/3 次拉取失败（码 $code），8 秒后重试"; Start-Sleep -Seconds 8 }
+    try {
+        for ($i = 1; $i -le 3; $i++) {
+            & $RcloneExe copy $Remote $Stage --update @netArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { break }
+            if ($i -lt 3) { Warn "第 $i/3 次拉取失败（码 $code），8 秒后重试"; Start-Sleep -Seconds 8 }
+        }
+    } finally {
+        if ($wdHandle) { try { $null = Stop-RdpConnWatchdog -Handle $wdHandle } catch { } }
     }
     if ($code -ne 0) {
         # 拷贝失败：再判定一次，把「网络问题」和「真的没有」分开

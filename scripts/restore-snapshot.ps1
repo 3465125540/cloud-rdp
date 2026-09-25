@@ -101,6 +101,12 @@ $script:HasUserProfileLib = $false
 if (Test-Path -LiteralPath $userProfileLib) { . $userProfileLib; $script:HasUserProfileLib = $true }
 else { Write-Warning "[restore] 未找到 userprofile-lib.ps1，用户配置文件预创建不可用（用户数据可能无法还原）" }
 
+# 长任务保命库（可缺省）：本脚本自己也会拉快照（Invoke-PullSnapshot），
+# 拉取方向的 rclone 参数口径统一放在 watchdog-lib.ps1（有限超时 + 更多低层重试）。
+$wdLib = Join-Path $PSScriptRoot "watchdog-lib.ps1"
+if (Test-Path -LiteralPath $wdLib) { . $wdLib }
+else { Write-Warning "[restore] 未找到 watchdog-lib.ps1 —— 拉取沿用旧 rclone 参数（--timeout 0）" }
+
 function Set-GhEnv([string]$kv) {
     if ($env:GITHUB_ENV) { $kv | Out-File $env:GITHUB_ENV -Append -Encoding ascii }
 }
@@ -294,22 +300,41 @@ function Invoke-PullSnapshot {
     New-Item -ItemType Directory -Force -Path $Stage | Out-Null
     Say "拉取快照: $Remote  ->  $Stage"
 
+    # 拉取方向用有限超时：--timeout 0 会让一条僵死连接吊到天亮（rclone 不报错、step 不结束）。
+    # 口径与 pre-restore / sync-down 保持一致，统一由 watchdog-lib.ps1 提供。
+    $netArgs = if (Get-Command Get-RdpRcloneNetArgs -ErrorAction SilentlyContinue) { @(Get-RdpRcloneNetArgs -Mode pull) } else {
+        @('--timeout','5m','--contimeout','60s','--transfers','4','--checkers','8',
+          '--retries','5','--low-level-retries','10','--stats-one-line','-v')
+    }
+
+    # 重 IO 之前先加 Defender 排除项 + 起连接看门狗（长任务保命，见 watchdog-lib.ps1）。
+    # 库可能不存在（老工作区）→ 全部 fail-soft，缺库就退化成「只用有限超时」。
+    $wdHandle = $null
+    if (Get-Command Enable-RdpAvExclusions -ErrorAction SilentlyContinue) {
+        try { $null = Enable-RdpAvExclusions } catch { Warn "设置 Defender 排除项失败（可忽略）：$_" }
+    }
+    if (Get-Command Start-RdpConnWatchdog -ErrorAction SilentlyContinue) {
+        try { $wdHandle = Start-RdpConnWatchdog -IntervalSec 60 -FailThreshold 3 } catch { Warn "拉起看门狗失败（可忽略）：$_" }
+    }
+
     $code = 0
-    for ($i = 1; $i -le $MaxAttempts; $i++) {
-        & $RcloneExe copy $Remote $Stage `
-            --update --transfers 4 --checkers 8 `
-            --timeout 0 --contimeout 0 `
-            --retries 3 --low-level-retries 5 `
-            --stats-one-line -v
-        $code = $LASTEXITCODE
-        if ($code -eq 0) { return "OK" }
-        if ($code -eq 3 -or $code -eq 4) { return "EMPTY" }   # 远端尚无快照（首次运行）
-        if ($i -lt $MaxAttempts) {
-            Warn "第 $i/$MaxAttempts 次拉取失败（rclone 码 $code），$RetryDelaySec 秒后重试..."
-            Start-Sleep -Seconds $RetryDelaySec
+    try {
+        for ($i = 1; $i -le $MaxAttempts; $i++) {
+            & $RcloneExe copy $Remote $Stage --update @netArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { return "OK" }
+            if ($code -eq 3 -or $code -eq 4) { return "EMPTY" }   # 远端尚无快照（首次运行）
+            if ($i -lt $MaxAttempts) {
+                Warn "第 $i/$MaxAttempts 次拉取失败（rclone 码 $code），$RetryDelaySec 秒后重试..."
+                Start-Sleep -Seconds $RetryDelaySec
+            }
+        }
+        return "FAILED"
+    } finally {
+        if ($wdHandle -and (Get-Command Stop-RdpConnWatchdog -ErrorAction SilentlyContinue)) {
+            try { $null = Stop-RdpConnWatchdog -Handle $wdHandle } catch { }
         }
     }
-    return "FAILED"
 }
 
 # ================================================================ machine 作用域

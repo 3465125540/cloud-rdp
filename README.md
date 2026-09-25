@@ -761,6 +761,51 @@ WebDAV `PROPFIND` 打成 `404`，rclone **同样**映射成码 3 —— 于是�
 > **运维提醒**：139 根目录下若已存在那个幽灵 `AI文件库`（与 `/cloudrdp/AI文件库` 并存），需**手动删除**；
 > 老 fork（如 acc-1）不必再手工同步脚本 —— 步骤 0p 每次开机都会拉 hub 的最新 `scripts/` 覆盖。
 
+### 11. runner 掉线保命四件套（`The hosted runner lost communication with the server`）
+
+**事故**：`build` 报 `The hosted runner lost communication with the server. Anything in your workflow that
+terminates the runner process, starves it for CPU/Memory, or blocks its network access can cause this error.`
+
+**日志取证**（拉全量 job 日志逐行比对，三次失败的 build 全部对上）：
+
+| run | 死在 | 证据 |
+|-----|------|------|
+| `36124079866` | **第 8 步** | rclone 拉到 `99% (3.352 GiB, xfr#16230/18651)` 后最后一行 `14:32:36Z`，job 却在 `15:18:57Z` 才报 failure —— **中间 46 分钟日志凭空消失**；68,788 行里**没有任何** `##[error]` / `##[warning]` / `##[section]` |
+| `35820523536` | **第 7 步** | step 永远停在 `in_progress`，后面步骤全 `pending`；job 耗 4h21m（预算 6h） |
+| `35813312970` | **第 8 步** | step 2h26m 后变 `cancelled`，后续全 `skipped`；job 3h01m |
+
+对照成功的 `35942568011`：第 7 步 2h36m、第 8 步 **48m56s**、job 5h58m —— 失败的 run 都死在
+**数小时的 rclone 批量传输**里，且**日志中途无错截断**。这正是 GitHub 官方描述的 runner
+**心跳发不出去**的特征（官方把「CPU / 内存被饿死」列为首因）。
+
+> 顺带排除：全流程**没有**任何 `Restart-Computer` / `shutdown`；`snapshot-config.json` 不还原
+> `Tcpip` / `NetworkList` / `hosts`；第 8 步带 `continue-on-error: true` 且 `timeout-minutes: 360`
+> 从未触顶 —— 所以**死的是 runner 进程本身**，不是某个 step。
+
+**四条根因 + 对策**（本次改动）：
+
+| # | 根因 | 对策 | 落点 |
+|---|------|------|------|
+| ① | **Defender 实时扫描**：第 7/8 步要落地 ≈**1.8 万个小文件**，实时扫描逐个过一遍，在 4 vCPU 的 hosted runner 上足以把 CPU 吃光 → 心跳发不出 | 重 IO 之前先加**排除路径/进程**并**关实时扫描**（一次性机器；想保留实时扫描设 `CLOUDRDP_AV_KEEP_REALTIME=1`） | `watchdog-lib.ps1` → `Enable-RdpAvExclusions`；workflow **0a** + `sync-down` / `pre-restore` / `restore-snapshot` 三处调用 |
+| ② | **Tailscale 接管系统 DNS**：`tailscale up` 默认把本机 DNS 改成 `100.100.100.100`，一旦 tailnet 开了 MagicDNS，runner agent 访问 `api.github.com` 的长轮询也会被拽进隧道 → 解析一抖就掉线 | `tailscale up` 加 **`--accept-dns=false`**（用户只认 `100.x` 裸 IP 连机器，关掉零副作用） | workflow **0c** |
+| ③ | **拉取超时无穷大**：`--timeout 0 --contimeout 0`（当年为 139 WebDAV **上传**加的）用在**下载**上，一条僵死连接能吊到天亮 —— rclone 不报错、step 不结束 | pull 改 **`--timeout 5m --contimeout 60s`**；**push 保留 `0`**（139 WebDAV 上传 >5min 会被服务端断，动了就回归旧事故）。两方向都加 `--tpslimit 20` | `watchdog-lib.ps1` → `Get-RdpRcloneNetArgs -Mode pull\|push` |
+| ④ | **网络瞬断不可见**：一次抖动就吃掉整场 run，日志里什么都看不到 | 独立**子进程看门狗**：每 60s 探一次 GitHub（DNS + TCP:443，**不用 ICMP** —— Azure 挡入站 ping），连续 3 次不可达就分级自愈（清 DNS 缓存 → 重连 Tailscale → 清 ARP，**绝不动网卡**）并打印明确判定「内存被吃光 / 网络被掐断」 | `conn-watchdog.ps1`（父进程消失即自行退出，绝不留孤儿） |
+
+**新增/改动文件**：
+
+| 文件 | 说明 |
+|------|------|
+| `scripts/watchdog-lib.ps1`（新） | 共享库：`Test-RdpGithubReachable` / `Get-RdpHostVitals` / `Enable-RdpAvExclusions` / `Get-RdpRcloneNetArgs` / `Invoke-RdpNetSelfHeal` / `Start-RdpConnWatchdog` / `Stop-RdpConnWatchdog` / `Repair-RdpProcessEnvDupes`。全部 fail-soft，缺库就退化成旧行为 |
+| `scripts/conn-watchdog.ps1`（新） | 看门狗子进程；每分钟往 job 日志打一行 `[watchdog] gh=ok 空闲内存=… 磁盘=… top=…`，异常时打 `##[warning]` 并自愈 |
+| `scripts/sync-down.ps1` / `pre-restore.ps1` / `restore-snapshot.ps1` | 拉取前 `Enable-RdpAvExclusions` + `Start-RdpConnWatchdog`，`try/finally` 收尾；rclone 参数统一走 `Get-RdpRcloneNetArgs` |
+| `.github/workflows/windows-rdp.yml` | **0a** 加 Defender 排除；**0c** `tailscale up` 加 `--accept-dns=false` |
+
+> **为什么不改 push 的超时**：`backup-snapshot.ps1` 推送 139 用的就是 `--timeout 0` —— 那是**真机踩出来的**
+> （139 WebDAV 上传大文件超过 5 分钟会被服务端断开）。本次只收敛**拉取**方向，推送方向原样保留。
+
+**运维开关**：`CLOUDRDP_AV_SKIP=1`（跳过 Defender 调整）、`CLOUDRDP_WATCHDOG_SKIP=1`（跳过看门狗）、
+`CLOUDRDP_AV_KEEP_REALTIME=1`（只加排除项、不关实时扫描）。
+
 ## 五、目录结构
 
 ```
@@ -768,7 +813,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（303 项）
+│   ├── selftest.py                     #   离线自测（335 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -794,6 +839,8 @@ cloud-rdp/
     ├── reinstall-apps.ps1              # 第 10 步：winget 后台逐包重装 + Edge/WorkBuddy 用户数据校验补漏
     ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
     ├── userprofile-lib.ps1             # 【新】用户配置文件预创建（显式 -LoadUserProfile + ProfileList 兜底；修「还原后用户数据全丢」）
+    ├── watchdog-lib.ps1                # 【新】保命共享库：GitHub 可达性探测 / 主机体征 / Defender 排除 / 有限超时 / 网络自愈 / 连接看门狗
+    ├── conn-watchdog.ps1               # 【新】连接看门狗子进程：每分钟探一次，连续不可达即分级自愈 + 打印判定
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
     ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
     ├── pool-coordinator.ps1            # 【新】hub 协调器：补机 + 轮换 + 发布权威角色
@@ -805,9 +852,9 @@ cloud-rdp/
 | # | 步骤 | 说明 |
 |---|------|------|
 | 0 | 拉仓库 | `actions/checkout` |
-| **0a** | 记录 job 起点 + 开 RDP + **关防火墙** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算） |
+| **0a** | 记录 job 起点 + 开 RDP + **关防火墙** + **加 Defender 排除项** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算）；顺手把 `watchdog-lib.ps1` 的 `Enable-RdpAvExclusions` 调了 —— 后面第 7/8 步要落地 ≈1.8 万个小文件，**必须**在重 IO 之前把实时扫描摘掉（见 §11） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
-| **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」 |
+| **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」。`tailscale up` 带 **`--accept-dns=false`**，避免 VPN 接管系统 DNS 把 runner 自己的长轮询也拽进隧道（见 §11） |
 | **0c2** | **解析账号池角色** | `pool_role` 留空=单机（等同历史行为）；`primary`=唯一写 139；`standby`=只读热备、主下线自升为主。角色写入 `_state\pool-role.txt` |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
 | **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机。诊断日志 `D:\cloudrdp-sys\_state\mail.log`，结果透出 `MAIL_RESULT` |

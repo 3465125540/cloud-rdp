@@ -177,6 +177,24 @@ jobs:
           # 关闭 Windows 防火墙（Domain/Private/Public）—— 镜像现在默认开启，会拦掉 SMB(445)/AList(5244) 等
           Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False -ErrorAction SilentlyContinue
           Write-Host ("[fw] 防火墙状态: " + ((Get-NetFirewallProfile | ForEach-Object { "$($_.Name)=$($_.Enabled)" }) -join ' '))
+
+          # ── Defender 排除项：防「runner 被 CPU 饿死 → 心跳丢失」 ─────────────────
+          # 官方原文（The hosted runner lost communication with the server）把 CPU/内存饿死列为首因。
+          # 后面 step 7/8 要落地 ≈1.8 万个小文件，Defender 实时扫描逐个过一遍，足以让 runner agent
+          # 发不出心跳、整机掉线（日志会在中途凭空截断、没有任何 ##[error]）。
+          # 这里在**任何重 IO 之前**把排除项加好 —— 只做排除、默认同时关实时扫描（一次性机器）。
+          # 想保留实时扫描：给仓库设变量/环境变量 CLOUDRDP_AV_KEEP_REALTIME=1。
+          # 失败不影响开机（下面所有业务脚本仍会跑）。
+          try {
+              $wdLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\watchdog-lib.ps1'
+              if (Test-Path -LiteralPath $wdLib) {
+                  . $wdLib
+                  $av = Enable-RdpAvExclusions -Tag '0a'
+                  Write-Host ("[0a] Defender 排除项: ok={0} added={1} 实时扫描={2} {3}" -f $av.ok, $av.added, $av.rtState, $av.note)
+              } else {
+                  Write-Host '[0a] 未找到 watchdog-lib.ps1 —— 跳过 Defender 排除项（不影响开机）'
+              }
+          } catch { Write-Host "[0a] Defender 排除项设置失败（可忽略）：$($_.Exception.Message)" }
       - name: 0b. 创建管理员账号 + 数据目录 + 桌面快捷方式
         shell: pwsh
         run: |
@@ -235,7 +253,12 @@ jobs:
 
           # up 是异步的（协商 authkey + 注册控制平面），但退出码能反映「命令是否被接受」。
           # 失败（authkey 无效/过期/网络不通）时立刻报错，别让后面拿不到 IP 时崩溃得莫名其妙。
-          & $ts up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server" 2>&1 | Out-Host
+          #
+          # --accept-dns=false 是**保命参数**：不加它时 Tailscale 会接管本机 DNS（写 100.100.100.100）。
+          # 一旦 tailnet 开了 MagicDNS / 全局 nameserver，runner agent 访问 api.github.com 的长轮询
+          # 也会被拽进隧道解析 —— 解析一慢/一抖，心跳就发不出去，job 直接掉线（日志凭空截断）。
+          # 用户连机器只认 100.x 裸 IP（见 README），根本不需要 MagicDNS，所以关掉零副作用。
+          & $ts up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server" --accept-dns=false 2>&1 | Out-Host
           if ($LASTEXITCODE -ne 0) {
               throw "tailscale up 失败（返回码 $LASTEXITCODE）—— 检查 TAILSCALE_AUTHKEY 是否有效/过期"
           }
