@@ -228,6 +228,10 @@ function Build-PoolState {
                 secret_name = [string]$rep.secret_name
                 token_state = [string]$rep.token_state
                 alive_count = [int]$rep.alive_count
+                # 「在跑」拆两档：真在跑（in_progress）/ 排队中（pending 等，机器还没起）。
+                # 供工作台如实展示；alive_count 口径不变（Get-PoolPlan 防抖仍用它）。
+                running_count = [int]$rep.running_count
+                queued_count  = [int]$rep.queued_count
                 total       = [int]$rep.total
                 last_run    = $rep.last_run
                 note        = [string]$rep.note

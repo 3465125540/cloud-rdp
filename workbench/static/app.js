@@ -2,8 +2,9 @@
 "use strict";
 
 var DATA = null;          // 最近一次 /api/overview 的结果
-var RUN_TAB = "keepalive"; // 运行日志当前 tab
-var RUNS_LIMIT = 0;        // 日志表格行数上限（0 = 不限；「缩略」时 = 5）
+var RUN_TAB = "keepalive"; // 运行日志当前 tab（workflow：keepalive | coordinator）
+var RUN_ACC = "all";       // 运行日志当前账号筛选（"all" = 全部账号分组视图；否则是账号 owner）
+var RUNS_LIMIT = 0;        // 日志表格行数上限（0 = 不限；「缩略」时 = 每账号 5）
 var TIMER = null;
 var BUSY = false;
 
@@ -93,6 +94,7 @@ function render() {
   renderMachines();
   updateFoldAllLabel();
   renderAccounts();
+  renderRunAccTabs();
   renderRuns();
   renderErrors();
 }
@@ -532,8 +534,24 @@ function renderAccounts() {
 
     // ---- 实时监测列：凭证状态 + 在跑机数 + 最近一次 run ----
     var mon = [tokenStateBadge(a.token_state)];
-    if (a.alive_count !== null && a.alive_count !== undefined) {
-      mon.push('<span class="mon-num">在跑 ' + esc(a.alive_count) + " 台</span>");
+    // 「在跑」必须分清「真在跑」和「排队中」——
+    // 老的 alive_count 口径是「**未结束**的 run 数」，把 pending / queued 也算进去；
+    // 但排队中的 run 还没分到 runner、机器根本没起来，Tailscale 上没有节点，
+    // 「机器运行实况」里自然看不到 → 两个面板会「打架」（瑀子 2026-09-24 反馈）。
+    // 后端现在把 in_progress（真在跑）与 queued（排队中）拆开给，这里如实分开展示。
+    if (a.running_count !== null && a.running_count !== undefined) {
+      var monRun = '<span class="mon-num" title="真在跑：GitHub run 状态 = in_progress（机器已起来，' +
+        '「机器运行实况」里能看到对应节点）">在跑 ' + esc(a.running_count) + " 台</span>";
+      if (a.queued_count) {
+        monRun += ' <span class="mon-queued" title="已派发但还在排队（pending / queued / waiting / requested）：' +
+          'GitHub 还没分配 runner，机器尚未启动，所以「机器运行实况」里看不到它 —— 等前一台跑完才会起。' +
+          '（本仓库 windows-rdp.yml 配了 concurrency，同仓库串行，第二次派发会排队）">排队 ' +
+          esc(a.queued_count) + " 台</span>";
+      }
+      mon.push(monRun);
+    } else if (a.alive_count !== null && a.alive_count !== undefined) {
+      mon.push('<span class="mon-num" title="未结束的 run 数（含排队中）—— 旧版协调器未区分「真在跑 / 排队中」">' +
+        "在跑 " + esc(a.alive_count) + " 台</span>");
     }
     if (a.last_run) {
       var lrj = bjTime(a.last_run.created_at) || a.last_run.created_beijing || "";
@@ -563,40 +581,191 @@ function renderAccounts() {
   }).join("");
 }
 
-function renderRuns() {
+// ------------------------------------------------------------ 日志：分账号
+// 每个账号 = 一个 fork，各跑各的 run。后端 get_runs(include_accounts=True) 把每个账号
+// 的 run 归到 runs.accounts[] 里（hub 账号复用主仓库那份，不重复请求）。
+// 旧后端没有 runs.accounts → 退回「只有主仓库一组」的老行为，页面不会空。
+function accountByOwner(owner) {
+  var list = (DATA.accounts || {}).accounts || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].owner === owner) return list[i];
+  }
+  return null;
+}
+
+// 当前该渲染哪些「账号组」（受 RUN_ACC 筛选）
+function runGroups() {
   var r = DATA.runs || {};
-  var all = r[RUN_TAB] || [];
-  var tb = $("#tbl-runs tbody");
-  $("#runs-empty").hidden = all.length > 0;
-  if (!r.ok && !all.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="empty">' + esc(r.error || "读取失败") + "</td></tr>";
+  var list = r.accounts;
+  if (!list || !list.length) {
+    return [{ id: "", owner: "", repo: "", hub: true, token_source: "hub",
+              ok: r.ok !== false, error: r.error || "", runs: r[RUN_TAB] || [], fallback: null }];
+  }
+  var groups = list.map(function (a) {
+    return { id: a.id || "", owner: a.owner || "", repo: a.repo || "", hub: !!a.hub,
+             token_source: a.token_source || "none", ok: a.ok !== false,
+             error: a.error || "", runs: a[RUN_TAB] || [], fallback: a.fallback_run || null };
+  });
+  if (RUN_ACC !== "all") {
+    groups = groups.filter(function (g) { return g.owner === RUN_ACC; });
+  }
+  return groups;
+}
+
+var TOKEN_SRC_LABEL = {
+  hub: "主仓库 Token",
+  local: "本机 Token",
+  anon: "匿名只读",
+  none: "无 Token"
+};
+
+// run 状态 → 中文（表头 tooltip 一直是中文口径，以前却渲染英文原值，对不上）
+var RUN_STATE_LABEL = {
+  in_progress: "进行中", queued: "排队", waiting: "排队", requested: "排队", pending: "排队",
+  success: "成功", failure: "失败", timed_out: "超时", startup_failure: "启动失败",
+  cancelled: "取消", skipped: "跳过", neutral: "无结论", action_required: "需处理", stale: "陈旧"
+};
+// 排队中的 run 机器还没起来 → 用琥珀色，和蓝色「进行中」区分开（同「在跑/排队」的口径）
+var RUN_QUEUED_STATES = ["queued", "waiting", "requested", "pending"];
+
+// 一条 run 行（8 列）
+function runRow(x) {
+  var status = x.status || "";
+  var kind = RUN_QUEUED_STATES.indexOf(status) >= 0 ? "warn"
+    : (status === "in_progress" ? "info"
+      : (x.conclusion === "success" ? "ok" : (x.conclusion === "cancelled" ? "warn" : "bad")));
+  var raw = status + (x.conclusion ? " / " + x.conclusion : "");
+  var st = '<span title="原始状态：' + esc(raw || "-") + '">' +
+    badge(RUN_STATE_LABEL[x.state] || x.state || "-", kind) + "</span>";
+  var ev = x.event === "schedule" ? badge("定时", "mute") : badge(x.event || "-", "info");
+  var num = (x.number === null || x.number === undefined || x.number === "") ? "—" : "#" + x.number;
+  return "<tr>" +
+    '<td class="mono">' + esc(num) + "</td>" +
+    "<td>" + st + "</td>" +
+    "<td>" + ev + "</td>" +
+    '<td class="nowrap"><span title="北京时间（UTC+8）；原始 UTC：' + esc(x.created_at) + '">' +
+      esc(bjTime(x.created_at) || x.created_beijing || "-") + "</span></td>" +
+    '<td class="mono nowrap">' + esc(x.duration) + "</td>" +
+    '<td class="mono">' + esc(x.head_sha) + "</td>" +
+    '<td class="dim">' + esc(x.title || "-") + "</td>" +
+    '<td class="right">' + (x.url
+      ? '<a href="' + esc(x.url) + '" target="_blank" rel="noopener">日志</a>'
+      : '<span class="none">—</span>') + "</td>" +
+    "</tr>";
+}
+
+// 组内提示行（无记录 / 读取失败）
+function runNoteRow(text) {
+  return '<tr class="run-note"><td colspan="8" class="muted">' + esc(text) + "</td></tr>";
+}
+
+// 分组表头（跨 8 列）：账号 · owner/repo + 角色 + 在跑/排队 + 数据源 + 条数
+function runGroupHead(g, n) {
+  var acc = accountByOwner(g.owner) || {};
+  var bits = ['<span class="rg-id">' + esc(g.id || "主仓库") + "</span>"];
+  if (g.owner) {
+    bits.push('<span class="mono dim">' + esc(g.owner + (g.repo ? "/" + g.repo : "")) + "</span>");
+  }
+  if (acc.role) bits.push(roleBadge(acc.role));
+  if (acc.running_count !== null && acc.running_count !== undefined) {
+    bits.push('<span class="mono" title="真在跑：GitHub run 状态 = in_progress">在跑 ' +
+      esc(acc.running_count) + " 台</span>");
+    if (acc.queued_count) {
+      bits.push('<span class="mon-queued" title="已派发但还在排队（机器尚未启动）">排队 ' +
+        esc(acc.queued_count) + " 台</span>");
+    }
+  }
+  var src = TOKEN_SRC_LABEL[g.token_source];
+  if (src) {
+    bits.push('<span class="src-tag" title="读取该账号 fork 的 run 所用凭证：' +
+      esc(g.token_source === "anon" ? "匿名（公开仓库可读，额度低）"
+        : (g.token_source === "none" ? "没有可用 Token，读不到" : "PAT")) + '">' +
+      esc(src) + "</span>");
+  }
+  bits.push('<span class="muted">' + esc(n) + " 条</span>");
+  return '<tr class="run-group"><td colspan="8">' + bits.join(" ") + "</td></tr>";
+}
+
+// 账号筛选按钮（按 pool-config 的账号动态生成；只有 1 组时整行隐藏）
+function renderRunAccTabs() {
+  var el = $("#run-acc-tabs");
+  var sub = $("#runs-sub");
+  if (!el) return;
+  var list = (DATA.runs || {}).accounts || [];
+  if (list.length <= 1) {
+    el.innerHTML = "";
+    if (sub) sub.hidden = true;
+    RUN_ACC = "all";
     return;
   }
-  // 「缩略」时只渲染最近 N 条，其余折叠成一行提示
-  var rows = all, hidden = 0;
-  if (RUNS_LIMIT > 0 && all.length > RUNS_LIMIT) {
-    rows = all.slice(0, RUNS_LIMIT);
-    hidden = all.length - RUNS_LIMIT;
-  }
-  var html = rows.map(function (x) {
-    var st = badge(x.state || "-", x.in_progress ? "info" : (x.conclusion === "success" ? "ok" : (x.conclusion === "cancelled" ? "warn" : "bad")));
-    var ev = x.event === "schedule" ? badge("定时", "mute") : badge(x.event || "-", "info");
-    return "<tr>" +
-      '<td class="mono">#' + esc(x.number) + "</td>" +
-      "<td>" + st + "</td>" +
-      "<td>" + ev + "</td>" +
-      '<td class="nowrap"><span title="北京时间（UTC+8）；原始 UTC：' + esc(x.created_at) + '">' + esc(bjTime(x.created_at) || x.created_beijing || "-") + "</span></td>" +
-      '<td class="mono nowrap">' + esc(x.duration) + "</td>" +
-      '<td class="mono">' + esc(x.head_sha) + "</td>" +
-      '<td class="dim">' + esc(x.title || "-") + "</td>" +
-      '<td class="right">' + (x.url ? '<a href="' + esc(x.url) + '" target="_blank" rel="noopener">日志</a>' : '<span class="muted">—</span>') + "</td>" +
-      "</tr>";
+  if (sub) sub.hidden = false;
+  // 选中的账号被删掉/停用了 → 回到「全部账号」
+  var owners = list.map(function (a) { return a.owner; });
+  if (RUN_ACC !== "all" && owners.indexOf(RUN_ACC) < 0) RUN_ACC = "all";
+
+  var html = '<button class="tab' + (RUN_ACC === "all" ? " active" : "") +
+    '" data-acc="all" data-tip="所有账号的运行记录（按账号分组）">全部账号</button>';
+  html += list.map(function (a) {
+    var nm = a.id || a.owner;
+    return '<button class="tab' + (RUN_ACC === a.owner ? " active" : "") +
+      '" data-acc="' + esc(a.owner) + '" data-tip="只看 ' +
+      esc(nm + " · " + a.owner + "/" + a.repo) + ' 的运行记录">' + esc(nm) + "</button>";
   }).join("");
-  if (hidden > 0) {
-    html += '<tr class="more-row"><td colspan="8" class="muted">已缩略：仅显示最近 ' +
-      RUNS_LIMIT + " 条，另有 " + hidden + " 条未显示 —— 点右上角「展开全部」查看</td></tr>";
+  el.innerHTML = html;
+}
+
+function renderRuns() {
+  var r = DATA.runs || {};
+  var groups = runGroups();
+  var tb = $("#tbl-runs tbody");
+  var hasAny = groups.some(function (g) { return (g.runs || []).length > 0 || !!g.fallback; });
+
+  if (!r.ok && !hasAny) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty">' + esc(r.error || "读取失败") + "</td></tr>";
+    $("#runs-empty").hidden = true;
+    return;
   }
+  $("#runs-empty").hidden = hasAny;
+
+  // 只有「全部账号」才画分组表头；单账号视图下省掉，表格更紧凑
+  var multi = groups.length > 1;
+  var html = "";
+  groups.forEach(function (g) {
+    var runs = g.runs || [];
+    // 「缩略」时**每个账号各留最近 N 条**（不是总共 N 条）—— 否则账号一多就只剩头几个账号
+    var shown = runs, hidden = 0;
+    if (RUNS_LIMIT > 0 && runs.length > RUNS_LIMIT) {
+      shown = runs.slice(0, RUNS_LIMIT);
+      hidden = runs.length - RUNS_LIMIT;
+    }
+    if (multi) html += runGroupHead(g, runs.length);
+    if (!g.ok && !shown.length) {
+      html += runNoteRow((g.error || "读取失败") +
+        (g.fallback ? "　·　下面是池状态记录的最近一次运行：" : ""));
+      if (g.fallback) html += runRow(g.fallback);
+    } else if (!shown.length) {
+      html += runNoteRow("暂无运行记录");
+    } else {
+      html += shown.map(runRow).join("");
+    }
+    if (hidden > 0) {
+      html += '<tr class="more-row"><td colspan="8" class="muted">本账号已缩略：另有 ' +
+        esc(hidden) + " 条未显示 —— 点右上角「展开全部」查看</td></tr>";
+    }
+  });
   tb.innerHTML = html;
+
+  var meta = $("#runs-meta");
+  if (meta) {
+    var cnt = 0;
+    groups.forEach(function (g) { cnt += (g.runs || []).length; });
+    if (RUN_ACC === "all") {
+      meta.textContent = groups.length + " 个账号 · 共 " + cnt + " 条记录";
+    } else {
+      var g0 = groups[0];
+      meta.textContent = g0 ? ((g0.id || g0.owner) + " · 共 " + cnt + " 条记录") : "";
+    }
+  }
 }
 
 function renderErrors() {
@@ -838,6 +1007,18 @@ function bind() {
     });
     renderRuns();
   });
+
+  // 账号筛选（全部账号 / 单个账号）
+  var accTabs = $("#run-acc-tabs");
+  if (accTabs) {
+    accTabs.addEventListener("click", function (e) {
+      var b = e.target.closest(".tab");
+      if (!b) return;
+      RUN_ACC = b.dataset.acc || "all";
+      renderRunAccTabs();
+      renderRuns();
+    });
+  }
 
   // 新增账号
   $("#btn-add-account").addEventListener("click", function () {

@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | **GitHub 账号管理** | `scripts/pool-config.json` + 仓库 Actions Secrets 列表 + `pool-state` 分支 | 看每个账号的 Secret 是否就位、当前是主还是备、有没有在跑机；**一键启用/停用**账号（直接改 pool-config.json）；**＋ 新增**可贴该账号 PAT **一键自动部署**（建 fork → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器），进度实时展示。顶部「监测数据」时间按**实时北京时间**（UTC+8，形如 `2026/9/22-20:16`）展示 |
 | **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` / `job-start.txt` / `pool-info.txt` / `backup-request.txt` + runner 工作区 `D:\a\<repo>\<repo>\.git\config` + `_snapshot\manifest.json` + 账号池状态（`pool-state`） | 看哪些机器在线、Tailscale IP、**归属账号**、角色（主/备/单机）、**已运行时长**、快照新鲜度 + **快照绝对时间**、最后在线时间；**一键登录** / **查看信息**（弹窗显示 Tailscale IP / 用户名 / 密码，可一键复制）；快照栏还有 **☁ 一键备份**（增量同步数据到 139 + 快速快照推送）。**池内机器**行：账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（机器掉线也不会从面板消失）；徽标按 Actions job 状态出「运行中 / 已派发 / 已结束」；**IP 从该机器自己的 job 日志里挖**（`[0c] Tailscale IP:`），配**一键登录 / 查看信息**（`3389` 现探不通时按钮转黄说明原因）；**「状态详情」可折叠**（单行点箭头 / 表头「折叠详情」一键，状态记在本地） |
-| **定时计划运行日志** | GitHub Actions API（`windows-rdp.yml` / `pool-coordinator.yml`） | 两个 workflow 的最近 25 次运行：状态、触发方式（定时/手动）、开始时间（**实时北京时间**，UTC+8，形如 `2026/9/22-20:16`）、用时、SHA，点「日志」跳 GitHub；右上角**「缩略」只显示最近 5 条**，再点「展开全部」看全量 |
+| **定时计划运行日志** | GitHub Actions API（`windows-rdp.yml` / `pool-coordinator.yml`，**按账号**：hub 用本机 token、其余用 `.tools/pool/<owner>.token` 或匿名） | 两个 workflow 的最近 25 次运行：状态（**中文徽章**，排队中为琥珀色）、触发方式（定时/手动）、开始时间（**实时北京时间**，UTC+8，形如 `2026/9/22-20:16`）、用时、SHA，点「日志」跳 GitHub；**分账号展示**（v1.5.7）：表格上方一行账号筛选（`全部账号` 时按账号分组、每组带 `角色 / 在跑·排队 / 数据源 / 条数` 表头；也可只看某个账号）；右上角**「缩略」= 每个账号各留最近 5 条**，再点「展开全部」看全量 |
 | **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`（Windows）；Linux 上唤起 `xfreerdp`/`remmina` | 点一下直接连上在线机器，免手输密码 |
 
 > 界面上几乎所有**子词条 / 表头 / 徽章**鼠标停留都会浮出说明（`data-tip`），例如操作台的「迁移139」「重装软件」。
@@ -307,6 +307,39 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 > 直接量 `getBoundingClientRect()` 与 `scrollWidth - clientWidth`，扫过 1280 / 1440 / 1560 / 1680 / 1720 / 1760 / 1920
 > 一档档确认「卡片无横向溢出 + 无单元格溢出」。改这张表的列宽/内边距前，建议照这个法子复量一遍。
 
+### 「定时计划运行日志」分账号展示（v1.5.7）
+
+每个账号 = **一个 fork**，各跑各的 run。可这张表原来只查 `config.repo`（**hub 主仓库**）一个地方 ——
+所以 acc-1 / acc-4 的定时运行记录在面板上**根本看不到**（它们跑在自己 fork 里）。
+
+现在表格上方多了一行**账号筛选**（`#run-acc-tabs`：`全部账号 / acc-1 / acc-3 / acc-4`）：
+
+- **全部账号**（默认）：按账号**分组**渲染，每组一行表头 `账号 · owner/repo · 角色 · 在跑/排队 · 数据源 · 条数`，组内是该账号的 run 行。
+- **单个账号**：只看这一个账号的 run（省掉分组表头，表格更紧凑）。
+- **缩略**：从「总共留 5 条」改成「**每个账号各留 5 条**」—— 否则账号一多，缩略后只剩前两个账号。
+
+**数据从哪来**（`server.py`）：
+
+| 账号 | 取 run 用的凭证 | `token_source` |
+| --- | --- | --- |
+| hub 账号（owner == `config.repo` 的 owner） | 本机 hub token；**直接复用**已拉到的 hub 结果，不重复请求 | `hub` |
+| 其余账号 | 本机 `.tools/pool/<owner>.token`（一键部署时写下的那个 PAT） | `local` |
+| 没有 token | **匿名**（公开仓库的 Actions run 匿名也能读；私有仓库读不到） | `anon` / `none` |
+
+- **匿名额度只有 60 次/小时**（认证是 5000），而面板默认 30 秒自动刷新 —— 所以**匿名结果单独缓存 300 秒**
+  （`account_runs()` 里 `ttl = cache_seconds if token else 300`），免得把额度刷爆。
+- 读不到的账号**如实标红**（`ok=False` + `error`），并把它在 `pool-state` 里的「最近一次 run」作为
+  `fallback_run` 降级展示 —— 至少有一条可看，且说明数据来自协调器。
+- `get_runs(include_accounts=...)` **默认 False**：`hub_live_probe()` 每次巡检也会调它，
+  别让它顺带把每个账号的 API 都打一圈。只有 `/api/overview` 与 `/api/runs?accounts=1` 才要 `True`。
+- 顺带修了个坑：`gh_api_as(token=None, ...)` 以前会拼出 `Authorization: Bearer `（半截头）→ GitHub 回 401；
+  现在 token 为空就**不发**该头（即匿名）。
+- 状态徽章**中文化**（`RUN_STATE_LABEL`）：以前直接渲染 `in_progress` / `pending` 原值，跟表头的中文口径对不上；
+  排队中的状态（`queued/waiting/requested/pending`）用**琥珀色**，与蓝色「进行中」区分开（延续 v1.5.6「排队 ≠ 在跑」的口径）。
+
+> 实测（2026-09-24）：`全部账号 / 保活` 下 3 组 —— `acc-1`（匿名只读，8 条）、`acc-3`（主仓库 Token，25 条）、
+> `acc-4`（本机 Token，0 条 → 组内提示「暂无运行记录」）；`协调器` tab 共 47 条。表格无横向溢出。
+
 ---
 
 ## 6. 新增账号「一键自动部署」
@@ -348,12 +381,12 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 | --- | --- | --- |
 | GET | `/api/health` | 服务与各链路健康状态 |
 | GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存。`stats` 含 `machines_data_bad` / `machines_snapshot_bad`（**未从 139 成功拉取数据的机器数**，acc-1 事故后新增，概览页「恢复异常」卡片直接读它）。`pool_machines` = 账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（前端「池内机器」行）；每行带 `machine_state`（`running`/`dispatched`/`ended`/`unknown`，由 `pool_run_state()` 从 run status 映射，前端据此出徽标），以及 `ip` / `ip_source` / `reachable`（IP 从该机器自己的 Actions job 日志里挖，可达性现探 `3389`，60 秒缓存） |
-| GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / 在跑机数 / 最近 run） |
+| GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / **在跑 `running_count` + 排队 `queued_count`** / 最近 run）。`running_count` = run 状态 `in_progress`（机器已起来）；`queued_count` = 已派发但还在 `pending`/`queued` 排队（机器还没起，故实况里看不到）；两者为 `null` 时表示协调器状态还没这两个字段，前端退回旧口径 |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
 | POST | `/api/accounts/add` | `{owner, repo, pat, token_secret?, id?, enabled?, auto_deploy?}` 新增账号（校验后原子写回 pool-config.json，**不写 PAT 明文**）。**必填只有 `pat`**；`token_secret` 留空则自动分配 `POOL_TOKEN_N`（响应里 `secret_auto=true` + `token_secret` 回传）。带 `pat` + `auto_deploy=true`（默认）时顺带**自动部署**并返回 `job_id` |
 | GET | `/api/accounts/provision?id=<job_id>` | 查询自动部署任务进度（`job.steps[]` 逐步 ✓/✕，`job.status` = running/done/failed） |
 | GET | `/api/machines` | 机器实况（含 `dns_name`（Tailscale 唯一短名，区分同名节点）、`uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），`restore`（**数据/快照恢复状态**：`{data:{status,reason,at_utc}, snapshot:{...}, source}`），以及 `backup_request`（一键备份是否在排队））。与 `/api/overview` 走同一个 `collect_machines()`，形状一致 |
-| GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N` | Actions 运行记录（`created_beijing` / `updated_beijing` 为北京时区绝对时间，形如 `2026/9/22-20:16`） |
+| GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N&accounts=1` | Actions 运行记录（`created_beijing` / `updated_beijing` 为北京时区绝对时间，形如 `2026/9/22-20:16`）。`accounts=1` 时额外带 `accounts[]`：每个账号 fork 的 run + `token_source`（`hub`/`local`/`anon`/`none`）+ `ok`/`error`（读不到时 `fallback_run` 兜底） |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
 | POST | `/api/dispatch` | `{target:"coordinator"\|"keepalive", inputs:{...}}` 触发 workflow |
 | POST | `/api/backup` | `{ip}` **一键备份**：经 SMB 把请求文件写到机器，保活循环取走后执行「增量同步到 139（`rclone copy --update`，不重复上传）+ 快速快照推送」 |
@@ -420,6 +453,28 @@ A：**可以填，且现在正是靠它做「一键自动部署」—— 新增�
 
 **Q：实时监测的「在跑机数 / 最近 run」从哪来？**
 A：两条来源合并：① 协调器每 10 分钟巡检，把**每个账号**的明细（凭证状态 / 在跑机数 / 最近 run）发布到 `pool-state` 分支 —— 覆盖全部账号；② hub 账号本机有 token 时，工作台额外轮询 `/actions/runs` 做**实时**探测（更新鲜）。卡片底部会标数据新鲜度（如「2 分钟前 · 协调器」或「实时」）。刚新增的账号在下一次协调器巡检前，明细可能为空属正常。
+
+**Q：账号卡写「在跑 2 台」，但「机器运行实况」只显示 1 台？**
+A：这是**两个不同的口径**，v1.5.6 起面板把它们拆开如实展示：
+
+- **「在跑 X 台」** = GitHub run 状态是 `in_progress` 的机器（**机器已起来**，实况里能看到对应节点）；
+- **「排队 Y 台」** = 已派发、但还在 `pending` / `queued` 排队的 run —— GitHub **还没分配 runner**，机器**根本没启动**，Tailscale 上不会有节点，所以「机器运行实况」里看不到它。
+
+**为什么会有排队的 run？** 本仓库 `windows-rdp.yml` 配了 `concurrency: { group: cloud-rdp, cancel-in-progress: false }` —— **同一仓库同一 workflow 串行**。协调器按「目标机数」派第二台时，它会排在正在跑的那台后面，**一直 `pending` 直到前一台结束**（这也是一种「热备」：前一台一挂，它立刻顶上）。
+
+**口径陷阱**：`alive_count`（协调器与工作台旧口径）数的是「**未结束**的 run 数」，把排队中的也算进去了 —— 所以老版本面板会写「在跑 2 台」而实况只有 1 台，两个面板「打架」。v1.5.6 把 `running_count`（真在跑）/ `queued_count`（排队中）拆开（协调器 `pool-lib.ps1` + `pool-coordinator.ps1` 发布，`server.py` 的 `hub_live_probe` 按真 `status` 再拆一次）；协调器状态里没有这两个字段时（旧状态 / 未升级的协调器），前端退回「在跑 N 台」并附说明 tooltip。
+
+> 顺带一提：`_shape_run()` 里那个叫 `in_progress` 的字段**名字骗人** —— 它的真实口径是「**未结束**」（含 `pending` / `queued` / `waiting` / `requested`），不是 GitHub 的 `status == "in_progress"`。要判「真在跑」必须直接看 `status`。
+
+**Q：「定时计划运行日志」里某个账号的日志读不到 / 标着「匿名只读」？**
+A：v1.5.7 起这张表**分账号**展示（每个账号是一个 fork，各跑各的 run）。读某个账号的 run 要凭证：
+
+- 标 **`主仓库 Token`** —— hub 账号，直接用工作台自己的 token；
+- 标 **`本机 Token`** —— 用 `.tools/pool/<owner>.token`（新增账号时勾了「自动部署」就会自动写下）；
+- 标 **`匿名只读`** —— 该账号在本机**没有** token，只能匿名读**公开仓库**的 run（额度 60 次/小时，所以缓存 5 分钟）；
+- 标 **`无 Token`** 且组内是红字 —— **私有仓库 + 无 token**，读不到；这时会把 `pool-state` 里该账号的**最近一次 run** 作为降级展示（标着「池状态记录的最近一次运行」）。
+
+想让某账号显示完整日志：给它在 GitHub 上建好 PAT，然后走「＋ 新增」的自动部署（或手动把 PAT 放到 `.tools/pool/<owner>.token`）。**不要**为了看日志去把私有仓库改成公开。
 
 **Q：派发按钮点了没反应？**
 A：workflow_dispatch 触发后 GitHub 通常要 10~60 秒才创建 run。界面会在 12 秒后自动刷新一次，也可以手动点「刷新」。

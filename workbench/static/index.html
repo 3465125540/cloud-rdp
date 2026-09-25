@@ -190,6 +190,13 @@
                   title="缩略为最近 5 条 / 展开全部">缩略 &#9652;</button>
         </div>
       </div>
+      <!-- 分账号筛选：按钮由 JS 按 pool-config 里的账号动态生成（旧后端没有 runs.accounts → 整行隐藏）。
+           每个账号 = 一个 fork，各跑各的 run；这里切「全部账号」看分组视图，切具体账号只看它。 -->
+      <div class="card-sub runs-sub" id="runs-sub">
+        <span class="runs-sub-k">账号</span>
+        <div class="tabs" id="run-acc-tabs"></div>
+        <span id="runs-meta"></span>
+      </div>
       <div class="card-body">
         <table class="tbl" id="tbl-runs">
           <thead>

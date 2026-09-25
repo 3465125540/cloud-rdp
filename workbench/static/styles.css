@@ -280,6 +280,8 @@ html, body {
 
 .mon-cell { display: flex; flex-wrap: wrap; gap: 5px 7px; align-items: center; }
 .mon-num { font-size: 11.5px; color: var(--fg); }
+/* 「排队中」用琥珀色，和「真在跑」的常规色区分开（排队 ≠ 在跑，别混为一谈） */
+.mon-queued { font-size: 11.5px; color: var(--warn); }
 .mon-run { display: inline-flex; align-items: center; gap: 5px; }
 .mon-note { flex-basis: 100%; font-size: 10.5px; line-height: 1.4; }
 .src-tag {
@@ -337,6 +339,30 @@ html, body {
 
 /* ---------------- 日志「缩略」提示行 ---------------- */
 .more-row td { text-align: center; padding: 8px 10px; font-style: italic; }
+
+/* ---------------- 日志：分账号视图 ---------------- */
+/* 账号筛选行（卡片标题下、表格上），与「机器运行实况」的 .card-sub 同一节奏 */
+.runs-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 10px; }
+/* ⚠️ 作者样式的 display:flex 会盖过 UA 的 [hidden]{display:none} —— 必须显式兜一句，
+   否则只有 1 个账号组（或旧后端没有 runs.accounts）时这行仍然空着显示。 */
+.runs-sub[hidden] { display: none; }
+.runs-sub .tabs { padding: 2px; }
+.runs-sub .tab { padding: 4px 10px; font-size: 11.5px; }
+.runs-sub-k { font-size: 11.5px; color: var(--fg-dim); }
+#runs-meta { margin-left: auto; font-size: 11.5px; color: var(--fg-mute); }
+
+/* 分组表头：一个账号一行、跨满 8 列；比数据行略深，扫一眼就能分清是哪个账号的日志 */
+.tbl tr.run-group td {
+  background: rgba(76,141,255,.075);
+  border-bottom: 1px solid var(--line);
+  padding: 7px 10px;
+}
+.run-group .rg-id { font-weight: 600; color: var(--fg); }
+.run-group td > span { margin-right: 9px; }
+.run-group td > span:last-child { margin-right: 0; }
+
+/* 组内提示行（无记录 / 读取失败 / 降级说明） */
+.tbl tr.run-note td { padding: 8px 10px; font-style: italic; }
 
 /* ---------------- 连接信息弹窗 ---------------- */
 .modal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; }

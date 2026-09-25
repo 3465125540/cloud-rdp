@@ -70,6 +70,12 @@ foreach ($acc in $accounts) {
         secret_name = [string]$acc.token_secret
         token_state = 'ok'        # ok | missing | query_failed | disabled
         alive_count = 0
+        # 「在跑」拆两档：真在跑（in_progress）/ 排队中（pending/queued/…，机器还没起）。
+        # alive_count 仍 = 未结束的 run 总数（Get-PoolPlan 用它做防抖，别改口径），
+        # running/queued 只供工作台如实展示 —— 否则面板「在跑 2 台」会和
+        # 「机器运行实况」只显示 1 台打架（排队中的机器 tailnet 上看不到）。
+        running_count = 0
+        queued_count  = 0
         total       = 0
         last_run    = $null
         note        = ''
@@ -97,9 +103,12 @@ foreach ($acc in $accounts) {
         continue
     }
     $rep.alive_count = @($r.runs).Count
+    # 真在跑 = GitHub run 状态严格是 in_progress；其余未结束的（pending/queued/…）算排队中。
+    $rep.running_count = @($r.runs | Where-Object { $_.status -eq 'in_progress' }).Count
+    $rep.queued_count  = $rep.alive_count - $rep.running_count
     $rep.total       = [int]$r.total
     $rep.last_run    = $r.last_run
-    Say "账号 $($acc.id) ($($acc.owner))：在跑 $($r.runs.Count) 台（历史 $($r.total) 条）"
+    Say "账号 $($acc.id) ($($acc.owner))：在跑 $($rep.running_count) 台 / 排队 $($rep.queued_count) 台（未结束 $($r.runs.Count)，历史 $($r.total) 条）"
     $alive += $r.runs
     $reports += $rep
 }

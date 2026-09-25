@@ -42,11 +42,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.5"
+VERSION = "1.5.7"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1397,7 +1397,16 @@ def hub_live_probe(owner, repo_name):
     if not runs.get("ok"):
         return None
     rows = runs.get("keepalive") or []
-    return {"alive_count": len([r for r in rows if r.get("in_progress")]),
+    # ⚠️ 字段名骗人：`_shape_run` 里的 "in_progress" 真实口径是「**未结束**」
+    #    （含 pending / queued / waiting / requested），并不是 GitHub 的 status=="in_progress"。
+    #    于是「在跑 N 台」会把「已派发但还在排队、机器根本没起来」的 run 也算进去 ——
+    #    而排队中的 run 在 Tailscale 上没有节点，「机器运行实况」里自然看不到 → 两个面板打架。
+    #    这里按真 status 再拆一次：真在跑（in_progress）vs 排队中（其余未结束）。
+    alive = [r for r in rows if r.get("in_progress")]
+    running = [r for r in rows if (r.get("status") or "") == "in_progress"]
+    return {"alive_count": len(alive),
+            "running_count": len(running),
+            "queued_count": len(alive) - len(running),
             "last_run": (rows[0] if rows else None)}
 
 
@@ -1439,6 +1448,10 @@ def get_accounts():
 
         source = "pool-state" if rep else "none"
         alive_count = rep.get("alive_count")
+        # 「在跑」拆两档：真在跑（in_progress）/ 排队中（pending 等，机器还没起）。
+        # 协调器新版状态里有这两个字段；旧版没有 → None → 前端退回旧的「在跑 N 台」标签。
+        running_count = rep.get("running_count")
+        queued_count = rep.get("queued_count")
         last_run = shape_last_run(rep.get("last_run"))
 
         # hub 账号：实时探测（复用缓存，几乎零成本）
@@ -1446,6 +1459,8 @@ def get_accounts():
             live = hub_live_probe(owner, repo_name)
             if live:
                 alive_count = live["alive_count"]
+                running_count = live.get("running_count")
+                queued_count = live.get("queued_count")
                 last_run = shape_last_run(live["last_run"])
                 source = "live"
 
@@ -1489,6 +1504,8 @@ def get_accounts():
             # ---- 实时状态监测 ----
             "token_state": str(rep.get("token_state") or ""),
             "alive_count": alive_count,
+            "running_count": running_count,
+            "queued_count": queued_count,
             "last_run": last_run,
             "report_note": str(rep.get("note") or ""),
             "source": source,
@@ -1547,17 +1564,149 @@ def _shape_run(r):
     }
 
 
-def get_runs(limit=None, workflow_key=None):
-    """拉两个 workflow 的最近 run。workflow_key 为 None 表示两个都要。"""
+# ------------------------------------------------------------ 分账号 run 日志
+# 「定时计划运行日志」原来只看主仓库（hub）—— 但每个账号是一个 fork，各跑各的。
+# 分账号展示要的就是「每个账号自己 fork 上的 run」。token 从哪来：
+#   * hub 账号（owner == 配置仓库的 owner）→ 本机 hub token（本来就有）
+#   * 其余账号 → 本机 .tools/pool/<owner>.token（自动部署时写下的那个 PAT）
+#   * 都没有 → 匿名（公开仓库的 Actions run 匿名可读；私有仓库读不到，如实报错）
+def account_token(owner):
+    """某账号可用的 PAT 及来源，返回 (token, source)，source ∈ hub | local | none。"""
+    hub = str(CONFIG.get("repo") or "")
+    if "/" in hub and str(owner) == hub.split("/", 1)[0]:
+        tk = resolve_token()
+        if tk:
+            return tk, "hub"
+    tk = load_account_token(owner)
+    if tk:
+        return tk, "local"
+    return None, "none"
+
+
+def account_runs(owner, repo_name, workflow_key, n, token):
+    """某账号 fork 的最近 run（按 workflow 取）。
+
+    匿名额度只有 60 次/小时（认证是 5000），而面板默认 30 秒自动刷新 ——
+    匿名结果单独缓存久一点（300 秒 = 每小时 12 次），别把额度刷爆。
+    """
+    key = "accruns:%s:%s:%s" % (owner, workflow_key or "all", n)
+    ttl = CONFIG["cache_seconds"] if token else 300
+
+    def probe():
+        out = {"ok": True, "error": "", "keepalive": [], "coordinator": []}
+        for k in ((workflow_key,) if workflow_key else ("keepalive", "coordinator")):
+            wf = (CONFIG.get("workflows") or {}).get(k)
+            if not wf:
+                continue
+            try:
+                d = gh_api_as(token, "/repos/%s/%s/actions/workflows/%s/runs" % (owner, repo_name, wf),
+                              params={"per_page": min(n, 100)})
+                out[k] = [_shape_run(r) for r in (d.get("workflow_runs") or [])]
+            except Exception as e:
+                out["error"] = "%s: %s" % (k, e)
+                out["ok"] = False
+        return out
+    return cached(key, ttl, probe)
+
+
+def _account_run_groups(repo, workflow_key, n, hub_out):
+    """按账号收集各自 fork 的 run。
+
+    hub 账号直接**复用**已拉到的 hub 结果（同一个仓库，不重复请求）；
+    其余账号**并行**拉（顺序拉 = 账号数 × 超时，面板又是 30 秒自刷一次，会被拖死）。
+    读不到的账号（无 token 且非公开仓库）如实标 ok=False，并补上池状态里的
+    「最近一次 run」作为降级展示 —— 至少有一条可看，且说明数据来自协调器。
+    """
+    h_owner, _, h_repo = str(repo).partition("/")
+    pc = load_pool_config()
+    cfg = pc.get("config") or {}
+
+    entries = []          # 保持 pool-config 里的账号顺序
+    jobs = []             # (下标, owner, repo, token)：待并行拉取的账号
+    for a in (cfg.get("accounts") or []):
+        owner = str(a.get("owner") or "")
+        repo_name = str(a.get("repo") or "")
+        if not owner or not repo_name or owner.startswith("REPLACE_"):
+            continue          # 占位账号（还没填 owner）不进日志视图
+        if a.get("enabled") is False:
+            continue          # 停用的账号不拉
+        is_hub = bool(h_owner) and owner == h_owner and repo_name == h_repo
+        if is_hub:
+            entries.append({"id": a.get("id") or "", "owner": owner, "repo": repo_name,
+                            "hub": True, "token_source": "hub",
+                            "ok": bool(hub_out.get("ok", True)), "error": "",
+                            "keepalive": hub_out.get("keepalive") or [],
+                            "coordinator": hub_out.get("coordinator") or []})
+        else:
+            tk, src = account_token(owner)
+            entries.append({"id": a.get("id") or "", "owner": owner, "repo": repo_name,
+                            "hub": False, "token_source": src, "ok": True, "error": "",
+                            "keepalive": [], "coordinator": []})
+            jobs.append((len(entries) - 1, owner, repo_name, tk))
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as ex:
+            futs = {}
+            for idx, owner, repo_name, tk in jobs:
+                futs[ex.submit(account_runs, owner, repo_name, workflow_key, n, tk)] = idx
+            for fut in as_completed(futs):
+                idx = futs[fut]
+                try:
+                    runs = fut.result()
+                except Exception as e:
+                    runs = {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                            "keepalive": [], "coordinator": []}
+                e0 = entries[idx]
+                e0["ok"] = bool(runs.get("ok"))
+                e0["error"] = runs.get("error") or ""
+                e0["keepalive"] = runs.get("keepalive") or []
+                e0["coordinator"] = runs.get("coordinator") or []
+                if e0["token_source"] == "none":
+                    e0["token_source"] = "anon" if e0["ok"] else "none"
+
+    # 只有**真读不到**的账号才需要池状态兜底 —— 别每次都去拉 pool-state：
+    # 这个函数每 20 秒（runs 缓存 TTL）就被调一次，而 build_overview 自己也在拉 pool-state，
+    # 无条件拉 = 白白多打一份（raw 走不通时还得多等一次超时）。
+    broken = [e0 for e0 in entries if not e0["ok"] and not e0["hub"]]
+    if broken:
+        try:
+            pool_reports = pool_account_reports((get_pool_state() or {}).get("state") or {})
+        except Exception:
+            pool_reports = {}
+        for e0 in broken:
+            lr = shape_last_run((pool_reports.get(e0["owner"]) or {}).get("last_run"))
+            if lr:
+                # 池状态只留了「最近一次」，字段比 _shape_run 少 → 补齐，前端才能按同一套渲染
+                e0["fallback_run"] = dict(
+                    lr, number=None, duration="—", head_sha="",
+                    title="（池状态记录的最近一次运行）",
+                    in_progress=(lr.get("status") or "") in
+                                ("in_progress", "queued", "waiting", "requested", "pending"))
+
+    # hub 没配进账号池（或池里没它）时，补一个「主仓库」组，日志视图才不会漏掉 hub 自己
+    if not any(x.get("hub") for x in entries) and h_owner and h_repo:
+        entries.insert(0, {"id": "", "owner": h_owner, "repo": h_repo, "hub": True,
+                           "token_source": "hub", "ok": bool(hub_out.get("ok", True)),
+                           "error": "", "keepalive": hub_out.get("keepalive") or [],
+                           "coordinator": hub_out.get("coordinator") or []})
+    return entries
+
+
+def get_runs(limit=None, workflow_key=None, include_accounts=False):
+    """拉两个 workflow 的最近 run。workflow_key 为 None 表示两个都要。
+
+    include_accounts=True 时额外按账号拉各自 fork 的 run（「分账号」日志视图用）。
+    默认 False：hub_live_probe 每次巡检也会调这里，别让它顺带打一圈各账号的 API。
+    """
     # 注意：n 必须单独命名 —— 若在 probe() 里写 limit = ...，
     # 会让 limit 变成 probe 的局部变量，右侧读它即 UnboundLocalError。
     n = int(limit or CONFIG.get("run_limit") or 25)
 
     def probe():
         if OFFLINE:
-            return {"ok": False, "error": "离线模式", "keepalive": [], "coordinator": []}
+            return {"ok": False, "error": "离线模式", "keepalive": [], "coordinator": [], "accounts": []}
         repo = CONFIG.get("repo") or ""
-        out = {"ok": True, "error": "", "keepalive": [], "coordinator": []}
+        out = {"ok": True, "error": "", "keepalive": [], "coordinator": [], "accounts": []}
         targets = (workflow_key,) if workflow_key else ("keepalive", "coordinator")
         for key in targets:
             wf = (CONFIG.get("workflows") or {}).get(key)
@@ -1570,8 +1719,10 @@ def get_runs(limit=None, workflow_key=None):
             except Exception as e:
                 out["error"] = "%s: %s" % (key, e)
                 out["ok"] = False
+        if include_accounts:
+            out["accounts"] = _account_run_groups(repo, workflow_key, n, out)
         return out
-    return cached("runs:%s:%s" % (workflow_key or "all", n),
+    return cached("runs:%s:%s:%s" % (workflow_key or "all", n, int(bool(include_accounts))),
                   CONFIG["cache_seconds"], probe)
 
 
@@ -1968,7 +2119,8 @@ def build_overview():
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         f_ts = ex.submit(tailscale_status)
-        f_runs = ex.submit(get_runs)
+        # include_accounts=True：日志面板要「分账号」展示，一次把各账号 fork 的 run 也拉齐
+        f_runs = ex.submit(get_runs, include_accounts=True)
         f_acc = ex.submit(get_accounts)
         f_state = ex.submit(get_pool_state)
 
@@ -2303,15 +2455,20 @@ def load_account_token(owner):
 
 
 def gh_api_as(token, path, method="GET", body=None, params=None, timeout=None):
-    """用「指定 token」（而非本机 hub token）调 GitHub API。"""
+    """用「指定 token」（而非本机 hub token）调 GitHub API。
+
+    token 为空 → **不带** Authorization 头（匿名）。公开仓库的 Actions run 匿名也能读；
+    以前这里会拼出 `Bearer ` 这种半截头，GitHub 直接回 401，白跑一趟。
+    """
     if OFFLINE:
         return {}
     url = "https://api.github.com" + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
     headers = {"Accept": "application/vnd.github+json",
-               "X-GitHub-Api-Version": "2022-11-28",
-               "Authorization": "Bearer " + str(token)}
+               "X-GitHub-Api-Version": "2022-11-28"}
+    if token:
+        headers["Authorization"] = "Bearer " + str(token)
     return http_json(url, method=method, headers=headers, body=body, timeout=timeout)
 
 
@@ -2827,7 +2984,10 @@ def api_runs(h, params):
     if key in ("", "all"):
         key = None
     limit = (params.get("limit") or [None])[0]
-    h._json(200, get_runs(limit=int(limit) if limit else None, workflow_key=key))
+    # accounts=1 → 额外带上各账号 fork 的 run（「分账号」视图）
+    inc = (params.get("accounts") or ["0"])[0] in ("1", "true", "yes")
+    h._json(200, get_runs(limit=int(limit) if limit else None, workflow_key=key,
+                          include_accounts=inc))
 
 
 def api_pool_state(h, params):
