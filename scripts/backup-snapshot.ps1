@@ -165,24 +165,51 @@ function Invoke-Robocopy {
     return $code
 }
 
+# 枚举目录下全部文件，但**跳过一切 reparse point（接合点 / 符号链接；目录和文件都算）**。
+# 为什么需要（真机踩过，与 robocopy /XJ 口径对齐）：
+#   robocopy 的 /XJ 官方定义 = 「排除(文件和目录的)符号链接和接合点」（robocopy /? 原文），
+#   即**文件级**符号链接也不抓；而 Get-ChildItem -Recurse -File 会把文件符号链接当普通文件数进去。
+#   于是 [完整抓取] 目录每次都报「文件数不足 差 N」—— .workbuddy-ai 固定差 24，
+#   正是那 24 个文件符号链接（实测：目录接合点 Get-ChildItem 本就不展开，只有文件符号链接会多算）。
+#   源/暂存两边都改用本函数后，口径与 /XJ 完全一致，误报归零。
+function Get-FilesNoReparse {
+    param([string]$Path)
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $Path)) { return $out }
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($Path)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        $items = @()
+        try { $items = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop) } catch { $items = @() }
+        foreach ($it in $items) {
+            # reparse point：目录不展开、文件不计数 —— 与 robocopy /XJ 完全一致
+            if ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if ($it.PSIsContainer) { $stack.Push($it.FullName) } else { [void]$out.Add($it) }
+        }
+    }
+    return $out
+}
+
 function Get-TreeSize {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return @{ Files = 0; Bytes = 0 } }
-    $items = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)
+    $items = @(Get-FilesNoReparse -Path $Path)
     $sum = ($items | Measure-Object -Property Length -Sum).Sum
     if (-not $sum) { $sum = 0 }
     return @{ Files = $items.Count; Bytes = [long]$sum }
 }
 
-# 计算「应抓文件数」= 源目录全部文件 − 匹配 excludeFilePatterns 的文件。
+# 计算「应抓文件数」= 源目录全部文件（跳过一切 reparse point）− 匹配 excludeFilePatterns 的文件。
 # 为什么需要：完整抓取（noExcludeDirs）只是「不排除子目录」，仍应用文件级排除
 # （LOCK/LOG/LOG.old/desktop.ini 等运行时无价值文件）。所以暂存文件数天然少于源文件数 ——
-# 直接拿源文件数比对会误报「文件数不足」。真机踩过：.workbuddy-ai 每次固定差 24，
-# 就是被排除的 LOCK/LOG 类文件，不是被占用。
+# 直接拿源文件数比对会误报「文件数不足」。真机踩过：.workbuddy-ai 固定差 24，
+# 就是 24 个**文件符号链接**（robocopy /XJ 不抓文件符号链接，Get-ChildItem 却会数）。
+# 现在源/暂存两边都用 Get-FilesNoReparse，口径与 /XJ 完全一致，误报归零。
 function Get-ExpectedFileCount {
     param([string]$Path, [string[]]$ExcludeFiles)
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
-    $items = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)
+    $items = @(Get-FilesNoReparse -Path $Path)
     if (-not $ExcludeFiles -or $ExcludeFiles.Count -eq 0) { return $items.Count }
     $kept = @($items | Where-Object {
         $n = $_.Name
@@ -191,6 +218,26 @@ function Get-ExpectedFileCount {
         -not $ex
     })
     return $kept.Count
+}
+
+# 诊断辅助：列出「源目录有、暂存没有」的具体文件（最多 $Max 个）—— 别只给一个数字。
+# 只报「差 24」没法排查，报出文件名才知道是哪些（符号链接？被占用？路径过长？）。
+function Get-MissingFileNames {
+    param([string]$Src, [string]$Dst, [string[]]$ExcludeFiles, [int]$Max = 10)
+    $out = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $Src)) { return $out }
+    $srcRoot = $Src.TrimEnd('\')
+    $dstRoot = $Dst.TrimEnd('\')
+    foreach ($f in @(Get-FilesNoReparse -Path $Src)) {
+        if ($out.Count -ge $Max) { break }
+        $nm = $f.Name
+        $ex = $false
+        if ($ExcludeFiles) { foreach ($pat in $ExcludeFiles) { if ($nm -like $pat) { $ex = $true; break } } }
+        if ($ex) { continue }
+        $rel = $f.FullName.Substring($srcRoot.Length).TrimStart('\')
+        if (-not (Test-Path -LiteralPath (Join-Path $dstRoot $rel))) { [void]$out.Add($rel) }
+    }
+    return $out
 }
 
 # ---------------------------------------------------------------- 用户 HKCU 导出
@@ -445,6 +492,10 @@ foreach ($raw in $dirs) {
     }
 
     $full = $noExDirs.Contains($src.TrimEnd('\').ToLower())
+    # 期望文件数必须在 robocopy **之前**统计（真机踩过）：完整抓取目录是活跃目录，
+    # 抓完之后再数会把 robocopy 期间新产生的文件算进来，凭空多出「差 N」的假警报。
+    $expected = -1
+    if ($full -and $xdAbs.Count -eq 0) { $expected = Get-ExpectedFileCount -Path $src -ExcludeFiles $exFiles }
     if ($full) {
         Say ("  [完整抓取] {0}（不排除任何子目录）" -f $src)
         $code = Invoke-Robocopy -Src $src -Dst $dst -ExcludeFiles $exFiles -ExcludeDirsAbs ([string[]]$xdAbs)
@@ -458,15 +509,14 @@ foreach ($raw in $dirs) {
               $code, $src, $size.Files, $got.Files, ($size.Files - $got.Files))
         $problems.Add("file:$src")
     }
-    # 完整抓取目录：暂存文件数应等于「源文件数 − 被 excludeFilePatterns 排除的文件数」。
-    # 只算真正该抓的文件，避免把 LOCK/LOG 这类主动排除误报成「文件数不足」（真机差 24 的根因）。
-    if ($full -and $xdAbs.Count -eq 0) {
-        $expected = Get-ExpectedFileCount -Path $src -ExcludeFiles $exFiles
-        if ($got.Files -lt $expected) {
-            Warn ("[完整抓取] 文件数不足：{0} 应抓 {1} / 暂存 {2}（差 {3}）—— 大概率被占用" -f `
-                  $src, $expected, $got.Files, ($expected - $got.Files))
-            $problems.Add("filecount:$src")
-        }
+    # 完整抓取目录：暂存文件数应等于「抓取前源文件数 − 被 excludeFilePatterns 排除的文件数」。
+    # 只算真正该抓的文件，避免把 LOCK/LOG 这类主动排除误报成「文件数不足」。
+    if ($expected -ge 0 -and $got.Files -lt $expected) {
+        Warn ("[完整抓取] 文件数不足：{0} 应抓 {1} / 暂存 {2}（差 {3}）—— 大概率被占用" -f `
+              $src, $expected, $got.Files, ($expected - $got.Files))
+        $missNames = @(Get-MissingFileNames -Src $src -Dst $dst -ExcludeFiles $exFiles -Max 10)
+        if ($missNames.Count -gt 0) { Warn ("            源有暂存无（前 {0} 个）：{1}" -f $missNames.Count, ($missNames -join ' , ')) }
+        $problems.Add("filecount:$src")
     }
 
     $totalBytes += $got.Bytes
@@ -1136,7 +1186,7 @@ if ($Push) {
     & $RcloneExe mkdir $Remote --timeout 0 --contimeout 0 2>&1 | Out-Null
 
     # ---------- 传输策略（体积不设上限时的保护）----------
-    # 139 实测约 0.45 MB/s：先估算耗时；再按「job 预算 − 已耗时 − 15 分钟」给 rclone 一个
+    # 139 实测约 0.45 MB/s：先估算耗时；再按「job 预算 − 已耗时 − 15 分钟」分配 rclone 的
     # --max-duration，到点会优雅退出而不是被 GitHub 硬杀（大目录用 copy 可续传，不会毁远端）。
     $progBytesTotal = [long]0
     foreach ($g in $programsCaptured) { $progBytesTotal += [long]$g.bytes }
@@ -1147,7 +1197,7 @@ if ($Push) {
     Set-GhEnv ("SNAPSHOT_ETA_MIN=" + $etaMin)
     Set-GhEnv ("SNAPSHOT_PUSH_MB=" + $pushMB)
 
-    $maxDurArg = @()
+    $remainMin = 0
     $jobBudgetMin = 360
     $jobStartFile = Join-Path $SysDir "_state\job-start.txt"
     if (Test-Path -LiteralPath $jobStartFile) {
@@ -1156,41 +1206,79 @@ if ($Push) {
             $elapsedMin = [int]((Get-Date).ToUniversalTime() - $t0).TotalMinutes
             $remainMin = $jobBudgetMin - $elapsedMin - 15
             if ($remainMin -gt 5) {
-                $maxDurArg = @('--max-duration', ($remainMin.ToString() + 'm'))
-                Say ("  job 已跑 {0} 分钟，给 rclone 设 --max-duration {1}m" -f $elapsedMin, $remainMin)
+                Say ("  job 已跑 {0} 分钟，剩余预算 {1} 分钟（将按阶段分配）" -f $elapsedMin, $remainMin)
                 if ($etaMin -gt $remainMin) {
                     Warn ("  估算耗时 {0} 分钟 > 剩余 {1} 分钟 —— 本次可能传不完；大目录用 copy 可续传，下次继续" -f $etaMin, $remainMin)
                 }
-            }
-        } catch { Warn "读取 job 起始时间失败：$_" }
+            } else { $remainMin = 0 }
+        } catch { Warn "读取 job 起始时间失败：$_"; $remainMin = 0 }
     }
-    if ($maxDurArg.Count -eq 0 -and $etaMin -gt 300) { Warn "估算耗时较长（$etaMin 分钟），本次可能传不完（可续传）" }
+    if ($remainMin -le 0 -and $etaMin -gt 300) { Warn "估算耗时较长（$etaMin 分钟），本次可能传不完（可续传）" }
 
-    $rcCommon = @('--transfers','4','--checkers','8','--timeout','0','--contimeout','0',
-                  '--retries','3','--low-level-retries','5','--stats-one-line','-v') + $maxDurArg
+    # ---------- 分阶段预算：保证「元数据 > programs > files」的优先级（真机踩过）----------
+    # 之前整段共用一个 --max-duration，且 files 排在 programs 前面：一旦到点，
+    # 排在后面的东西永远轮不到 → 远端永远没有 programs.json / manifest.json →
+    # 下次开机没程序可还原（桌面只剩图标、点开报「找不到目标」）。
+    # 现在按优先级各给一段独立预算：元数据（小，是还原的「总目录」）→ programs（小但关键）
+    # → files（大，可续传，本次没传完下次继续，损失最小）。
+    $metaBudgetMin  = 0
+    $progBudgetMin  = 0
+    $filesBudgetMin = 0
+    if ($remainMin -gt 5) {
+        $metaBudgetMin = [math]::Min(3, [math]::Max(1, [int][math]::Floor($remainMin / 4)))
+        $afterMeta = $remainMin - $metaBudgetMin
+        $etaProgMin = [int][math]::Ceiling(($progBytesTotal / 1MB) / $mbps / 60)
+        $progBudgetMin = [math]::Max(3, $etaProgMin + 1)
+        if ($progBudgetMin -gt ($afterMeta - 1)) { $progBudgetMin = [math]::Max(1, $afterMeta - 1) }
+        $filesBudgetMin = $afterMeta - $progBudgetMin
+        Say ("  分阶段预算：元数据 {0}m / programs {1}m / files {2}m（剩余 {3}m）" -f `
+              $metaBudgetMin, $progBudgetMin, $filesBudgetMin, $remainMin)
+    }
+    function Get-DurArg([int]$Min) {
+        if ($Min -le 0) { return @() }
+        return @('--max-duration', ($Min.ToString() + 'm'))
+    }
 
-    # ① 大目录：用 copy —— 只增不删、可断点续传，被中断也不会删远端
-    #
-    # ⚠️ programs 必须排在 files 前面（真机踩过）：files 是大头（.workbuddy-ai 约 400MB +
-    #    Edge 约 100MB，按 139 的 0.45MB/s ≈ 20 分钟），一旦 --max-duration 到点，
-    #    排在后面的 programs 永远轮不到 → 远端永远没有 programs.json →
-    #    下次开机没程序可还原 → 桌面只剩图标、点开报「找不到目标」。
-    #    programs 体积小得多，但它是「程序本体能不能回来」的关键，优先保它。
+    # --create-empty-src-dirs：把「空目录」也复制过去。否则 Documents/Pictures/Videos/Music
+    # 这类天然为空的目录不会在 139 上出现 → pre-restore 每次报 missing（已修，但根上也补齐）。
+    $rcBase = @('--transfers','4','--checkers','8','--timeout','0','--contimeout','0',
+                '--retries','3','--low-level-retries','5','--stats-one-line','-v',
+                '--create-empty-src-dirs')
+
+    # ① 元数据（manifest/registry/shortcuts/system/apps/_tools）：用 sync —— 远端镜像本地，
+    #    避免已删除的元数据在还原时「复活」；--exclude 保护大目录不被删除。
+    #    ⚠️ 必须最先推：manifest.json 是还原侧的「总目录」，没有它 pre-restore 判不出该还原什么。
+    Say "  推送元数据（sync，排除大目录）..."
+    & $RcloneExe sync $Stage $Remote --exclude "/files/**" --exclude "/programs/**" @rcBase @(Get-DurArg $metaBudgetMin)
+    $metaCode = $LASTEXITCODE
+    if ($metaCode -ne 0) { Warn ("  元数据推送返回码 {0}（远端 manifest 可能未更新）" -f $metaCode) }
+
+    # ② 大目录：用 copy —— 只增不删、可断点续传，被中断也不会删远端。
+    #    顺序 programs → files：programs 小但关键（没它桌面只剩图标），files 大且可续传。
+    $bigFailed = New-Object System.Collections.Generic.List[string]
     foreach ($big in @('programs', 'files')) {
         $bigPath = Join-Path $Stage $big
         if (-not (Test-Path -LiteralPath $bigPath)) { continue }
+        $dur = $(if ($big -eq 'programs') { $progBudgetMin } else { $filesBudgetMin })
         Say ("  推送大目录 {0}（copy，可续传）..." -f $big)
-        & $RcloneExe copy $bigPath (($Remote.TrimEnd('/')) + '/' + $big) @rcCommon 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { Warn ("  {0} 推送返回码 {1}（copy 可续传，下次继续）" -f $big, $LASTEXITCODE) }
+        & $RcloneExe copy $bigPath (($Remote.TrimEnd('/')) + '/' + $big) @rcBase @(Get-DurArg $dur) 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Warn ("  {0} 推送返回码 {1}（copy 可续传，下次继续）" -f $big, $LASTEXITCODE)
+            $bigFailed.Add($big)
+        }
     }
 
-    # ② 其余（manifest/registry/shortcuts/system/apps/_tools）：用 sync —— 远端镜像本地，
-    #    避免已删除的元数据在还原时「复活」；用 --exclude 保护大目录不被删除
-    Say "  推送元数据（sync，排除大目录）..."
-    & $RcloneExe sync $Stage $Remote --exclude "/files/**" --exclude "/programs/**" @rcCommon
-    if ($LASTEXITCODE -eq 0) {
-        Say "推送完成"
-        Set-GhEnv "SNAPSHOT_PUSH=OK"
+    if ($metaCode -ne 0) {
+        Warn ("推送失败（元数据 rclone 码 {0}）" -f $metaCode)
+        Set-GhEnv "SNAPSHOT_PUSH=FAILED"
+    } else {
+        if ($bigFailed.Count -gt 0) {
+            Warn ("推送部分完成：大目录未传完（{0}）—— 远端为部分快照，可续传，下次继续" -f ($bigFailed -join ', '))
+            Set-GhEnv "SNAPSHOT_PUSH=PARTIAL"
+        } else {
+            Say "推送完成"
+            Set-GhEnv "SNAPSHOT_PUSH=OK"
+        }
 
         # ---------- 关键文件回读校验 ----------
         # 为什么单独查这几个：文件总数校验看不出「哪个」缺了。
@@ -1240,9 +1328,6 @@ if ($Push) {
             Warn "远端校验异常：$_"
             Set-GhEnv "SNAPSHOT_VERIFY=SKIPPED"
         }
-    } else {
-        Warn "推送失败（rclone 码 $LASTEXITCODE）"
-        Set-GhEnv "SNAPSHOT_PUSH=FAILED"
     }
 }
 

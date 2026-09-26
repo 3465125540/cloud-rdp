@@ -285,7 +285,7 @@
     "_comment_size0": "0 = 不限（本项目按需求设为不限）。139 实测约 0.45 MB/s，推送前会估算 ETA 并给 rclone 设 --max-duration",
     "maxMBPerApp": 0,
     "maxTotalMB": 0,
-    "_comment_excludePaths": "永不备份、永不还原的程序目录（按前缀匹配）。例：用户明确不想要的程序。",
+    "_comment_excludePaths": "永不备份、永不还原的程序目录（按前缀匹配）。例：用户明确不想要的程序。⚠️ D:\\a\\cloud-rdp = CLOUDRDP_DATA_DIR，已由 sync-up.ps1 每 10 分钟独立同步；不排除的话会被当成「已装程序」整棵抓进 programs/（真机 2736 个文件、纯重复上传）。",
     "excludePaths": [
       "C:\\rtools45",
       "C:\\Program Files\\Azure Cosmos DB Emulator",
@@ -295,7 +295,8 @@
       "C:\\Program Files\\Microsoft SDKs\\Service Fabric",
       "C:\\Program Files\\Microsoft Service Fabric",
       "C:\\Program Files\\Unity Hub",
-      "C:\\Program Files\\MySQL"
+      "C:\\Program Files\\MySQL",
+      "D:\\a\\cloud-rdp"
     ],
     "_comment_dataGlobs": "程序关联数据的显式补充/覆盖：dirs 里写 %VAR% 形式路径。留空则只按程序名/发布商自动匹配。⚠️ 这里只能用「环境变量」，不能用 %RDPUSERPROFILE%（那是本项目的占位符，只有 files.dirs / noExcludeDirs 认它）；而本脚本以 runneradmin 身份跑，%LOCALAPPDATA% 会指到 runneradmin 的 profile，所以用户级路径一律走 files.dirs，不要写在这。",
     "_comment_dataGlobs_uu": "UU远程 的程序本体是靠「桌面快捷方式线索补抓」进来的（captureTargets，程序体在 C:\\Program Files\\Netease\\GameViewer，已实测能还原）；这里再显式点名它的机器级数据目录，作为 files.dirs 之外的第二道保险（重复命中会被 files.dirs 的已抓判断跳过，不会重复占带宽）。",

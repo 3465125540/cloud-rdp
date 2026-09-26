@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（400 项）
+python workbench\selftest.py   :: 离线自测（412 项）
 ```
 
 | 面板 | 内容 |
@@ -865,7 +865,7 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **400 PASS / 0 FAIL**（新增 T137/T142b–g + T316–T324 共 15 条钉死清单与取证链） |
+| `selftest.py` | **412 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 另加 T325–T336 共 12 条） |
 | 真机冒烟（`Get-UserDataTargets` / `Find-UDSnapshotDir` / `Invoke-UserDataVerifyAndRepair`） | 目标解析 8 个含 UU远程 2 个；快照定位含**用户名迁移尾部兜底**；`UU_RESTORE` 在 OK / PARTIAL / MISSING 三态下判定正确且真写进 `GITHUB_ENV` |
 | 32 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（25 步） |
 
@@ -875,6 +875,69 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 > 想彻底免掉「新设备」提示：在 UU远程 里**登录 UU 账号**（账号级设备绑定存在服务端，`token` 是明文、会随快照还原）。
 > 每次开机的结论都会在 ENV READY 里以 `UU远程设备 : OK / PARTIAL / MISSING` 打印出来，不用去猜。
 
+### 13. 每次备份都显示「备份不完整」（`SNAPSHOT_STATUS=PARTIAL`）
+
+**现象**（瑀子 2026-09-26）：工作台「快照」一列**每次**都显示不完整（`SNAPSHOT_STATUS=PARTIAL`），
+但远端文件数其实**不少于**本地。
+
+**真机取证**（`joblog-35591676811.log` / `edge-run-latest.log`）：
+
+| 观察 | 数据 | 结论 |
+|------|------|------|
+| 抓取完成的**瞬间**就已判 PARTIAL | `[snapshot] 抓取完成：9853 个文件 / 1429.24 MB / 状态 PARTIAL` | PARTIAL **不是**推送失败造成的 —— 抓取侧（纯本地、无网络 I/O）就定了 |
+| 推送本身是健康的 | `SNAPSHOT_PUSH: OK` / `SNAPSHOT_VERIFY: OK`，远端 `10029` 个文件 `1901 MB` ≥ 本地 `9853` / `1429.24 MB`，全程约 38 秒 | 「不完整」是**假警报**，不是数据丢失 |
+| 还原侧 4 条固定告警 | `missing:C\Users\a\Documents` / `Pictures` / `Videos` / `Music` | 每次都是**同样这 4 个空目录** |
+| 这 4 个目录的真实体积 | `-> 0 个文件 / 0.00 MB`（全新机器的用户目录天然为空） | 它们**本来就该是空的** |
+| `[完整抓取] .workbuddy-ai` 间歇告警 | `源 8772 / 暂存 8748（差 24）`（09-21 出现；09-23 三次运行均无） | 另有一条**间歇性**假警报 |
+
+**根因**（两条，本质都是「把正常当成缺失」）：
+
+```
+① 空目录被当成缺失
+   backup-snapshot.ps1 给**每个**配置目录都记一条 files.entries（含 files=0 的空目录）
+   -> rclone copy 不带 --create-empty-src-dirs 就不会在 139 建空目录
+   -> pre-restore.ps1 的 2a 一律 Test-Path -> 4 个 missing: -> $problems -> PARTIAL
+   （讽刺的是：sync-up.ps1 一直在用 --create-empty-src-dirs，只有 backup-snapshot.ps1 漏了）
+
+② 文件符号链接被当成「该抓的文件」
+   robocopy 的 /XJ 官方定义 =「排除(文件和目录的)符号链接和接合点」-> **文件符号链接也不抓**
+   而 Get-ExpectedFileCount 用的 Get-ChildItem -Recurse -File 会把文件符号链接当普通文件数进去
+   -> .workbuddy-ai 的 24 个文件符号链接 -> 「差 24」-> $problems -> PARTIAL
+   （实测：目录接合点 Get-ChildItem 本就不展开，只有文件符号链接会多算）
+```
+
+**对策**（`backup-snapshot.ps1` / `pre-restore.ps1` / `snapshot-config.json`）：
+
+| 落点 | 改动 |
+|------|------|
+| `pre-restore.ps1` 2a | 条目自带 `files` 字段且 `<= 0` → **跳过**缺失判定（空目录不算缺失；字段缺失的老 v1 清单仍按原逻辑校验，不掩盖真缺失） |
+| `backup-snapshot.ps1` 推送 | 加 `--create-empty-src-dirs`：空目录也真的建到 139（与 `sync-up.ps1` 口径一致，根治 ①） |
+| `backup-snapshot.ps1` 计数 | 新增 `Get-FilesNoReparse`：目录/文件一律按 `ReparsePoint` 跳过；`Get-TreeSize` / `Get-ExpectedFileCount` 都改用它 → 与 `/XJ` **完全一致**，根治 ② |
+| `backup-snapshot.ps1` 计数时机 | 期望文件数改为 robocopy **之前**统计（活跃目录抓完再数，会把期间新产生的文件算成「差 N」） |
+| `backup-snapshot.ps1` 诊断 | 新增 `Get-MissingFileNames`：文件数不足时**列出具体文件名**（前 10 个），不再只给一个数字 |
+| `snapshot-config.json` | `programs.excludePaths` `+ D:\a\cloud-rdp` —— 它就是 `CLOUDRDP_DATA_DIR`，已由 `sync-up.ps1` 每 10 分钟独立同步；不排除会被当成「已装程序」整棵抓进 `programs/`（真机 2736 个文件、纯重复上传） |
+
+**顺带修掉的推送隐患**（同一批，均为真机踩过的）：
+
+| 隐患 | 原行为 | 现行为 |
+|------|--------|--------|
+| 元数据排最后 | `programs → files → 元数据 sync`；`--max-duration` 到点 → 远端**没有** `manifest.json` | 改为**元数据 → programs → files**（manifest 是还原的「总目录」，必须先落地） |
+| 整段共用一个预算 | `files` 是大头（≈20 分钟），会把 `programs` 饿死 → 远端永远没有 `programs.json` → 下次开机桌面只剩图标 | **分阶段预算**：元数据 / programs / files 各一段 `--max-duration`（programs 按自身体积估算 + 保底 3 分钟） |
+| 大目录失败仍报 OK | `copy` 返回非 0 只 Warn，最后元数据 `sync` 成功即 `SNAPSHOT_PUSH=OK` | 大目录未传完 → `SNAPSHOT_PUSH=PARTIAL`（不再谎报） |
+
+**验证**（离线自测 + 真机等价复现，全 PASS）：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **412 PASS / 0 FAIL**（本批新增 T325–T336 共 12 条） |
+| `Get-FilesNoReparse` vs 真 `robocopy /XJ` | 真接合点 + 真文件树实测：两边计数**完全一致**（旧口径会多算） |
+| `Get-MissingFileNames` | 删掉暂存里一个文件 → 精确点出 `b.txt`，且**不会**误报被 `excludeFilePatterns` 排除的 `c.tmp` / `desktop.ini` |
+| 32 个 `scripts/*.ps1` AST 解析 | 全通过 |
+
+> **诚实边界**：本次改的是**判定口径**，不是「把 PARTIAL 藏起来」。真正的失败信号仍然照报 ——
+> robocopy 返回码 `>=8`（`file:$src`）、关键文件远端缺失（`SNAPSHOT_VERIFY=PARTIAL`）、
+> 远端文件数少于本地（`SNAPSHOT_VERIFY=PARTIAL`）、大目录未传完（`SNAPSHOT_PUSH=PARTIAL`）一个都没放宽。
+
 ## 五、目录结构
 
 ```
@@ -882,7 +945,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（400 项）
+│   ├── selftest.py                     #   离线自测（412 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

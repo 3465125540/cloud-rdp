@@ -372,9 +372,22 @@ if ($mf.version) { $mfVersion = [int]$mf.version }
 $problems = New-Object System.Collections.Generic.List[string]
 
 # 2a. 目录镜像是否齐全
+# ⚠️ 空目录不算缺失（真机踩过）：抓取时 files=0 的目录（Documents/Pictures/Videos/Music
+#    在全新机器上天然为空）在 139 上没有对应目录 —— rclone copy 不带 --create-empty-src-dirs
+#    就不会建空目录。若这里一律 Test-Path，则每次开机都报 4 个 missing: 假问题 →
+#    SNAPSHOT_STATUS=PARTIAL → 工作台显示「备份不完整」（瑀子 2026-09-26 反馈）。
+#    判定：条目自带 files 字段（抓取侧统计的真实文件数）；该字段存在且 <=0 即「本就为空」，跳过。
+#    （字段缺失的老 v1 清单无法判断，仍按原逻辑校验，避免掩盖真实缺失。）
 foreach ($e in @($mf.files.entries)) {
     $rel = [string]$e.mirror
     if ([string]::IsNullOrWhiteSpace($rel)) { continue }
+    $hasCount = $false
+    $n = 0
+    if ($null -ne $e.PSObject.Properties['files']) {
+        $hasCount = $true
+        try { $n = [int]$e.files } catch { $n = 0 }
+    }
+    if ($hasCount -and $n -le 0) { continue }   # 空目录：抓取时本就无文件，不算缺失
     $p = Join-Path (Join-Path $Stage "files") $rel
     if (-not (Test-Path -LiteralPath $p)) { $problems.Add("missing:$rel") }
 }

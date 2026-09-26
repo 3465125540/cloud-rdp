@@ -1636,6 +1636,48 @@ def main():
     check("T324 诚实性：不再把「未登录」当异常（实测本机 token/userId 也是空的）",
           "token / userId 为空是**正常**" in ud_txt or "token / userId 为空是" in ud_txt)
 
+    # ---------------- 快照完整性：修「每次备份都不完整」（瑀子 2026-09-26） ----------------
+    # 现象：工作台每次都显示「备份不完整」（SNAPSHOT_STATUS=PARTIAL），但远端文件数其实 >= 本地。
+    # 根因（真机日志坐实）：
+    #   ① 抓取侧给**每个**目录都记一条 files.entries，包括天然为空的 Documents/Pictures/Videos/Music
+    #      （各 0 个文件）。rclone copy 不带 --create-empty-src-dirs 就不建空目录 -> 暂存里没有该目录；
+    #      pre-restore 的 2a 一律 Test-Path -> 每次报 4 个 missing: 假问题 -> PARTIAL。
+    #   ② Get-ExpectedFileCount 用 Get-ChildItem -Recurse -File（**跟随** junction），
+    #      而 robocopy 传了 /XJ（跳过 junction）-> 「应抓文件数」天然大于实际能抓到的，
+    #      [完整抓取] 目录每次报「文件数不足 差 24」-> 又一个 PARTIAL。
+    #   ③ 推送侧把元数据（manifest）排在最后，且大目录失败时仍报 SNAPSHOT_PUSH=OK（谎报）。
+    print("[快照完整性 空目录/junction/推送顺序]")
+    check("T325 pre-restore 校验：空目录（files<=0）不算缺失（消除 4 个 missing: 假问题）",
+          "空目录" in pre_txt and "$hasCount" in pre_txt and "missing:$rel" in pre_txt)
+    check("T326 backup-snapshot 推送带 --create-empty-src-dirs（空目录也落到 139）",
+          "--create-empty-src-dirs" in bs_txt)
+    check("T327 backup-snapshot 有 Get-FilesNoReparse（枚举文件时跳过 junction，与 robocopy /XJ 对齐）",
+          "function Get-FilesNoReparse" in bs_txt and "Get-FilesNoReparse -Path" in bs_txt)
+    check("T328 Get-TreeSize / Get-ExpectedFileCount 都用 Get-FilesNoReparse（口径统一）",
+          bs_txt.count("Get-FilesNoReparse -Path") >= 2)
+    _i_meta = bs_txt.find("推送元数据（sync")
+    _i_big = bs_txt.find("推送大目录")
+    check("T329 推送顺序：元数据 sync 在 programs/files 之前（manifest 先落地）",
+          _i_meta >= 0 and _i_big >= 0 and _i_meta < _i_big)
+    check("T330 大目录失败/超时 -> SNAPSHOT_PUSH=PARTIAL（不再谎报 OK）",
+          "SNAPSHOT_PUSH=PARTIAL" in bs_txt and "$bigFailed" in bs_txt)
+    check("T331 分阶段预算：元数据/programs/files 各设 --max-duration（防 programs 被 files 饿死）",
+          "$progBudgetMin" in bs_txt and "$filesBudgetMin" in bs_txt and "Get-DurArg" in bs_txt)
+    check("T332 programs.excludePaths 排除 D:\\a\\cloud-rdp（CLOUDRDP_DATA_DIR 已由 sync-up 独立同步）",
+          any(str(p).rstrip("\\").lower() == "d:\\a\\cloud-rdp"
+              for p in ((sc.get("programs") or {}).get("excludePaths") or [])))
+    check("T333 sync-up 与 backup-snapshot 都用 --create-empty-src-dirs（口径一致）",
+          "--create-empty-src-dirs" in su_txt and "--create-empty-src-dirs" in bs_txt)
+    check("T334 Get-FilesNoReparse 对「目录和文件」都按 ReparsePoint 跳过（与 robocopy /XJ 官方口径一致）",
+          "ReparsePoint" in bs_txt and "PSIsContainer" in bs_txt
+          and "排除(文件和目录的)符号链接和接合点" in bs_txt)
+    _i_exp = bs_txt.find("$expected = Get-ExpectedFileCount")
+    _i_rc = bs_txt.find("$code = Invoke-Robocopy")
+    check("T335 期望文件数在 robocopy 之前统计（活跃目录抓完再数会凭空多出「差 N」）",
+          _i_exp >= 0 and _i_rc >= 0 and _i_exp < _i_rc)
+    check("T336 文件数不足时列出具体缺失文件名（只给数字没法排查）",
+          "function Get-MissingFileNames" in bs_txt and "Get-MissingFileNames -Src" in bs_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()
