@@ -390,6 +390,13 @@ html, body {
 .conn-v:hover { border-color: var(--info); }
 .conn-foot { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
 .conn-note { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
+/* 远端部署时给出的「本机命令」——可点击复制的一整块 */
+.conn-cmd {
+  background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: 7px;
+  padding: 7px 10px; overflow-x: auto;
+}
+.conn-cmd .mono { cursor: pointer; white-space: pre; }
+.conn-cmd .mono:hover { color: var(--info); }
 .warn-line {
   color: var(--warn); background: rgba(210,153,34,.09);
   border: 1px solid rgba(210,153,34,.30); border-radius: 7px; padding: 5px 10px;
@@ -440,3 +447,22 @@ html, body {
 
 a { color: var(--info); text-decoration: none; }
 a:hover { text-decoration: underline; }
+
+/* ---------------- 导出下拉菜单 ---------------- */
+.menu { position: relative; display: inline-block; }
+.menu-list {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+  min-width: 208px; padding: 5px;
+  background: var(--card-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0,0,0,.5);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.menu-list[hidden] { display: none; }
+.menu-list button {
+  appearance: none; background: transparent; border: 0; color: var(--fg);
+  text-align: left; font: inherit; font-size: 12.5px; padding: 7px 10px;
+  border-radius: 7px; cursor: pointer; white-space: nowrap;
+}
+.menu-list button:hover { background: #223047; }
+.menu-list .menu-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.menu-list .menu-hd { padding: 5px 10px 2px; font-size: 10.5px; color: var(--fg-mute); letter-spacing: .3px; }

@@ -686,7 +686,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（303 项）
+python workbench\selftest.py   :: 离线自测（385 项）
 ```
 
 | 面板 | 内容 |
@@ -813,7 +813,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（335 项）
+│   ├── selftest.py                     #   离线自测（385 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

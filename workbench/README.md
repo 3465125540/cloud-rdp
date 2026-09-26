@@ -15,7 +15,7 @@
 | **GitHub 账号管理** | `scripts/pool-config.json` + 仓库 Actions Secrets 列表 + `pool-state` 分支 | 看每个账号的 Secret 是否就位、当前是主还是备、有没有在跑机；**一键启用/停用**账号（直接改 pool-config.json）；**＋ 新增**可贴该账号 PAT **一键自动部署**（建 fork → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器），进度实时展示。顶部「监测数据」时间按**实时北京时间**（UTC+8，形如 `2026/9/22-20:16`）展示 |
 | **机器运行实况** | Tailscale `status --json` + 远端 `D:\cloudrdp-sys\_state\pool-role.txt` / `job-start.txt` / `pool-info.txt` / `backup-request.txt` + runner 工作区 `D:\a\<repo>\<repo>\.git\config` + `_snapshot\manifest.json` + 账号池状态（`pool-state`） | 看哪些机器在线、Tailscale IP、**归属账号**、角色（主/备/单机）、**已运行时长**、快照新鲜度 + **快照绝对时间**、最后在线时间；**一键登录** / **查看信息**（弹窗显示 Tailscale IP / 用户名 / 密码，可一键复制）；快照栏还有 **☁ 一键备份**（增量同步数据到 139 + 快速快照推送）。**池内机器**行：账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（机器掉线也不会从面板消失）；徽标按 Actions job 状态出「运行中 / 已派发 / 已结束」；**IP 从该机器自己的 job 日志里挖**（`[0c] Tailscale IP:`），配**一键登录 / 查看信息**（`3389` 现探不通时按钮转黄说明原因）；**「状态详情」可折叠**（单行点箭头 / 表头「折叠详情」一键，状态记在本地） |
 | **定时计划运行日志** | GitHub Actions API（`windows-rdp.yml` / `pool-coordinator.yml`，**按账号**：hub 用本机 token、其余用 `.tools/pool/<owner>.token` 或匿名） | 两个 workflow 的最近 25 次运行：状态（**中文徽章**，排队中为琥珀色）、触发方式（定时/手动）、开始时间（**实时北京时间**，UTC+8，形如 `2026/9/22-20:16`）、用时、SHA，点「日志」跳 GitHub；**分账号展示**（v1.5.7）：表格上方一行账号筛选（`全部账号` 时按账号分组、每组带 `角色 / 在跑·排队 / 数据源 / 条数` 表头；也可只看某个账号）；右上角**「缩略」= 每个账号各留最近 5 条**，再点「展开全部」看全量 |
-| **一键登录机器** | 生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`（Windows）；Linux 上唤起 `xfreerdp`/`remmina` | 点一下直接连上在线机器，免手输密码 |
+| **一键登录机器** | 本机：生成 `.rdp` + `cmdkey` 预存凭据 + 唤起 `mstsc`；远端部署（v1.6.0）：改为**下载 `.rdp` 到你本机** | 点一下直接连上在线机器，免手输密码（远端部署下文件落你电脑、双击即连） |
 
 > 界面上几乎所有**子词条 / 表头 / 徽章**鼠标停留都会浮出说明（`data-tip`），例如操作台的「迁移139」「重装软件」。
 
@@ -43,7 +43,7 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **303 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **385 项**，应全绿。不联网、不碰真机、不写你的桌面。
 
 > 自测不只测工作台本身，也把开机脚本的**关键设计**钉成断言（防回归），例如
 > T153+ 的「先探后拉」数据还原铁律、T183+ 的中文语言包「转计划任务 + 状态分段落盘」
@@ -54,7 +54,7 @@ python workbench\selftest.py
 > 「UTF-8 无 BOM」的中文，多字节序列会吞掉引号/括号，`.vbs` 直接报
 > `0x800A0401 语句未结束`。自测 T112/T113 已加回归守卫。
 
-> **在 Linux 服务器上部署**（远端文件改走 `smbclient`、一键登录改走 `xfreerdp`、可加 `access_token` 保护）：
+> **在 Linux 服务器上部署**（远端文件改走 `smbclient`、一键登录改为把 `.rdp` 下到你本机、可加 `access_token` 保护）：
 > 见仓库根目录的 [`DEPLOY-linux.md`](../DEPLOY-linux.md) 与 `deploy/`（含 systemd 单元与一键安装脚本）。
 
 ---
@@ -110,6 +110,40 @@ python workbench\selftest.py
 1. 在 `~/Documents/CloudRDP/`（Windows 即 `C:\Users\<你>\Documents\CloudRDP\`）写一个 `RDP-<host>-<ip>.rdp`（分辨率、剪贴板/磁盘重定向、`authentication level:i:0` 等都配好，留档 / 手动双击用）；目录不存在会自动创建，可用配置项 `rdp_dir` 改成别处，**不会写到桌面**；
 2. `cmdkey /generic:TERMSRV/<ip> /user:a /pass:a` 把凭据存进 Windows 凭据管理器 → 连的时候**不弹密码框**；
 3. 唤起 `mstsc`。
+
+### 部署在远端服务器时：不在服务端弹窗，把连接交给本机（v1.6.0）
+
+上面这套（写盘 + `cmdkey` + `mstsc`）**只在工作台就跑在你本机时才成立**。工作台一旦部署到
+远端服务器（典型是无头 Linux），它就有三个硬伤：**①** 服务端弹的远程桌面窗口你根本看不到；
+**②** `.rdp` 落在服务器的磁盘上，你的电脑拿不到；**③** Linux 下把明文密码拼进
+`xfreerdp /p:<password>` 命令行，`ps aux` 一览无余。
+
+所以 v1.6.0 引入 `rdp_launch_target`（默认 `auto`），把「谁来唤起客户端」交给配置决定：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | **Windows 服务端** → 服务端唤起（老行为，工作台通常就在你本机）；**其它** → 交给本机 |
+| `local` | 一律交给本机（部署在远端、你要在自己电脑上连） |
+| `server` | 强制服务端唤起（服务器带桌面环境时才合理） |
+
+「交给本机」时：
+
+* 面板「操作」列的按钮文案从 **「一键登录」** 变成 **「下载 .rdp」** —— 点击即
+  `GET /api/rdp/download?ip=&host=`，后端用同一份 `build_rdp_text()` 渲染，以
+  `Content-Disposition: attachment` + **UTF-16LE+BOM**（mstsc 原生编码，中文用户名不乱码）
+  下给浏览器，保存到**你的电脑**上，双击即连；
+* 「查看信息」弹窗里额外给出一条**按你本地系统**（`navigator.platform` 判 Win/mac/Linux）
+  生成的可粘贴命令：Windows `mstsc /v:<ip>`、macOS `open "rdp://…"`、Linux `xfreerdp …`；
+* 弹窗**不再显示**「证书警告未关闭 / 修复证书警告」——那是 Windows 本机 `Default.rdp`
+  才有意义的东西（后端用 `auth_check` 字段告诉前端该不该显示）。
+
+`POST /api/rdp` 在交给本机时会返回 `local_target: true` + `download_url`，且
+`launched: false` / `launch_mode: "local"`、**不预存凭据**（`cmdkey` 是 Windows-only，远端也没意义），
+并附一句 `launch_note` 说明「不在服务端弹窗」。
+
+> 安全：`/api/rdp/download` 与其它 `/api/*` 一样受 `access_token` 保护；下载内容里**只有
+> 连接参数**（IP / 用户名 / 分辨率），**不含密码**（密码要靠本机客户端自己问，或在
+> `rdp_client_cmd` 里显式写 `{password}` —— 那是用户自己的选择）。
 
 ### 为什么不用 `os.startfile(.rdp)`（2026-04 KB5083769 之后）
 
@@ -340,6 +374,66 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 > 实测（2026-09-24）：`全部账号 / 保活` 下 3 组 —— `acc-1`（匿名只读，8 条）、`acc-3`（主仓库 Token，25 条）、
 > `acc-4`（本机 Token，0 条 → 组内提示「暂无运行记录」）；`协调器` tab 共 47 条。表格无横向溢出。
 
+### 启动 / 刷新提速（v1.5.8）
+
+**症状**：面板打开要等十几秒；自动刷新（默认 30 秒一次）每次都像卡住。根因是「**每一次刷新都等于重跑一整轮冷构建**」：
+
+- 一次 `build_overview()` 冷启动要 **13~49 秒** —— 各账号的 run（每账号 1~2 次 GitHub API 往返）+ **每台在线机器 6~9 次 SMB 往返**（读角色 / 快照 / 恢复状态…）+ 池内机器的 job 日志挖 IP。
+- 而面板 `auto_refresh_seconds = 30` **大于** 子缓存 `cache_seconds = 20` → 每次自动刷新时缓存都已过期 → 又重跑一整轮。
+
+**改法**（三条腿一起）：
+
+1. **整包快照：陈旧可用 + 后台重建**（`overview_snapshot()`）。`/api/overview` 不再每次都同步重建：
+   - 有快照且新鲜 → 直接返回（0 成本）；
+   - 有快照但过期 → **立刻**返回旧快照（带 `stale: true` / `age_seconds`），同时后台线程重建，下次轮询就是新的；
+   - 还没有快照（首屏）→ 返回一个**空骨架**（`warming: true`），前端提示「正在加载数据…」并每 2 秒补拉 —— 不再让页面空转十几秒。
+   - 点「刷新」（`?refresh=1`）→ 清缓存 + 后台重建，**同样立刻返回**（前端提示「后台刷新中…」，稍后自动取到新值），按钮不再把页面冻住十几秒。
+   - 代价：任何一次响应看到的数据最多落后一轮（≈ `overview_seconds`，默认 20 秒），对监控面板够用。
+2. **启动预热**（`overview_warmup()`）：服务一起来就在后台建第一份快照 —— 浏览器打开时首个请求基本秒回。
+3. **单台机器详情按 IP 缓存**（`machine_detail_seconds`，默认 30 秒）+ **机器内各远端读并行**：
+   一台机器原来要**串行**等 6~9 次 SMB 往返，现在并行读、且结果缓存 30 秒 —— 冷启动最大的一块开销被抹掉。
+   （`?refresh=1` 会 `clear_cache()`，所以真要看最新时仍会实读。）
+4. **hub 两个 workflow 并行拉**（`get_runs()`）：以前 keepalive + coordinator 串行 = 白等一倍 API 往返。
+
+> 实测（2026-09-25，本机）：被动刷新 **13~49s → 0.01~0.04s**；首屏骨架 ≤2s；点刷新 **13.2s → 0.15s**（后台约 12s 后自动变新）。
+> 配置项：`overview_seconds`（快照新鲜期）、`machine_detail_seconds`（机器详情缓存秒数）。
+
+### 后端数据导出（v1.5.9）
+
+面板右上角 **导出 ▾** 把当前数据一键导成文件（走后端 `GET /api/export`），供备份 / 分析 / 留档：
+
+| 导出项 | 内容 | 格式 |
+| --- | --- | --- |
+| 完整快照 | 与 `/api/overview` 同源的全量 JSON（账号 / 机器 / 池 / 运行日志 / 统计） | JSON |
+| 打包 ZIP | 4 份 CSV（`accounts` / `machines` / `runs` / `pool`）+ `overview.json` | ZIP |
+| 单项 | 运行日志 / 机器运行实况 / 账号清单 / 池状态 | CSV 或 JSON |
+
+- 取数**复用面板快照** —— 导出的就是「屏幕上那份」，秒回；首屏还没建好时，等/建一次完整快照（绝不返回空骨架）。
+- CSV 一律带 **UTF-8 BOM**（`\ufeff`）+ `\r\n` 行尾 —— Excel 直接双击打开中文表头不乱码。
+- 响应带 `Content-Disposition: attachment; filename="workbench-<数据集>-<时间戳>.<扩展名>"`，文件名带时间戳，多次导出不互相覆盖。
+- 参数：`what` ∈ `all`(默认) / `overview` / `runs` / `machines` / `accounts` / `pool`；`format` ∈ `json`(默认) / `csv`。未知值一律回落默认，不报错。
+- 单项 JSON 结构：`{export_meta:{what,format,generated_at,version,count}, header:[...], data:[{列:值}…]}` —— 前端与脚本都能直接消费。
+
+### 远端部署的一键登录（v1.6.0）
+
+工作台部署到远端服务器后，「一键登录」原来会在**服务端**写 `.rdp` + `cmdkey` + 弹 `mstsc`——
+无头服务器上你既看不到窗口，文件也落不到你电脑上，Linux 下还会把明文密码拼进命令行（`ps` 可见）。
+
+v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Windows 服务端走老行为、
+其它平台**交给本机**；`local` = 一律交给本机；`server` = 强制服务端唤起。交给本机时：
+
+- 机器行按钮文案变 **「下载 .rdp」**，点击走 `GET /api/rdp/download?ip=&host=`，
+  后端用同一份 `build_rdp_text()` 渲染，以 `Content-Disposition: attachment` + **UTF-16LE+BOM**
+  （mstsc 原生编码）下到**你的电脑**，双击即连；
+- 「查看信息」弹窗给出一条**按你本地系统**生成的可粘贴命令（Win `mstsc /v:` / mac `open "rdp://…"` /
+  Linux `xfreerdp …`），并**不再显示** Windows 本机才有的「证书警告 / 修复」；
+- `POST /api/rdp` 返回 `local_target` / `download_url` / `launch_mode: "local"`，**不预存凭据**；
+- Linux 自动探测的 `xfreerdp` 模板**去掉了 `/p:{password}`**（明文密码别进 `ps`），
+  要免手输就在 `rdp_client_cmd` 里自己写。
+
+`/api/conn-info` 相应多了 `local_target` / `is_windows` / `auth_check` / `download_url`，
+`/api/overview` 的 `config` 多了 `rdp_local` / `rdp_launch_target`（前端据此切换按钮文案）。
+
 ---
 
 ## 6. 新增账号「一键自动部署」
@@ -380,7 +474,7 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务与各链路健康状态 |
-| GET | `/api/overview` | **一次拿齐**前端所需全部数据；`?refresh=1` 强制清缓存。`stats` 含 `machines_data_bad` / `machines_snapshot_bad`（**未从 139 成功拉取数据的机器数**，acc-1 事故后新增，概览页「恢复异常」卡片直接读它）。`pool_machines` = 账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（前端「池内机器」行）；每行带 `machine_state`（`running`/`dispatched`/`ended`/`unknown`，由 `pool_run_state()` 从 run status 映射，前端据此出徽标），以及 `ip` / `ip_source` / `reachable`（IP 从该机器自己的 Actions job 日志里挖，可达性现探 `3389`，60 秒缓存） |
+| GET | `/api/overview` | **一次拿齐**前端所需全部数据。v1.5.8 起走**整包快照**（陈旧可用 + 后台重建）：响应带 `stale` / `age_seconds`，还没有快照时返回 `warming: true` 的空骨架；`?refresh=1` 清缓存 + 后台重建并**立刻**返回（不再同步阻塞）。`stats` 含 `machines_data_bad` / `machines_snapshot_bad`（**未从 139 成功拉取数据的机器数**，acc-1 事故后新增，概览页「恢复异常」卡片直接读它）。`pool_machines` = 账号池已派发/在跑、但本机 Tailscale 视图看不到其节点的机器（前端「池内机器」行）；每行带 `machine_state`（`running`/`dispatched`/`ended`/`unknown`，由 `pool_run_state()` 从 run status 映射，前端据此出徽标），以及 `ip` / `ip_source` / `reachable`（IP 从该机器自己的 Actions job 日志里挖，可达性现探 `3389`，60 秒缓存） |
 | GET | `/api/accounts` | 账号池清单 + 每账号实时监测（凭证状态 / **在跑 `running_count` + 排队 `queued_count`** / 最近 run）。`running_count` = run 状态 `in_progress`（机器已起来）；`queued_count` = 已派发但还在 `pending`/`queued` 排队（机器还没起，故实况里看不到）；两者为 `null` 时表示协调器状态还没这两个字段，前端退回旧口径 |
 | POST | `/api/accounts/toggle` | `{id, enabled}` 启用/停用账号（写回 pool-config.json） |
 | POST | `/api/accounts/add` | `{owner, repo, pat, token_secret?, id?, enabled?, auto_deploy?}` 新增账号（校验后原子写回 pool-config.json，**不写 PAT 明文**）。**必填只有 `pat`**；`token_secret` 留空则自动分配 `POOL_TOKEN_N`（响应里 `secret_auto=true` + `token_secret` 回传）。带 `pat` + `auto_deploy=true`（默认）时顺带**自动部署**并返回 `job_id` |
@@ -388,11 +482,13 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 | GET | `/api/machines` | 机器实况（含 `dns_name`（Tailscale 唯一短名，区分同名节点）、`uptime_seconds` / `uptime_human` / `started_utc`，`pool_owner` / `account_id` / `owner_source`，`snapshot`（含 `created_local` 快照绝对时间），`restore`（**数据/快照恢复状态**：`{data:{status,reason,at_utc}, snapshot:{...}, source}`），以及 `backup_request`（一键备份是否在排队））。与 `/api/overview` 走同一个 `collect_machines()`，形状一致 |
 | GET | `/api/runs?workflow=all\|keepalive\|coordinator&limit=N&accounts=1` | Actions 运行记录（`created_beijing` / `updated_beijing` 为北京时区绝对时间，形如 `2026/9/22-20:16`）。`accounts=1` 时额外带 `accounts[]`：每个账号 fork 的 run + `token_source`（`hub`/`local`/`anon`/`none`）+ `ok`/`error`（读不到时 `fallback_run` 兜底） |
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
+| GET | `/api/export?what=&format=` | **数据导出**（v1.5.9）：`what` ∈ `all`(默认)/`overview`/`runs`/`machines`/`accounts`/`pool`，`format` ∈ `json`(默认)/`csv`。`all`+`csv` 返回一个 zip（4 份 CSV + `overview.json`）；其余返回单个文件。CSV 带 UTF-8 BOM；响应带 `Content-Disposition: attachment`（文件名带时间戳）。取数复用面板快照（秒回） |
 | POST | `/api/dispatch` | `{target:"coordinator"\|"keepalive", inputs:{...}}` 触发 workflow |
 | POST | `/api/backup` | `{ip}` **一键备份**：经 SMB 把请求文件写到机器，保活循环取走后执行「增量同步到 139（`rclone copy --update`，不重复上传）+ 快速快照推送」 |
-| POST | `/api/rdp` | `{ip, hostname, launch?, store_cred?}` 一键登录 |
+| POST | `/api/rdp` | `{ip, hostname, launch?, store_cred?}` 一键登录。本机部署：落盘 + 预存凭据 + 唤起 `mstsc`；**远端部署**（v1.6.0）：不弹窗，返回 `local_target: true` + `download_url`，由前端下载 `.rdp` |
 | GET | `/api/rdp/preview?ip=...` | 预览生成的 `.rdp` 文本（不落盘） |
-| GET | `/api/conn-info?ip=...` | 连接信息（Tailscale IP / 用户名 / 密码），供「查看信息」弹窗用 |
+| GET | `/api/rdp/download?ip=&host=` | **把 `.rdp` 下到本机**（v1.6.0）：`Content-Disposition: attachment`，正文 UTF-16LE+BOM（mstsc 原生编码），供远端部署下「一键登录 → 下载 .rdp」用 |
+| GET | `/api/conn-info?ip=...` | 连接信息（Tailscale IP / 用户名 / 密码）+ `local_target` / `is_windows` / `auth_check` / `download_url`，供「查看信息」弹窗用 |
 
 ---
 
@@ -401,7 +497,7 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（303 项）
+├── selftest.py           # 离线自测（385 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

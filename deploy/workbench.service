@@ -25,8 +25,9 @@ RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 # 说明：不启用 ProtectSystem=strict / ProtectHome，因为工作台需要：
-#   · 生成 .rdp 文件到 rdp_dir
-#   · 调 smbclient / tailscale / xfreerdp 等外部程序
+#   · 生成 .rdp 文件到 rdp_dir（默认一键登录是把它下到你本机，不在服务器弹窗）
+#   · 调 smbclient / tailscale 等外部程序
+#   · 仅当 rdp_launch_target=server 时才额外调 xfreerdp
 
 [Install]
 WantedBy=multi-user.target

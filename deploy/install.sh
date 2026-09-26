@@ -44,7 +44,7 @@ PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
 MISSING=()
 command -v smbclient >/dev/null 2>&1 || MISSING+=("smbclient   # 读远端机器 _state/_snapshot（必需）")
 command -v tailscale >/dev/null 2>&1 || MISSING+=("tailscale   # 发现在线机器节点")
-command -v xfreerdp  >/dev/null 2>&1 || MISSING+=("freerdp2-x11 # 「一键登录」唤起远程桌面（可选）")
+command -v xfreerdp  >/dev/null 2>&1 || MISSING+=("freerdp2-x11 # 「一键登录」若改成在服务器弹窗(rdp_launch_target=server)才需要；默认改为下载 .rdp 到你本机")
 if [ "${#MISSING[@]}" -gt 0 ]; then
   warn "以下可选/必需组件未安装（按需补）："
   for m in "${MISSING[@]}"; do echo "        - $m"; done

@@ -7,6 +7,7 @@ var RUN_ACC = "all";       // 运行日志当前账号筛选（"all" = 全部账
 var RUNS_LIMIT = 0;        // 日志表格行数上限（0 = 不限；「缩略」时 = 每账号 5）
 var TIMER = null;
 var BUSY = false;
+var STALE_RETRY = null;    // 收到「陈旧快照」后的补拉定时器（后端在后台重建，稍后取新值）
 
 /* ------------------------------------------------------------ 小工具 */
 function $(sel) { return document.querySelector(sel); }
@@ -61,15 +62,111 @@ function api(path, opts) {
   });
 }
 
+/* ------------------------------------------------------------ 下载（导出 / .rdp） */
+// 入口带了 ?token= 时给下载 URL 也带上（Cookie 之外的双保险；正常情况 Cookie 已够）
+function withToken(url) {
+  var m = /[?&]token=([^&]+)/.exec(location.search);
+  if (!m) return url;
+  return url + (url.indexOf("?") >= 0 ? "&" : "?") + "token=" + m[1];
+}
+
+// 通用「下载」：fetch + blob，而不是直接 location.href —— 后端报错时能弹 toast，
+// 而不是把一坨 JSON / 401 页面甩到新标签页。文件名优先从 Content-Disposition 取。
+function downloadFrom(url, fallbackName, okMsg) {
+  fetch(url).then(function (r) {
+    if (!r.ok) {
+      return r.text().then(function (t) {
+        var msg = t;
+        try { var j = JSON.parse(t); if (j && j.error) msg = j.error; } catch (_) {}
+        throw new Error(msg || ("HTTP " + r.status));
+      });
+    }
+    var cd = r.headers.get("Content-Disposition") || "";
+    var fm = /filename="?([^";]+)"?/i.exec(cd);
+    var fn = fm ? fm[1] : (fallbackName || "download");
+    return r.blob().then(function (b) { return { b: b, fn: fn }; });
+  }).then(function (o) {
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(o.b);
+    a.download = o.fn;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+    toast(okMsg || ("已下载 <span class='mono'>" + esc(o.fn) + "</span>"), "ok");
+  }).catch(function (e) {
+    toast("下载失败：" + esc(e.message), "bad", 12000);
+  });
+}
+
+// 导出当前面板数据：走后端 /api/export（响应带 Content-Disposition: attachment）。
+function exportData(what, format) {
+  var url = withToken("/api/export?what=" + encodeURIComponent(what) +
+                      "&format=" + encodeURIComponent(format));
+  toast("正在导出 " + esc(what) + "（" + esc(String(format).toUpperCase()) + "）…", "info", 8000);
+  downloadFrom(url, "workbench-" + what + "." + format, null);
+}
+
+// 下载 .rdp 到**本机** —— 远端部署时「一键登录」的正解：服务端不弹窗（无头，弹了也看不到），
+// 只把连接参数渲染成 .rdp，由浏览器保存到你的电脑，双击即用本机 mstsc 连接。
+function downloadRdp(ip, host) {
+  if (!ip) return;
+  var url = withToken("/api/rdp/download?ip=" + encodeURIComponent(ip) +
+                      "&host=" + encodeURIComponent(host || ""));
+  toast("正在生成并下载 .rdp…", "info", 6000);
+  downloadFrom(url, "RDP-" + (host || ip) + ".rdp",
+    "已下载 <span class='mono'>.rdp</span> —— <b>双击</b>即可用本机远程桌面连接" +
+    "<br><span class='muted'>证书警告已在文件里关掉（authentication level=0）</span>");
+}
+
+// 本机命令提示：服务端不知道你本地是什么系统，所以按**浏览器所在系统**给一条可粘贴的命令。
+function localRdpCmd(c) {
+  var p = localPlatform();
+  var ip = c.ip || "", u = c.username || "", pw = c.password || "";
+  if (p.indexOf("win") >= 0) return "mstsc /v:" + ip;
+  if (p.indexOf("mac") >= 0) return 'open "rdp://full%20address=s:' + ip + "&username=s:" + u + '"';
+  return "xfreerdp /v:" + ip + " /u:" + u + " /p:" + pw + " /cert:ignore /dynamic-resolution";
+}
+
 /* ------------------------------------------------------------ 拉数据 */
+// 收到「陈旧快照」后，稍后补拉一次：后端正在后台重建，早点把新值取回来（别一直看旧值）。
+// 若正好撞上一次在途请求（BUSY）就顺延，别把这次补拉丢了。
+function scheduleStaleRetry(ms) {
+  if (STALE_RETRY) return;
+  STALE_RETRY = setTimeout(function () {
+    STALE_RETRY = null;
+    if (BUSY) { scheduleStaleRetry(ms); return; }
+    load(false);
+  }, ms || 5000);
+}
 function load(force) {
   if (BUSY) return;
   BUSY = true;
   var url = "/api/overview" + (force ? "?refresh=1" : "");
   api(url).then(function (d) {
+    if (d.warming) {
+      // 首屏骨架：后端还在构建第一份数据 —— 先别渲染（免得把「0 台机器」当真），
+      // 只提示「正在加载」并稍后轮询；构建好之后就能拿到完整数据。
+      var el0 = $("#last-updated");
+      el0.textContent = "正在加载数据…";
+      el0.title = "后端正在构建首屏数据（首次约几秒；之后每次刷新都是秒回）";
+      scheduleStaleRetry(2000);
+      return;
+    }
     DATA = d;
     render();
-    $("#last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
+    // 后端现在返回的是「快照」：陈旧时会先把旧值秒回、再在后台重建。
+    // 所以「更新于」要用数据自己的生成时间（generated_at），而不是「这次请求到达的时间」。
+    var when = d.generated_at ? new Date(d.generated_at) : new Date();
+    var el = $("#last-updated");
+    var txt = "更新于 " + when.toLocaleTimeString("zh-CN");
+    if (d.stale) {
+      txt += " · 后台刷新中…";
+      el.title = "当前显示的是约 " + (d.age_seconds || 0) + " 秒前的快照；后端正在后台拉取最新数据，稍后自动更新";
+      scheduleStaleRetry();
+    } else {
+      el.title = "数据生成于 " + (d.generated_at || "?") + "（服务 v" + (d.version || "?") + "）";
+    }
+    el.textContent = txt;
   }).catch(function (e) {
     toast("拉取失败：" + esc(e.message), "bad", 12000);
     if (!DATA) {
@@ -268,6 +365,19 @@ function updateFoldAllLabel() {
   el.disabled = keys.length === 0;
 }
 
+// 一键登录按钮：远端部署（DATA.config.rdp_local）时文案改成「下载 .rdp」
+// —— 点击 = 把 .rdp 下载到**你本机**（服务端无头，弹不出你能看到的窗口）；
+// 本机部署时是「一键登录」—— 服务端直接弹 mstsc。
+function rdpBtn(ip, hostLabel, rCls, rTip) {
+  var local = !!(DATA && DATA.config && DATA.config.rdp_local);
+  var tip = local
+    ? "工作台部署在远端服务器，无法在你本机弹窗 —— 点击把 .rdp 下载到你电脑，双击即可连接"
+    : (rTip || "");
+  return '<button class="btn btn-mini ' + (rCls || "btn-primary") + '" data-rdp="' + esc(ip) +
+    '" data-host="' + esc(hostLabel) + '"' + (tip ? ' data-tip="' + esc(tip) + '"' : "") + ">" +
+    (local ? "下载 .rdp" : "一键登录") + "</button>";
+}
+
 // 池内机器行：账号池状态说这台「已派发/在跑」，但本机 Tailscale 视图看不到它的节点。
 // 存在的意义 —— 机器不会因为 tailnet 掉线就从面板里整台消失（那正是「像少了几台机器」的元凶）。
 // 徽标由 machine_state 决定：job in_progress 就是「运行中」，绝不写死「Tailscale 未上线」
@@ -331,8 +441,7 @@ function poolOnlyRow(m) {
             "点了大概率连不上，进度以「运行日志」为准。"
           : "IP 已知" + ipNote + "。未做端口探测。");
     var rCls = m.reachable === false ? "btn-warn" : "btn-primary";
-    ops.push('<button class="btn btn-mini ' + rCls + '" data-rdp="' + esc(ip) +
-             '" data-host="' + esc(hostLabel) + '" data-tip="' + esc(rTip) + '">一键登录</button>');
+    ops.push(rdpBtn(ip, hostLabel, rCls, rTip));
     ops.push('<button class="btn btn-mini btn-ghost" data-info="' + esc(ip) +
              '" data-host="' + esc(hostLabel) + '">查看信息</button>');
   }
@@ -450,7 +559,7 @@ function renderMachines() {
       : '<span class="muted" title="最后在线（实时北京时间 UTC+8）；原始 UTC：' + esc(m.last_seen || "?") + '">' +
         esc(bjTime(m.last_seen) || m.last_seen_human || "未知") + "</span>";
     var ops = online
-      ? '<button class="btn btn-mini btn-primary" data-rdp="' + esc(m.ip) + '" data-host="' + esc(nodeName) + '">一键登录</button>' +
+      ? rdpBtn(m.ip, nodeName, "btn-primary", "") +
         ' <button class="btn btn-mini btn-ghost" data-info="' + esc(m.ip) + '" data-host="' + esc(nodeName) + '">查看信息</button>'
       : '<span class="none">离线</span>';
     // 主机列第二行：机器归属的账号
@@ -858,10 +967,51 @@ function connRow(label, value) {
     '<span class="conn-v mono" data-copy="' + esc(value) + '" title="点击复制">' + esc(value) + "</span></div>";
 }
 
+function localPlatform() {
+  return String((navigator.userAgentData && navigator.userAgentData.platform) ||
+                navigator.platform || navigator.userAgent || "").toLowerCase();
+}
+function localOsName() {
+  var p = localPlatform();
+  if (p.indexOf("win") >= 0) return "Windows";
+  if (p.indexOf("mac") >= 0) return "macOS";
+  return "Linux";
+}
+
 function showConnInfo(ip, host) {
   var title = "连接信息" + (host ? " · " + host : "");
   openModal(title, '<div class="muted">读取中…</div>');
   api("/api/conn-info?ip=" + encodeURIComponent(ip)).then(function (c) {
+    var rows =
+      connRow("Tailscale IP :", c.ip || ip) +
+      connRow("Username     :", c.username || "") +
+      connRow("Password     :", c.password || "");
+
+    // ---- 远端部署：服务端是无头机，弹不出你能看到的窗口 → 把连接交给本机 ----
+    // 两条路：① 下载 .rdp（双击即连，最省事）② 复制一条本机命令（Linux/macOS 常用）。
+    if (c.local_target) {
+      var cmd = localRdpCmd(c);
+      var html =
+        '<div class="conn-list">' + rows + "</div>" +
+        '<div class="conn-note">' +
+          '<div class="muted">工作台部署在<b>远端服务器</b>（' + esc(c.is_windows ? "Windows" : "Linux") +
+            "），<b>无法在你本机弹窗</b>。点「下载 .rdp」把文件存到你的电脑，<b>双击</b>即可连接" +
+            "（证书警告已在文件里关掉）。</div>" +
+          '<div class="muted">或在你本机（' + esc(localOsName()) + '）执行这条命令：</div>' +
+          '<div class="conn-cmd"><span class="mono" data-copy="' + esc(cmd) +
+            '" title="点击复制">' + esc(cmd) + "</span></div>" +
+        "</div>" +
+        '<div class="conn-foot">' +
+          '<button class="btn btn-primary btn-mini" data-rdp-download="' + esc(ip) +
+            '" data-host="' + esc(host || "") + '">下载 .rdp</button>' +
+          '<button class="btn btn-mini" data-copy-all="1">复制全部</button>' +
+          '<span class="muted">点任意一行可复制该值</span>' +
+        "</div>";
+      openModal(title, html);
+      return;
+    }
+
+    // ---- 本机部署（Windows）：服务端就在你机器上，直接弹 mstsc ----
     var mode = c.launch_mode || "mstsc";
     var modeLabel = mode === "file"
       ? "打开 .rdp 文件（2026-04 更新后会弹「安全警告」）"
@@ -878,7 +1028,9 @@ function showConnInfo(ip, host) {
       : "";
     var authLine = "";
     var fixBtn = "";
-    if (mode !== "file") {
+    // 证书警告（Default.rdp authentication level）只对 Windows 本机 mstsc 有意义 ——
+    // 远端/Linux 部署下不显示，免得给一个「修了也没用」的按钮。
+    if (c.auth_check !== false && mode !== "file") {
       if (d.auth_zero) {
         authLine = '<div class="muted">证书警告：已关闭（Default.rdp authentication level=0）</div>';
       } else {
@@ -890,11 +1042,7 @@ function showConnInfo(ip, host) {
       }
     }
     var html =
-      '<div class="conn-list">' +
-        connRow("Tailscale IP :", c.ip || ip) +
-        connRow("Username     :", c.username || "") +
-        connRow("Password     :", c.password || "") +
-      "</div>" +
+      '<div class="conn-list">' + rows + "</div>" +
       '<div class="conn-note">' +
         '<div class="muted">唤起方式：' + esc(modeLabel) + "</div>" +
         authLine +
@@ -986,6 +1134,25 @@ function bind() {
   $("#btn-refresh2").addEventListener("click", function () { load(true); });
   $("#auto-refresh").addEventListener("change", setTimer);
   $("#only-online").addEventListener("change", renderMachines);
+
+  // 数据导出下拉菜单
+  var expMenu = $("#export-menu"), expList = $("#export-list"), expBtn = $("#btn-export");
+  if (expBtn) {
+    expBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      expList.hidden = !expList.hidden;
+    });
+    expList.addEventListener("click", function (e) {
+      var b = e.target.closest("button[data-export]");
+      if (!b) return;
+      expList.hidden = true;
+      exportData(b.dataset.export, b.dataset.format || "json");
+    });
+    document.addEventListener("click", function (e) {
+      if (!expMenu.contains(e.target)) expList.hidden = true;
+    });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") expList.hidden = true; });
+  }
   // 一键折叠 / 展开所有行的状态详情（机器多时不用一行行点）
   var foldAllBtn = $("#btn-fold-all");
   if (foldAllBtn) {
@@ -1168,6 +1335,9 @@ function bind() {
     var host = b.dataset.host || "";
     var launch = !!b.dataset.rdp;
     if (!ip) return;
+    // 远端部署：服务端是无头机，弹不出你能看到的窗口 —— 「一键登录」改成把 .rdp
+    // 直接下到**你本机**（一次点击 = 浏览器保存文件，双击即连）。
+    if (launch && DATA && DATA.config && DATA.config.rdp_local) { downloadRdp(ip, host); return; }
     b.disabled = true;
     api("/api/rdp", { method: "POST", body: JSON.stringify({ ip: ip, hostname: host, launch: launch }) })
       .then(function (res) {
@@ -1215,7 +1385,7 @@ function bind() {
       .then(function () { b.disabled = false; b.innerHTML = old; });
   });
 
-  // 连接信息弹窗：关闭 / 复制 / 弹窗内一键登录
+  // 连接信息弹窗：关闭 / 复制 / 下载 .rdp（远端）/ 弹窗内一键登录（本机）
   $("#modal").addEventListener("click", function (e) {
     if (e.target.closest("[data-modal-close]")) { closeModal(); return; }
     var cv = e.target.closest("[data-copy]");
@@ -1250,6 +1420,8 @@ function bind() {
       });
       return;
     }
+    var dl = e.target.closest("[data-rdp-download]");
+    if (dl) { downloadRdp(dl.dataset.rdpDownload, dl.dataset.host || ""); return; }
     var lb = e.target.closest("[data-conn-login]");
     if (lb) {
       lb.disabled = true;

@@ -4,8 +4,8 @@
 > 用它远程查看 / 操作 GitHub Actions 上跑的 Windows 云桌面机队。
 >
 > 工作台是**纯 Python 标准库、零第三方依赖**的本地 Web 仪表盘（`http.server` + 原生 JS）。
-> 本包已做 Linux 适配：远端文件改用 `smbclient`、一键登录改用 `xfreerdp`/`remmina`、
-> Tailscale 走 PATH 里的 `tailscale`。
+> 本包已做 Linux 适配：远端文件改用 `smbclient`、一键登录默认**交给本机浏览器**
+> （下载 `.rdp`，不在无头服务器上弹窗）、Tailscale 走 PATH 里的 `tailscale`。
 
 ---
 
@@ -16,7 +16,7 @@
 | 机器运行实况 | `tailscale status --json` | **tailscale**（且本机已加入同一 tailnet） |
 | 快照新鲜度 / 运行时长 / 归属账号 | SMB 读远端 `D:\cloudrdp-sys\_state`、`_snapshot` | **smbclient**（`apt install smbclient`） |
 | 一键备份 | 经 SMB 写 `_state\backup-request.txt`，机器保活循环取走执行 | **smbclient** + 机器跑新版 workflow |
-| 一键登录（远程桌面） | 生成 `.rdp` 并唤起客户端 | 可选：**xfreerdp** 或 **remmina** |
+| 一键登录（远程桌面） | 生成 `.rdp` 经浏览器下到**你本机**（不在服务器弹窗） | 无需额外软件（本机有远程桌面客户端即可） |
 | 账号管理 / 运行日志 / 池状态 | GitHub API（`api.github.com`）+ `raw.githubusercontent.com` | 出网 + 一个 GitHub **PAT** |
 
 - **Python**：3.8+（只用标准库）。
@@ -33,9 +33,9 @@
 ### 方式 A：一键脚本（推荐）
 
 ```bash
-# 1) 把整个 zip 解压到服务器任意目录
-unzip cloud-rdp-workbench-linux-v1.5.7.zip -d /tmp/cloud-rdp-src
-cd /tmp/cloud-rdp-src
+# 1) 把整个 zip 解压到服务器任意目录（zip 顶层就是 cloud-rdp/）
+unzip cloud-rdp-workbench-linux-v1.6.0.zip -d /tmp/cloud-rdp-src
+cd /tmp/cloud-rdp-src/cloud-rdp
 
 # 2) 跑安装脚本（默认装到 /opt/cloud-rdp，端口 8899）
 sudo GH_TOKEN=ghp_你的PAT bash deploy/install.sh
@@ -100,7 +100,8 @@ python3 workbench/server.py --no-open
 | `snapshot_stale_minutes` | `90` | 快照多久没更新算「陈旧」（黄标） |
 | `access_token` | `""` | **非空即开启鉴权**，见第 5 节 |
 | `rdp_user` / `rdp_password` | `a` / `a` | 机器上的登录账号（与 workflow 的 env 一致） |
-| `rdp_client_cmd` | `""` | Linux 唤起 RDP 的命令模板，留空自动探测 |
+| `rdp_launch_target` | `auto` | 一键登录由谁唤起客户端：`auto`=Windows 服务端→服务端弹 mstsc、其它→**交给本机**；`local`=一律交给本机；`server`=强制服务端唤起（见第 4 节） |
+| `rdp_client_cmd` | `""` | **仅 `rdp_launch_target=server` 时用**。Linux 唤起 RDP 的命令模板，留空自动探测（自动探测的模板**不含**明文密码） |
 
 ### GitHub Token 的自动发现顺序
 
@@ -126,15 +127,23 @@ sudo chmod 600 /etc/cloud-rdp/gh_token.txt
 | 能力 | Windows 工作台 | Linux 工作台 |
 |---|---|---|
 | 读远端文件 | 直接 `open("\\\\ip\\D$\\...")`（先 `net use` 预鉴权） | **`smbclient` 子进程**（密码走 `PASSWD` 环境变量，不落命令行） |
-| 一键登录 | `mstsc /v:`（配 `Default.rdp` 认证级别=0 → 零弹窗） | **`xfreerdp` / `remmina`**（`rdp_client_cmd` 可自定义） |
-| 证书警告修复 | `/api/rdp/default` 改注册表/Default.rdp | 不适用（Linux 客户端用 `/cert:ignore` 之类参数） |
+| 一键登录 | `mstsc /v:`（配 `Default.rdp` 认证级别=0 → 零弹窗） | **交给本机**：面板上「一键登录」变「下载 .rdp」，把文件下到你自己的电脑双击即连；另给一条本机命令 |
+| 证书警告修复 | `/api/rdp/default` 改注册表/Default.rdp | 不适用（远端下前端不显示这个按钮） |
 | Tailscale | `C:\Program Files\Tailscale\tailscale.exe` | PATH 里的 `tailscale` |
-| 生成 `.rdp` 文件 | 有（供 mstsc 用） | 无实际用途，仍可生成 |
+| 生成 `.rdp` 文件 | 有（供本机 mstsc 用） | 有，但**经浏览器下到你本机**（`/api/rdp/download`） |
 
-**一键登录在 Linux 上的前提**：这台服务器本身通常**不**直接弹远程桌面窗口（它是无头服务器）。
-所以更常见的用法是——用工作台**看状态 + 复制连接信息 + 一键备份**，真正连桌面时在你自己的
-Windows/Mac 电脑上用 `mstsc`/Microsoft Remote Desktop 连那个 Tailscale IP。
-若确实要在服务器上开窗口，需装桌面环境 + `xfreerdp`，并把 `rdp_client_cmd` 配好。
+**一键登录在 Linux 上的行为（v1.6.0 起）**：服务器通常**无头**，在它上面弹远程桌面窗口你根本看不到，
+所以默认（`rdp_launch_target: auto`）**不在服务端弹窗**，而是把连接交给**你本机的浏览器**：
+
+1. 面板「操作」列的按钮文案变成 **「下载 .rdp」** —— 点一下，浏览器把 `RDP-<机器>-<IP>.rdp`
+   存到**你自己的电脑**上（`.rdp` 用 UTF-16LE+BOM 编码，且已关掉证书警告），双击即用本机
+   `mstsc` / Microsoft Remote Desktop 连上。
+2. 点「查看信息」会额外给出**一条按你本地系统生成的可粘贴命令**（Windows `mstsc /v:`、
+   macOS `open "rdp://…"`、Linux `xfreerdp …`），点一下即复制。
+
+若这台服务器**确实带桌面环境**、要在它上面开窗口，则改成 `rdp_launch_target: "server"`，
+并装 `xfreerdp`/`remmina`（`rdp_client_cmd` 可自定义）。注意：自动探测的命令**不含明文密码**，
+密码由 xfreerdp 自己在终端里问 —— 免得密码出现在 `ps aux` 里。
 
 ---
 
@@ -236,8 +245,10 @@ sudo ufw deny 8899/tcp
 见第 6 节「前提」——机器上的 workflow 版本太旧。也可能是 SMB 写失败（看页脚错误）。
 
 **Q：一键登录在服务器上没窗口。**
-Linux 无头服务器本来就不会弹窗，属正常（见第 4 节）。用「查看信息」复制 IP/账号/密码，
-在你自己的电脑上连。
+这是**设计如此**（v1.6.0 起）：无头服务器弹不出你能看到的窗口，所以默认不在服务端弹，
+而是把连接交给**你本机** —— 面板按钮已变成「下载 .rdp」，点一下文件就存到你自己电脑上，
+双击即连；「查看信息」里还有一条按你本地系统生成的可粘贴命令。详见第 4 节。
+（若服务器真带桌面、就要它自己弹窗：`rdp_launch_target: "server"` + 装 xfreerdp/remmina。）
 
 **Q：`token_present: false`，账号/日志面板降级。**
 没找到 PAT。按第 3 节配置 `token_file` 或 `GH_TOKEN` 环境变量后重启服务。

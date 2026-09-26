@@ -31,12 +31,16 @@
   },
   "run_limit": 25,
   "cache_seconds": 20,
+  "_overview_seconds": "整包快照的新鲜期（秒）：超过就后台重建。响应永远即时，数据最多落后这么久。",
+  "overview_seconds": 20,
 
   "tailscale_exe": "C:\\Program Files\\Tailscale\\tailscale.exe",
   "machine_prefix": "github-rdp-server",
   "smb_share": "D$",
   "smb_base": "D:\\cloudrdp-sys",
   "snapshot_stale_minutes": 90,
+  "_machine_detail_seconds": "单台机器详情（角色/快照/恢复状态…）缓存秒数：省掉每轮刷新对每台机器 6~9 次 SMB 往返。",
+  "machine_detail_seconds": 30,
 
   "rdp_user": "a",
   "rdp_password": "a",
@@ -45,5 +49,7 @@
   "rdp_height": 1080,
   "rdp_launch": true,
   "rdp_store_cred": true,
-  "rdp_launch_mode": "mstsc"
+  "rdp_launch_mode": "mstsc",
+  "_rdp_launch_target_说明": "一键登录由谁唤起客户端：auto=Windows 服务端→服务端弹 mstsc、其它→交给本机（浏览器下载 .rdp / 复制命令）；local=一律交给本机；server=强制服务端唤起。",
+  "rdp_launch_target": "auto"
 }

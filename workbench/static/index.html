@@ -26,6 +26,25 @@
         <span>自动刷新</span>
       </label>
       <span class="muted" id="last-updated">—</span>
+      <div class="menu" id="export-menu">
+        <button class="btn btn-ghost" id="btn-export"
+                data-tip="把当前面板数据导出成文件（JSON / CSV，CSV 带 UTF-8 BOM，Excel 直接打开不乱码）。导出的是「屏幕上这份」快照，秒回">导出 ▾</button>
+        <div class="menu-list" id="export-list" hidden>
+          <div class="menu-hd">全部数据</div>
+          <button data-export="all" data-format="json">完整快照（JSON）</button>
+          <button data-export="all" data-format="csv">打包 ZIP（4 份 CSV + JSON）</button>
+          <div class="menu-sep"></div>
+          <div class="menu-hd">单项导出（CSV）</div>
+          <button data-export="runs" data-format="csv">定时计划运行日志</button>
+          <button data-export="machines" data-format="csv">机器运行实况</button>
+          <button data-export="accounts" data-format="csv">GitHub 账号清单</button>
+          <button data-export="pool" data-format="csv">账号池状态</button>
+          <div class="menu-sep"></div>
+          <div class="menu-hd">单项导出（JSON）</div>
+          <button data-export="runs" data-format="json">运行日志</button>
+          <button data-export="machines" data-format="json">机器列表</button>
+        </div>
+      </div>
       <button class="btn btn-primary" id="btn-refresh">刷新</button>
     </div>
   </header>
@@ -107,7 +126,7 @@
               <th data-tip="开机时从 139 云盘拉取「数据」与「快照」的结果（机器上 _state\restore-status.json）。OK=已还原；EMPTY=139 上确无数据（正常终态）；TRANSIENT=网络抖动/后台拉取中，保活循环会自动重试；FAILED/AUTH=失败需人工处理。上方小字=数据，下方=快照">恢复</th>
               <th data-tip="机器上 D:\cloudrdp-sys\_snapshot 快照的新鲜度：多久之前 / 多少文件。点「一键备份」可立即同步到 139 云盘并刷新快照">快照</th>
               <th data-tip="离线机器最后一次出现在 Tailscale 的时间">最后在线</th>
-              <th class="right" data-tip="对在线机器：一键登录远程桌面 / 查看连接信息">操作</th>
+              <th class="right" data-tip="对在线机器：一键登录远程桌面 / 下载 .rdp / 查看连接信息（远端部署时自动改为下载 .rdp 到你本机）">操作</th>
             </tr>
           </thead>
           <tbody></tbody>

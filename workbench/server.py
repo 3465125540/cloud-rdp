@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
+import io
 import json
 import os
 import re
@@ -42,11 +44,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.7"
+VERSION = "1.6.0"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -102,6 +105,8 @@ DEFAULT_CONFIG = {
     },
     "run_limit": 25,
     "cache_seconds": 20,
+    # /api/overview 整包快照的「新鲜期」（秒）：超过就后台重建 —— 响应永远即时，数据最多落后这么久。
+    "overview_seconds": 20,
 
     # ---- 机器实况 ----
     # 平台默认：Windows 走官方安装路径；Linux 用 PATH 里的 tailscale（找不到会自动 which）
@@ -116,6 +121,9 @@ DEFAULT_CONFIG = {
     "smb_mode": "auto",
     "smbclient_exe": "smbclient",
     "smb_timeout": 25,
+    # 单台机器详情（池角色/快照/恢复状态…）的缓存秒数：一次 run 内基本不变，
+    # 缓存后免掉每轮刷新对每台机器 6~9 次 SMB 往返（冷启动最大的一块开销）。
+    "machine_detail_seconds": 30,
 
     # ---- 一键备份（写请求文件 → 机器保活循环取走执行）----
     "backup_request_file": "_state/backup-request.txt",
@@ -144,7 +152,18 @@ DEFAULT_CONFIG = {
     # 可用占位符：{ip} {user} {password} {file}。例：
     #   "xfreerdp /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"
     #   "remmina -c {file}"
+    # ⚠️ 只有在 rdp_launch_target=server 时才会用到；自动探测的模板**不含 {password}**
+    #    （明文密码进命令行会被 ps 看到），要用就自己写进模板，风险自负。
     "rdp_client_cmd": "",
+    # ---- 一键登录：谁来「唤起」客户端 ----
+    # 工作台部署在远端服务器（尤其无头 Linux）时，服务端开不出你能看到的窗口，
+    # 也不该把 RDP 明文密码写进命令行（ps 可见）。所以默认按平台分工：
+    #   "auto"   = Windows 服务端 → 服务端唤起（mstsc，老行为）；
+    #              其它（Linux/远端）→ 交给**本机浏览器**：下载 .rdp / 复制本机命令，
+    #              服务端不再尝试弹窗，只负责生成文本。
+    #   "local"  = 一律交给本机（工作台部署在远端、你要在自己电脑上连）。
+    #   "server" = 强制服务端唤起（工作台就跑在你本机、且本机有图形界面时才合理）。
+    "rdp_launch_target": "auto",
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -196,6 +215,16 @@ def pool_config_path():
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
 
+# /api/overview 的「整包快照」状态（陈旧可用 + 后台重建，见 overview_snapshot）。
+#   data       —— 最近一次构建好的完整响应
+#   at         —— 它的构建时刻（time.time()）
+#   dirty      —— 被 clear_cache() 标记作废（触发 workflow / 改账号后）→ 视为陈旧、需重建
+#   building   —— 正在跑的构建数（>0 = 已有后台重建在跑；被动重建据此不叠）
+#   seq/store_seq —— 单调序号：只有「更晚开始的那次构建」才允许覆盖快照，
+#                    免得一个慢的后台构建盖掉用户刚点「刷新」拿到的结果
+_OV = {"data": None, "at": 0.0, "dirty": False, "building": 0, "seq": 0, "store_seq": 0}
+_OV_LOCK = threading.Lock()
+
 
 def cached(key, ttl, fn):
     now = time.time()
@@ -212,6 +241,10 @@ def cached(key, ttl, fn):
 def clear_cache():
     with _CACHE_LOCK:
         _CACHE.clear()
+    # 快照也一并标记作废 → 下次 /api/overview 会重建。
+    # 这样「触发 workflow / 改账号 / 下发备份」后调的 clear_cache() 才真能让面板拿到新数据。
+    with _OV_LOCK:
+        _OV["dirty"] = True
 
 
 # ==================================================================== Token
@@ -1071,29 +1104,77 @@ def parse_snapshot_manifest(man):
     }
 
 
+def _empty_machine_detail():
+    """机器详情的空骨架（离线 / 未上线 / 读不到时的默认值）。"""
+    return {"role": "", "role_source": "", "snapshot": None, "error": "",
+            "started_utc": "", "uptime_seconds": None, "uptime_human": "",
+            "pool_owner": "", "pool_id": "", "assigned_role": "", "owner_source": "",
+            "restore": {"data": {}, "snapshot": {}, "source": ""}}
+
+
 def machine_detail(ip, online):
-    """读单台机器的池角色 + 快照新鲜度 + 运行时长 + 归属账号。任何一项读不到就留空，不抛。"""
-    detail = {"role": "", "role_source": "", "snapshot": None, "error": "",
-              "started_utc": "", "uptime_seconds": None, "uptime_human": "",
-              "pool_owner": "", "pool_id": "", "assigned_role": "", "owner_source": "",
-              "restore": {"data": {}, "snapshot": {}, "source": ""}}
+    """读单台机器的池角色 + 快照新鲜度 + 运行时长 + 归属账号。任何一项读不到就留空，不抛。
+
+    结果按 IP 缓存（`machine_detail_seconds`，默认 30）：这些远端文件（角色 / 快照 /
+    恢复状态…）在「一次 run 内」基本不变，而读全一台要走 6~9 次 SMB 往返 —— 这是冷启动 /
+    每次刷新里最大的一块开销。缓存后「首次慢、之后几乎零成本」；点「刷新」（?refresh=1）
+    会 clear_cache() 把这份一起清掉，所以真要看最新时仍会实读。
+    """
     if OFFLINE or not ip or not online:
-        return detail
-    try:
-        role = (read_remote_text(ip, "_state/pool-role.txt") or "").strip().lower()
-        if role:
-            detail["role"] = role
-            detail["role_source"] = "本机 _state/pool-role.txt"
-    except Exception as e:
-        detail["error"] = "读角色失败：%s" % e
-    try:
-        man = json.loads(read_remote_text(ip, "_snapshot/manifest.json"))
-        detail["snapshot"] = parse_snapshot_manifest(man) or {"ok": False}
-    except Exception:
-        detail["snapshot"] = {"ok": False}
+        return _empty_machine_detail()
+    ttl = int(CONFIG.get("machine_detail_seconds") or 30)
+    return cached("mdetail:%s" % ip, ttl, lambda: _machine_detail_reads(ip))
+
+
+def _machine_detail_reads(ip):
+    """真正去远端读一台机器的详情（调用方须已确认在线）。"""
+    detail = _empty_machine_detail()
+
+    # 这些远端文件互不依赖 —— **并行**读，别一台机器串行等 6~9 次 SMB 往返。
+    def _role():
+        return (read_remote_text(ip, "_state/pool-role.txt") or "").strip().lower()
+
+    def _manifest():
+        return (parse_snapshot_manifest(json.loads(read_remote_text(ip, "_snapshot/manifest.json")))
+                or {"ok": False})
+
+    def _start():
+        return (read_remote_text(ip, "_state/job-start.txt") or "").strip()
+
+    def _poolinfo():
+        return parse_pool_info(read_remote_text(ip, "_state/pool-info.txt"))
+
+    jobs = {
+        "role": _role,
+        "manifest": _manifest,
+        "start": _start,
+        "poolinfo": _poolinfo,
+        "backup": lambda: read_backup_request(ip),
+        "restore": lambda: read_restore_status(ip),
+    }
+    res = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as ex:
+        futs = {ex.submit(fn): k for k, fn in jobs.items()}
+        for fut in as_completed(futs):
+            k = futs[fut]
+            try:
+                res[k] = fut.result()
+            except Exception as e:
+                res[k] = e
+
+    # 池角色
+    r = res.get("role")
+    if isinstance(r, str) and r:
+        detail["role"] = r
+        detail["role_source"] = "本机 _state/pool-role.txt"
+    elif isinstance(r, Exception):
+        detail["error"] = "读角色失败：%s" % r
+    # 快照清单
+    detail["snapshot"] = (res.get("manifest") if isinstance(res.get("manifest"), dict)
+                          else {"ok": False})
     # 运行时长：workflow 第 0a 步写入的 _state\job-start.txt（ISO-8601 UTC）→ now - 起点
-    try:
-        raw = (read_remote_text(ip, "_state/job-start.txt") or "").strip()
+    raw = res.get("start")
+    if isinstance(raw, str) and raw:
         dt = parse_iso(raw)
         if dt:
             if dt.tzinfo is None:
@@ -1103,18 +1184,14 @@ def machine_detail(ip, online):
                 detail["started_utc"] = raw
                 detail["uptime_seconds"] = int(up)
                 detail["uptime_human"] = human_duration(up)
-    except Exception:
-        pass
     # 归属账号（来源 ①）：池模式机器写的 _state\pool-info.txt 里的 pool_owner
-    try:
-        info = parse_pool_info(read_remote_text(ip, "_state/pool-info.txt"))
+    info = res.get("poolinfo")
+    if isinstance(info, dict):
         detail["pool_owner"] = info.get("pool_owner", "")
         detail["pool_id"] = info.get("pool_id", "")
         detail["assigned_role"] = info.get("assigned_role", "")
         if detail["pool_owner"]:
             detail["owner_source"] = "_state/pool-info.txt"
-    except Exception:
-        pass
     # 归属账号（来源 ②，兜底）：单机/老机器没有 pool-info.txt，
     #   但 runner 工作区 D:\a\<repo>\<repo>\.git\config 的 origin owner 就是账号。
     if not detail["pool_owner"]:
@@ -1136,9 +1213,11 @@ def machine_detail(ip, online):
                 detail["owner_source"] = "runner 工作区 .git/config"
                 break
     # 一键备份：机器上是否还挂着未处理的备份请求（保活循环取走后会删掉）
-    detail["backup_request"] = read_backup_request(ip)
+    detail["backup_request"] = (res.get("backup") if isinstance(res.get("backup"), dict)
+                                else {"pending": False, "requested_at": "", "requested_by": ""})
     # 数据/快照恢复状态（acc-1 事故后新增：让「没拉取到数据」一眼可见）
-    detail["restore"] = read_restore_status(ip)
+    detail["restore"] = (res.get("restore") if isinstance(res.get("restore"), dict)
+                         else {"data": {}, "snapshot": {}, "source": ""})
     return detail
 
 
@@ -1708,16 +1787,29 @@ def get_runs(limit=None, workflow_key=None, include_accounts=False):
         repo = CONFIG.get("repo") or ""
         out = {"ok": True, "error": "", "keepalive": [], "coordinator": [], "accounts": []}
         targets = (workflow_key,) if workflow_key else ("keepalive", "coordinator")
-        for key in targets:
-            wf = (CONFIG.get("workflows") or {}).get(key)
-            if not wf:
-                continue
-            try:
-                d = gh_api("/repos/%s/actions/workflows/%s/runs" % (repo, wf),
+        wfs = [(k, (CONFIG.get("workflows") or {}).get(k)) for k in targets]
+        wfs = [(k, w) for (k, w) in wfs if w]
+        # 两个 workflow **并行**拉（以前顺序拉 = 2 × 一次 API 往返；hub 的 keepalive+coordinator
+        # 实测各 1.9~2.3s，串行就白等一倍）。
+        if wfs:
+            def _one(kw):
+                k, w = kw
+                d = gh_api("/repos/%s/actions/workflows/%s/runs" % (repo, w),
                            params={"per_page": min(n, 100)})
-                out[key] = [_shape_run(r) for r in (d.get("workflow_runs") or [])]
-            except Exception as e:
-                out["error"] = "%s: %s" % (key, e)
+                return k, [_shape_run(r) for r in (d.get("workflow_runs") or [])]
+
+            errs = []
+            with ThreadPoolExecutor(max_workers=min(4, len(wfs))) as ex:
+                futs = {ex.submit(_one, kw): kw[0] for kw in wfs}
+                for fut in as_completed(futs):
+                    k = futs[fut]
+                    try:
+                        k2, rows = fut.result()
+                        out[k2] = rows
+                    except Exception as e:
+                        errs.append("%s: %s" % (k, e))
+            if errs:
+                out["error"] = "; ".join(errs)
                 out["ok"] = False
         if include_accounts:
             out["accounts"] = _account_run_groups(repo, workflow_key, n, out)
@@ -1771,6 +1863,28 @@ def rdp_dir():
         sys.stderr.write("[warn] 建 .rdp 目录失败 %s: %s，改用临时目录\n" % (d, e))
         d = tempfile.gettempdir()
     return d
+
+
+def rdp_launch_on_server():
+    """一键登录是否由**服务端**唤起 RDP 客户端。
+
+    工作台部署在远端服务器时，服务端通常是无头 Linux —— 在那儿开窗口用户根本看不到，
+    还可能把明文密码写进命令行（`ps` 可见）。所以默认「谁在跑工作台」决定分工：
+
+      * rdp_launch_target = "auto"（默认）
+          Windows 服务端 → 服务端唤起（mstsc，老行为，工作台一般就在你本机）
+          其它           → 交给**本机浏览器**（下载 .rdp / 复制本机命令）
+      * "server" → 强制服务端唤起（工作台就在本机、且本机有图形界面时才合理）
+      * "local"  → 强制交给本机（部署在远端、要在自己电脑上连）
+
+    判定结果同时驱动：make_rdp 是否落盘后弹窗、conn-info/overview 给前端的 local_target。
+    """
+    t = str(CONFIG.get("rdp_launch_target") or "auto").strip().lower()
+    if t == "server":
+        return True
+    if t == "local":
+        return False
+    return IS_WINDOWS          # auto
 
 
 def build_rdp_text(ip, user):
@@ -2012,11 +2126,17 @@ def ensure_default_rdp_auth_level():
 
 
 def _launch_rdp_linux(ip, rdp_path, mode):
-    """Linux：按配置的客户端命令唤起（xfreerdp / remmina 等）。"""
+    """Linux：按配置的客户端命令唤起（xfreerdp / remmina 等）。
+
+    只在 rdp_launch_target=server 时才会走到这儿（远端部署默认交给本机，不弹窗）。
+    ⚠️ 自动探测的模板**故意不带 /p:{password}** —— 明文密码进命令行会被 `ps aux` 看到；
+       xfreerdp 缺 /p: 会自己在终端里问密码。确实要免手输，就在 rdp_client_cmd 里
+       显式写 {password}（那是你自己的选择，风险自负）。
+    """
     tmpl = str(CONFIG.get("rdp_client_cmd") or "").strip()
-    if not tmpl:   # 自动探测常见客户端
-        for exe, t in (("xfreerdp", "xfreerdp /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"),
-                       ("xfreerdp3", "xfreerdp3 /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"),
+    if not tmpl:   # 自动探测常见客户端（不含密码）
+        for exe, t in (("xfreerdp", "xfreerdp /v:{ip} /u:{user} /cert:ignore /dynamic-resolution"),
+                       ("xfreerdp3", "xfreerdp3 /v:{ip} /u:{user} /cert:ignore /dynamic-resolution"),
                        ("remmina", "remmina -c {file}")):
             if shutil.which(exe):
                 tmpl = t
@@ -2041,8 +2161,14 @@ def launch_rdp(ip, rdp_path):
     **只有打开 .rdp 文件**才会弹「远程桌面连接安全警告 / 资源勾选」阻断框，
     手动连接（命令行 /v:）不受影响；再把 Default.rdp 认证级别置 0，证书警告也没了。
     Linux 上走 `rdp_client_cmd` / 自动探测 xfreerdp。
+
+    **远端部署不在这里弹窗**：服务端是无头机，弹了你也看不到。这时返回 mode="local"，
+    由前端把 .rdp 下到你本机 / 复制一条本机命令（见 api_rdp_download / localRdpCmd）。
     """
     mode = str(CONFIG.get("rdp_launch_mode") or "mstsc").lower()
+    if not rdp_launch_on_server():
+        return (False, "", "local",
+                "工作台部署在远端服务器：不在服务端弹窗，请用浏览器下载 .rdp 或复制本机命令")
     if not IS_WINDOWS:
         return _launch_rdp_linux(ip, rdp_path, mode)
     if mode == "file":
@@ -2076,13 +2202,19 @@ def store_credential(ip, user, password):
 
 
 def make_rdp(ip, hostname="", launch=None, store_cred=None):
-    """生成 .rdp（可选预存凭据 / 唤起 mstsc）。"""
+    """生成 .rdp（可选预存凭据 / 唤起 mstsc）。
+
+    工作台部署在远端服务器时（rdp_launch_target=auto 且非 Windows）**不在服务端弹窗**：
+    只把 .rdp 落到服务端磁盘（留档），并把 `local_target=True` + `download_url` 回给前端，
+    由浏览器把文件下到**你本机**、或复制一条本机命令 —— 这才是「远端部署」下真正能连上的路径。
+    """
     ip = (ip or "").strip()
     if not re.match(r"^[0-9A-Za-z_.\-]+$", ip):
         return {"ok": False, "error": "IP 非法：%s" % ip}
     user = str(CONFIG.get("rdp_user") or "a")
     launch = CONFIG.get("rdp_launch", True) if launch is None else bool(launch)
     store_cred = CONFIG.get("rdp_store_cred", True) if store_cred is None else bool(store_cred)
+    on_server = rdp_launch_on_server()
 
     safe = re.sub(r"[^0-9A-Za-z_.\-]", "", hostname or ip) or ip
     path = os.path.join(rdp_dir(), "RDP-%s-%s.rdp" % (safe, ip))
@@ -2092,17 +2224,24 @@ def make_rdp(ip, hostname="", launch=None, store_cred=None):
     except Exception as e:
         return {"ok": False, "error": "写 .rdp 失败：%s" % e}
 
+    # 凭据预存（cmdkey）只在服务端唤起时才有意义；远端部署预存到服务器上也用不上。
     cred = {"ok": False, "error": "未预存"}
-    if store_cred:
+    if store_cred and on_server:
         cred = store_credential(ip, user, str(CONFIG.get("rdp_password") or "a"))
 
     launched = False
     launch_error = ""
     launch_mode = str(CONFIG.get("rdp_launch_mode") or "mstsc").lower()
     launch_note = ""
-    if launch:
+    if launch and on_server:
         launched, launch_error, launch_mode, launch_note = launch_rdp(ip, path)
+    elif launch:
+        launch_mode = "local"
+        launch_note = "工作台部署在远端服务器：不在服务端弹窗，请用浏览器下载 .rdp 或复制本机命令"
     return {"ok": True, "path": path, "ip": ip, "user": user,
+            "local_target": not on_server,
+            "download_url": "/api/rdp/download?ip=%s&host=%s" % (
+                urllib.parse.quote(ip), urllib.parse.quote(safe)),
             "cred_stored": cred.get("ok"), "cred_error": cred.get("error") or "",
             "launched": launched, "launch_error": launch_error,
             "launch_mode": launch_mode, "launch_note": launch_note}
@@ -2174,6 +2313,9 @@ def build_overview():
             "target_machines": (accounts.get("target_machines")
                                 if accounts.get("ok") else None),
             "pool_config_path": pool_cfg.get("path"),
+            # 远端部署时前端把「一键登录」改成「下载 .rdp」（服务端弹不出你能看到的窗口）
+            "rdp_local": not rdp_launch_on_server(),
+            "rdp_launch_target": str(CONFIG.get("rdp_launch_target") or "auto"),
         },
         "stats": {
             "machines_online": len(online),
@@ -2195,6 +2337,148 @@ def build_overview():
     }
 
 
+# ------------------------------------------------------------ overview 快照（陈旧可用 + 后台重建）
+# 背景：一次 build_overview 冷启动要 13~49 秒（各账号 run + 每台机器 6~9 次 SMB 往返），
+# 而面板默认 30 秒自动刷新一次、子缓存 TTL 只有 20 秒 —— 于是「每一次刷新都等于重跑一整轮冷构建」，
+# 面板永远在等。这里给整包响应加一层快照：
+#   * 有快照且新鲜      → 直接返回（0 成本）
+#   * 有快照但已过期    → **立刻**返回旧快照，并唤醒一次后台重建（下一次轮询就是新的）
+#   * 还没有快照（首屏）→ 等后台那次建好（服务启动时已预热，通常不用等）
+#   * 点「刷新」(?refresh=1) → 清缓存 + 后台重建；同样**立刻**返回旧快照（前端提示「后台刷新中…」，
+#     稍后自动取到新值）—— 不让按钮把页面冻住十几秒。
+# 代价：任何一次响应看到的数据最多落后一轮（≈ overview_seconds），对监控面板够用。
+def _overview_ttl():
+    return float(CONFIG.get("overview_seconds") or CONFIG.get("cache_seconds") or 20)
+
+
+def _overview_decorate(d, age, stale):
+    """给快照加两个字段（不改原对象）：stale / age_seconds，前端据此提示「后台刷新中…」。"""
+    out = dict(d)
+    out["stale"] = bool(stale)
+    out["age_seconds"] = int(max(0.0, age))
+    return out
+
+
+def _overview_build(force_clear):
+    """构建一次完整快照并写入（仅在 seq 不落后时）。返回 (data, at)。"""
+    with _OV_LOCK:
+        _OV["seq"] += 1
+        my = _OV["seq"]
+    if force_clear:
+        clear_cache()
+        resolve_token(force=True)
+    d = build_overview()
+    with _OV_LOCK:
+        # 只有「不更早开始的那次构建」才允许覆盖 —— 免得慢的后台构建盖掉刚点刷新的结果。
+        if my >= _OV["store_seq"]:
+            _OV["data"] = d
+            _OV["at"] = time.time()
+            _OV["store_seq"] = my
+            _OV["dirty"] = False
+        return _OV["data"], _OV["at"]
+
+
+def _overview_kick(force_clear=False):
+    """唤醒一次后台重建。被动重建：已在跑就跳过（避免每个请求都叠一个）；
+    强制重建（点刷新）：即便有别的构建在跑也照跑（seq 保证「后来者覆盖」）。"""
+    with _OV_LOCK:
+        if _OV["building"] and not force_clear:
+            return
+        _OV["building"] += 1
+
+    def run():
+        try:
+            _overview_build(force_clear=force_clear)
+        except Exception:
+            pass
+        finally:
+            with _OV_LOCK:
+                _OV["building"] = max(0, _OV["building"] - 1)
+    threading.Thread(target=run, name="overview-rebuild", daemon=True).start()
+
+
+def _overview_skeleton():
+    """首屏骨架：还没有快照、后台正在构建时先返回它 —— 页面能**立刻**渲染（前端轮询取真数据），
+    而不是让浏览器空转十几秒。字段都按「空但合法」给，前端 render() 全套 `|| {}` / `|| []` 兜得住。"""
+    return {
+        "ok": True,
+        "version": VERSION,
+        "started_at": STARTED_AT,
+        "generated_at": now_iso(),
+        "warming": True,
+        "stale": True,
+        "age_seconds": 0,
+        "config": {
+            "repo": CONFIG.get("repo"),
+            "ref": CONFIG.get("ref"),
+            "token_present": bool(resolve_token()),
+            "proxy": _proxy_url() or "直连",
+            "auto_refresh_seconds": CONFIG.get("auto_refresh_seconds"),
+            "machine_prefix": CONFIG.get("machine_prefix"),
+            "target_machines": None,
+            "pool_config_path": pool_config_path(),
+        },
+        "stats": {},
+        "accounts": {"ok": True, "accounts": [], "target_machines": None, "error": ""},
+        "machines": [],
+        "pool_machines": [],
+        "pool_state": {"ok": True, "state": {}, "error": ""},
+        "runs": {"ok": True, "keepalive": [], "coordinator": [], "accounts": [], "error": ""},
+        "errors": [],
+    }
+
+
+def _overview_first(wait=2.0):
+    """首屏还没有快照：唤醒后台构建，最多等 wait 秒 —— 等到就给真数据，否则先给骨架（前端会轮询）。"""
+    _overview_kick()
+    deadline = time.time() + max(0.0, wait)
+    while time.time() < deadline:
+        with _OV_LOCK:
+            if _OV["data"] is not None:
+                return _overview_decorate(_OV["data"], time.time() - _OV["at"], False)
+            if not _OV["building"]:
+                break
+        time.sleep(0.05)
+    with _OV_LOCK:
+        if _OV["data"] is not None:
+            return _overview_decorate(_OV["data"], time.time() - _OV["at"], False)
+    return _overview_skeleton()
+
+
+def overview_snapshot(force=False):
+    """/api/overview 的取数入口（陈旧可用 + 后台重建）。详见上方注释。"""
+    if force:
+        # 用户点「刷新」：先清缓存（让随后任何一次重建都拿到最新），再后台重建；
+        # 立刻返回当前快照（标记 stale）—— 不阻塞页面。前端会稍后自动取到新值。
+        clear_cache()
+        resolve_token(force=True)
+        with _OV_LOCK:
+            data, at = _OV["data"], _OV["at"]
+        if data is None:
+            return _overview_first()
+        _overview_kick(force_clear=True)
+        return _overview_decorate(data, time.time() - at, True)
+
+    ttl = _overview_ttl()
+    with _OV_LOCK:
+        data, at, dirty = _OV["data"], _OV["at"], _OV["dirty"]
+    if data is None:
+        return _overview_first()
+    age = time.time() - at
+    if dirty or age >= ttl:
+        _overview_kick()
+        return _overview_decorate(data, age, True)
+    return _overview_decorate(data, age, False)
+
+
+def overview_warmup():
+    """启动时预热一份快照 —— 等浏览器打开时 /api/overview 基本秒回，而不是干等一整轮冷构建。"""
+    try:
+        _overview_kick()
+    except Exception:
+        pass
+
+
 # ==================================================================== HTTP 服务
 MIME = {".html": "text/html; charset=utf-8",
         ".js": "application/javascript; charset=utf-8",
@@ -2214,13 +2498,16 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 
     # ---------- 工具 ----------
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8", headers=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        # 额外响应头（如数据导出的 Content-Disposition: attachment）
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         ck = getattr(self, "_set_cookie", "")
         if ck:
             self.send_header("Set-Cookie", ck)
@@ -2328,10 +2615,12 @@ def api_health(h, params):
 
 
 def api_overview(h, params):
-    if "refresh" in params:
-        clear_cache()
-        resolve_token(force=True)
-    h._json(200, build_overview())
+    """统一走快照入口（陈旧可用 + 后台重建）—— 自动刷新不再每次都干等一整轮冷构建。
+
+    ?refresh=1（用户点「刷新」）→ 清缓存 + 唤醒一次**后台**重建，同样**立刻**返回当前快照
+    （标记 stale，前端提示「后台刷新中…」并稍后自动取到新值）—— 不让按钮把页面冻住十几秒。
+    """
+    h._json(200, overview_snapshot(force=("refresh" in params)))
 
 
 def api_accounts(h, params):
@@ -3021,9 +3310,31 @@ def api_rdp_preview(h, params):
     h._send(200, build_rdp_text(ip, user), "text/plain; charset=utf-8")
 
 
+def api_rdp_download(h, params):
+    """GET /api/rdp/download?ip=&host= —— 把 .rdp 作为附件下给**浏览器所在的本机**。
+
+    这是「工作台部署在远端服务器」场景下一键登录的正解：服务端只负责把连接参数
+    渲染成 .rdp 文本，由浏览器把它保存到**用户的本地电脑**，双击即用本机 mstsc 连接
+    —— 而不是在无头服务器上开一个谁也看不到的窗口。
+
+    编码用 **UTF-16LE + BOM**：mstsc 自己导出的 .rdp 就是这个编码，非 ASCII 用户名
+    在 ANSI 下会乱码；带 BOM 的 UTF-16 是它认得最稳的形式。
+    """
+    ip = (params.get("ip") or [""])[0].strip()
+    host = (params.get("host") or [""])[0].strip()
+    if not re.match(r"^[0-9A-Za-z_.\-]+$", ip):
+        return h._json(400, {"ok": False, "error": "IP 非法：%s" % ip})
+    safe = re.sub(r"[^0-9A-Za-z_.\-]", "", host or ip) or ip
+    fname = "RDP-%s-%s.rdp" % (safe, ip)
+    body = b"\xff\xfe" + build_rdp_text(ip, str(CONFIG.get("rdp_user") or "a")).encode("utf-16-le")
+    h._send(200, body, "application/x-rdp",
+            {"Content-Disposition": 'attachment; filename="%s"' % fname})
+
+
 def api_conn_info(h, params):
     """连接信息（Tailscale IP / 用户名 / 密码）。仅供本机仪表盘「查看信息」用。"""
     ip = (params.get("ip") or [""])[0]
+    on_server = rdp_launch_on_server()
     h._json(200, {
         "ok": True,
         "ip": ip,
@@ -3034,6 +3345,13 @@ def api_conn_info(h, params):
         "rdp_height": int(CONFIG.get("rdp_height") or 1080),
         "launch_mode": str(CONFIG.get("rdp_launch_mode") or "mstsc"),
         "default_rdp": default_rdp_status(),
+        # 远端部署 → 前端改走「下载 .rdp / 复制本机命令」；本机部署 → 老行为（服务端弹窗）
+        "is_windows": IS_WINDOWS,
+        "local_target": not on_server,
+        "launch_target": str(CONFIG.get("rdp_launch_target") or "auto"),
+        # 证书警告（Default.rdp authentication level）只对 Windows 本机 mstsc 有意义
+        "auth_check": bool(IS_WINDOWS and on_server),
+        "download_url": "/api/rdp/download?ip=%s" % urllib.parse.quote(ip or ""),
     })
 
 
@@ -3056,6 +3374,234 @@ def api_backup(h, params):
     return h._json(200 if res.get("ok") else 400, res)
 
 
+# ==================================================================== 数据导出
+# 「后端数据导出」：把面板上的数据原样导出成文件，供备份 / 分析 / 留档。
+#   GET /api/export?what=<数据集>&format=<json|csv>
+#     what   : all(默认) | overview | runs | machines | accounts | pool
+#     format : json(默认) | csv
+#   * what=all/overview + format=json → 一份完整 JSON（与面板同源，含 export_meta）
+#   * what=all/overview + format=csv  → 一个 zip（accounts/machines/runs/pool 各一份 CSV + overview.json）
+#   * 其余数据集 + csv/json           → 单个文件
+# 设计取舍：
+#   * 取数复用面板快照 —— 导出的就是「屏幕上那份」，且秒回；冷启动还没快照时，
+#     等/建一次完整快照（见 _export_source），保证导出的是真数据而不是空骨架。
+#   * CSV 一律加 UTF-8 BOM —— 不加的话 Excel 打开中文表头会乱码（最常见的「导出后打不开」）。
+#   * 文件名带时间戳，多次导出不互相覆盖。
+EXPORT_WHAT = ("all", "overview", "runs", "machines", "accounts", "pool")
+
+_RUN_STATE_ZH = {"running": "运行中", "dispatched": "已派发·排队中",
+                 "ended": "已结束", "unknown": "未知"}
+
+
+def _export_source(wait=300.0):
+    """导出取数：优先复用面板快照（与屏幕一致、秒回）。
+
+    还没有快照（冷启动）时：
+      * 已有后台构建在跑 → **等它建好**（绝不重复劳动；冷构建本就慢，等它比再建一次快）；
+      * 没有在跑的构建   → 自己同步建一次并**存入快照**（顺带让面板也受益）。
+    这样导出永远拿到真数据，且最多只付一次冷构建的代价。
+    """
+    with _OV_LOCK:
+        data, building = _OV["data"], _OV["building"]
+    if data is not None and data.get("stats"):
+        return data
+    if not building:
+        data, _at = _overview_build(force_clear=False)
+        return data
+    deadline = time.time() + max(0.0, wait)
+    while time.time() < deadline:
+        time.sleep(0.15)
+        with _OV_LOCK:
+            data, building = _OV["data"], _OV["building"]
+        if data is not None and data.get("stats"):
+            return data
+        if not building:      # 那次构建结束了（可能失败），自己上
+            break
+    data, _at = _overview_build(force_clear=False)
+    return data
+
+
+def _csv_text(header, rows):
+    """二维表 → CSV 文本（带 UTF-8 BOM，Excel 直接打开不乱码）。"""
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")   # Excel 对 \r\n 最友好
+    w.writerow(header)
+    for r in rows:
+        w.writerow(["" if v is None else v for v in r])
+    return "\ufeff" + buf.getvalue()
+
+
+def _yn(v):
+    return "是" if v else "否"
+
+
+def _restore_status(m, scope):
+    try:
+        return str(((m.get("restore") or {}).get(scope) or {}).get("status") or "")
+    except Exception:
+        return ""
+
+
+def _runs_rows(ov):
+    """运行日志 → 行（hub 的 keepalive/coordinator + 各账号 fork + 池状态兜底）。"""
+    header = ["账号", "来源", "workflow", "run号", "状态", "结论", "触发",
+              "开始(北京)", "用时", "SHA", "分支", "触发人", "链接"]
+    runs = ov.get("runs") or {}
+    rows = []
+
+    def add(owner, src, items):
+        for x in (items or []):
+            rows.append([owner, src, x.get("workflow", ""), x.get("number", ""),
+                         x.get("status", ""), x.get("conclusion", ""), x.get("event", ""),
+                         x.get("created_beijing", ""), x.get("duration", ""),
+                         x.get("head_sha", ""), x.get("branch", ""), x.get("actor", ""),
+                         x.get("url", "")])
+
+    add("（hub 主仓库）", "hub", runs.get("keepalive"))
+    add("（hub 主仓库）", "hub", runs.get("coordinator"))
+    for g in (runs.get("accounts") or []):
+        owner = str(g.get("owner") or g.get("id") or "")
+        src = str(g.get("token_source") or ("hub" if g.get("hub") else "account"))
+        add(owner, src, g.get("keepalive"))
+        add(owner, src, g.get("coordinator"))
+        if g.get("fallback_run"):
+            add(owner, "pool-state(兜底)", [g["fallback_run"]])
+    return header, rows
+
+
+def _machines_rows(ov):
+    """机器运行实况 → 行（Tailscale 节点 + 池内机器）。"""
+    header = ["主机", "Tailscale IP", "在线", "状态", "池角色", "归属账号",
+              "恢复-数据", "恢复-快照", "快照", "最后在线", "run号", "起跑(UTC)", "运行时长"]
+    rows = []
+    for m in (list(ov.get("machines") or []) + list(ov.get("pool_machines") or [])):
+        snap = m.get("snapshot") or {}
+        snap_txt = ""
+        if isinstance(snap, dict) and snap.get("ok"):
+            snap_txt = "%s / %s 文件" % (snap.get("age_human") or "", snap.get("files"))
+        state = m.get("machine_state") or ("在线" if m.get("online") else "")
+        # 在线的机器 LastSeen 是零值（0001-01-01…），别把它当「最后在线」写进表里
+        seen = "" if m.get("online") else (m.get("last_seen_human") or m.get("last_seen") or "")
+        if str(seen).startswith("0001-01-01"):
+            seen = ""
+        rows.append([
+            m.get("dns_name") or m.get("hostname") or "",
+            m.get("ip") or "", _yn(m.get("online")),
+            _RUN_STATE_ZH.get(str(state), state),
+            m.get("role") or "", m.get("account_id") or m.get("pool_owner") or "",
+            _restore_status(m, "data"), _restore_status(m, "snapshot"),
+            snap_txt, seen,
+            m.get("run_id") or "", m.get("started_utc") or "", m.get("uptime_human") or "",
+        ])
+    return header, rows
+
+
+def _accounts_rows(ov):
+    """账号池清单 → 行。"""
+    header = ["id", "owner", "repo", "启用", "Secret", "凭证", "角色",
+              "在跑", "真在跑", "排队", "最近run", "数据源", "备注"]
+    rows = []
+    for a in ((ov.get("accounts") or {}).get("accounts") or []):
+        sp = a.get("secret_present")
+        cred = "已就位" if sp is True else ("缺失" if sp is False else "存疑")
+        lr = a.get("last_run") or {}
+        rows.append([a.get("id") or "", a.get("owner") or "", a.get("repo") or "",
+                     _yn(a.get("enabled")), a.get("token_secret") or "", cred,
+                     a.get("role") or "", a.get("alive_count"), a.get("running_count"),
+                     a.get("queued_count"), lr.get("url") or lr.get("number") or "",
+                     a.get("source") or "", a.get("report_note") or ""])
+    return header, rows
+
+
+def _pool_rows(ov):
+    """池状态里的 primary / standby 槽位 → 行。"""
+    header = ["槽位", "账号", "owner", "repo", "run号", "状态", "起始(since)", "链接"]
+    st = ((ov.get("pool_state") or {}).get("state") or {})
+    if not isinstance(st, dict):
+        return header, []
+    # 各账号最近一次 run 的状态 —— 池状态里 run 状态挂在 accounts[].last_run，
+    # primary / standby 槽位本身没有 status 字段，不补就整列空白。
+    run_status = {}
+    for a in (st.get("accounts") or []):
+        if isinstance(a, dict):
+            lr = a.get("last_run") or {}
+            run_status[str(a.get("id") or "")] = lr.get("status") or lr.get("conclusion") or ""
+    slots = []
+    if isinstance(st.get("primary"), dict):
+        slots.append(dict(st["primary"], _slot="primary"))
+    for s in (st.get("standby") or []):
+        if isinstance(s, dict):
+            slots.append(dict(s, _slot="standby"))
+    rows = []
+    for s in slots:
+        rid = s.get("run_id")
+        owner = str(s.get("owner") or "")
+        repo = str(s.get("repo") or "")
+        acc = str(s.get("account") or "")
+        url = ("https://github.com/%s/%s/actions/runs/%s" % (owner, repo, rid)) if rid else ""
+        rows.append([s.get("_slot") or "", acc, owner, repo,
+                     rid or "", s.get("status") or s.get("run_status") or run_status.get(acc, ""),
+                     s.get("since") or "", url])
+    return header, rows
+
+
+def _export_json(ov, what, ts):
+    """→ (可序列化对象, 文件名, 条数)。"""
+    if what in ("all", "overview"):
+        obj = dict(ov)
+        obj["export_meta"] = {"what": what, "format": "json", "generated_at": now_iso(),
+                              "version": VERSION, "count": len(ov.get("machines") or [])}
+        return obj, "workbench-all-%s.json" % ts, len(ov.get("machines") or [])
+    header, rows = _dataset_rows(what, ov)
+    data = [dict(zip(header, r)) for r in rows]
+    return {"export_meta": {"what": what, "format": "json", "generated_at": now_iso(),
+                            "version": VERSION, "count": len(data)},
+            "header": header, "data": data}, "workbench-%s-%s.json" % (what, ts), len(data)
+
+
+def _dataset_rows(what, ov):
+    return {"runs": _runs_rows, "machines": _machines_rows,
+            "accounts": _accounts_rows, "pool": _pool_rows}[what](ov)
+
+
+def _export_csv(ov, what, ts):
+    header, rows = _dataset_rows(what, ov)
+    return _csv_text(header, rows), "workbench-%s-%s.csv" % (what, ts), len(rows)
+
+
+def _export_zip(ov, ts):
+    """「全部数据」导出成 zip：四张 CSV + 一份完整 overview.json。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for what in ("accounts", "machines", "runs", "pool"):
+            header, rows = _dataset_rows(what, ov)
+            z.writestr("%s.csv" % what, _csv_text(header, rows))
+        z.writestr("overview.json", json.dumps(ov, ensure_ascii=False, indent=2))
+    return buf.getvalue(), "workbench-export-%s.zip" % ts, len(ov.get("machines") or [])
+
+
+def api_export(h, params):
+    """GET /api/export?what=&format= —— 导出面板数据（JSON / CSV，见上方说明）。"""
+    what = (str((params.get("what") or ["all"])[0]) or "all").lower()
+    fmt = (str((params.get("format") or ["json"])[0]) or "json").lower()
+    if what not in EXPORT_WHAT:
+        what = "all"
+    if fmt not in ("json", "csv"):
+        fmt = "json"
+    ov = _export_source()
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    if what in ("all", "overview") and fmt == "csv":
+        body, fname, _n = _export_zip(ov, ts)
+        ctype = "application/zip"
+    elif fmt == "csv":
+        body, fname, _n = _export_csv(ov, what, ts)
+        ctype = "text/csv; charset=utf-8"
+    else:
+        obj, fname, _n = _export_json(ov, what, ts)
+        body, ctype = json.dumps(obj, ensure_ascii=False, indent=2), "application/json; charset=utf-8"
+    h._send(200, body, ctype, {"Content-Disposition": 'attachment; filename="%s"' % fname})
+
+
 ROUTES = {
     ("GET", "/api/health"): api_health,
     ("GET", "/api/overview"): api_overview,
@@ -3066,10 +3612,12 @@ ROUTES = {
     ("GET", "/api/machines"): api_machines,
     ("GET", "/api/runs"): api_runs,
     ("GET", "/api/pool-state"): api_pool_state,
+    ("GET", "/api/export"): api_export,
     ("POST", "/api/dispatch"): api_dispatch,
     ("POST", "/api/backup"): api_backup,
     ("POST", "/api/rdp"): api_rdp,
     ("GET", "/api/rdp/preview"): api_rdp_preview,
+    ("GET", "/api/rdp/download"): api_rdp_download,
     ("GET", "/api/rdp/default"): api_rdp_default,
     ("POST", "/api/rdp/default"): api_rdp_default,
     ("GET", "/api/conn-info"): api_conn_info,
@@ -3123,6 +3671,10 @@ def main(argv=None):
             except Exception:
                 pass
         threading.Thread(target=_open, daemon=True).start()
+
+    # 启动即预热一份 /api/overview 快照（后台线程，不挡 serve_forever）——
+    # 浏览器打开时首个请求基本秒回，而不是干等一整轮冷构建（13~49s）。
+    threading.Thread(target=overview_warmup, name="overview-warmup", daemon=True).start()
 
     try:
         srv.serve_forever()

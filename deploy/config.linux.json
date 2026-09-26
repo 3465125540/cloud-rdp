@@ -51,6 +51,9 @@
   "rdp_height": 1080,
   "rdp_launch": true,
 
-  "_rdp_client_说明": "Linux 唤起 RDP 客户端。留空 = 自动探测 xfreerdp / remmina。占位符：{ip} {user} {password} {file}",
-  "rdp_client_cmd": "xfreerdp /v:{ip} /u:{user} /p:{password} /cert:ignore /dynamic-resolution"
+  "_rdp_launch_target_说明": "一键登录由谁唤起客户端。Linux 服务器是无头机，默认 auto 会「交给本机」：面板上的「一键登录」变成「下载 .rdp」（把文件下到你自己的电脑，双击即连），并给出一条本机命令。若这台服务器真带桌面、要在它上面开窗口，改成 \"server\" 并装 xfreerdp/remmina。",
+  "rdp_launch_target": "auto",
+
+  "_rdp_client_说明": "仅在 rdp_launch_target=server 时用到。留空 = 自动探测 xfreerdp / remmina。占位符：{ip} {user} {password} {file}（自动探测的模板不含 {password}，明文密码进命令行会被 ps 看到）",
+  "rdp_client_cmd": ""
 }

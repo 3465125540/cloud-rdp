@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
@@ -50,6 +52,16 @@ def req(base, path, method="GET", body=None):
             return resp.status, resp.read().decode("utf-8", "replace"), resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace"), e.headers.get("Content-Type", "")
+
+
+def req_raw(base, path, method="GET"):
+    """同 req，但返回原始字节 + 响应头 —— 数据导出要验 Content-Disposition / 二进制 zip。"""
+    r = urllib.request.Request(base + path, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
 
 
 def main():
@@ -980,7 +992,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.5.7", server.VERSION == "1.5.7", server.VERSION)
+    check("T168 server.py 版本 1.6.0", server.VERSION == "1.6.0", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -1026,9 +1038,9 @@ def main():
     _pool_fn = ""
     if "function poolOnlyRow(" in app_txt:
         _pool_fn = app_txt.split("function poolOnlyRow(", 1)[1].split("\nfunction ", 1)[0]
-    check("T180 池内机器行：有 IP 就渲染真 IP（不再写死 —）+ 一键登录按钮 data-rdp",
-          "ipCell" in _pool_fn and "data-rdp=" in _pool_fn and "一键登录" in _pool_fn
-          and "m.ip" in _pool_fn,
+    check("T180 池内机器行：有 IP 就渲染真 IP（不再写死 —）+ 一键登录按钮（rdpBtn → data-rdp）",
+          "ipCell" in _pool_fn and "rdpBtn(ip, hostLabel" in _pool_fn and "m.ip" in _pool_fn
+          and "一键登录" in app_txt and "data-rdp=" in app_txt,
           "poolOnlyRow 未接真 IP / 登录按钮")
     check("T181 池内机器行：可达性未知/不可达分开呈现（btn-warn）+ styles.css 有该样式",
           "btn-warn" in _pool_fn and "reachable" in _pool_fn and ".btn-warn" in css_txt)
@@ -1342,6 +1354,229 @@ def main():
           "Enable-RdpAvExclusions" in wf_txt and "watchdog-lib.ps1" in wf_txt)
     check("T265 workflow 0c 的 tailscale up 带 --accept-dns=false（别让 VPN 接管系统 DNS）",
           any(("up --authkey" in _l and "--accept-dns=false" in _l) for _l in wf_txt.splitlines()))
+
+    # ---------------- 工作台启动 / 刷新提速（v1.5.8）----------------
+    print("[工作台启动/刷新提速]")
+    # 版本号只在 T168 卡一次（唯一真源）；这里只确认「v1.5.8 提速那批」已在，不重复钉版本
+    check("T266 v1.5.8 提速那批已在（版本 ≥ 1.5.8）",
+          tuple(int(x) for x in server.VERSION.split(".")) >= (1, 5, 8), server.VERSION)
+    check("T267 overview 快照三件套：_OV 状态 + overview_snapshot + _overview_kick/_overview_build",
+          "_OV = {" in srv_txt and "def overview_snapshot" in srv_txt
+          and "def _overview_kick" in srv_txt and "def _overview_build" in srv_txt)
+    check("T268 api_overview 走快照入口（?refresh=1 也不再同步阻塞）",
+          'overview_snapshot(force=("refresh" in params))' in srv_txt)
+    check("T269 clear_cache 把快照标记作废（dirty）—— 触发 workflow / 改账号后能拿到新数据",
+          '_OV["dirty"] = True' in srv_txt and '_OV["dirty"] = False' in srv_txt)
+    check("T270 启动预热 overview（overview_warmup 后台线程）—— 浏览器打开时基本秒回",
+          "def overview_warmup" in srv_txt and "threading.Thread(target=overview_warmup" in srv_txt)
+    check("T271 首屏骨架（warming）—— 还没快照时先返回空骨架，别让页面空转十几秒",
+          "def _overview_skeleton" in srv_txt and '"warming": True' in srv_txt
+          and "def _overview_first" in srv_txt)
+    check("T272 machine_detail 按 IP 缓存（machine_detail_seconds）—— 省掉每轮刷新每台 6~9 次 SMB 往返",
+          'cached("mdetail:%s" % ip' in srv_txt and '"machine_detail_seconds": 30' in srv_txt)
+    check("T273 machine_detail 的远端读并行（_machine_detail_reads + ThreadPoolExecutor）",
+          "def _machine_detail_reads" in srv_txt and "jobs = {" in srv_txt
+          and "as_completed(futs)" in srv_txt)
+    check("T274 get_runs 里 hub 两个 workflow 并行拉（不再串行等两倍 API 往返）",
+          "wfs = [(k, (CONFIG.get(\"workflows\") or {}).get(k)) for k in targets]" in srv_txt
+          and "ex.submit(_one, kw)" in srv_txt)
+    check("T275 overview_seconds / machine_detail_seconds 进了默认配置",
+          '"overview_seconds": 20' in srv_txt and '"machine_detail_seconds": 30' in srv_txt)
+    check("T276 前端处理 warming（首屏骨架）+ stale 补拉（scheduleStaleRetry）",
+          "d.warming" in app_txt and "scheduleStaleRetry" in app_txt and "STALE_RETRY" in app_txt)
+    check("T277 前端「更新于」用 generated_at（快照真实生成时间），stale 时提示后台刷新中",
+          "d.generated_at" in app_txt and "后台刷新中" in app_txt)
+
+    # 接口实测：离线时 /api/overview 也必须带 stale / age_seconds（前端据此判断新鲜度）
+    _code, _body, _ = req(base, "/api/overview")
+    _ov = json.loads(_body)
+    check("T278 /api/overview 带 stale / age_seconds 键（快照口径）",
+          _code == 200 and "stale" in _ov and "age_seconds" in _ov)
+    _code, _body, _ = req(base, "/api/overview?refresh=1")
+    _ov2 = json.loads(_body)
+    check("T279 /api/overview?refresh=1 也秒回且键齐全（离线时给骨架或快照）",
+          _ov2.get("ok") is True and ("warming" in _ov2 or "stale" in _ov2))
+
+    # machine_detail 按 IP 缓存：连续两次调用，远端读只应发生一轮（第二次命中缓存）
+    _orig_offline = server.OFFLINE
+    _orig_rrt = server.read_remote_text
+    _orig_lrd = server.list_remote_dir
+    _orig_rra = server.read_remote_abs
+    _seen = []
+    server.OFFLINE = False
+    server.clear_cache()
+    server.read_remote_text = lambda ip, rel: (_seen.append(rel), "")[1]
+    server.list_remote_dir = lambda ip, p: []
+    server.read_remote_abs = lambda ip, p: ""
+    try:
+        server.machine_detail("100.64.0.9", True)
+        _n1 = len(_seen)
+        server.machine_detail("100.64.0.9", True)   # 同一 IP，应命中缓存
+        _n2 = len(_seen)
+    finally:
+        server.read_remote_text = _orig_rrt
+        server.list_remote_dir = _orig_lrd
+        server.read_remote_abs = _orig_rra
+        server.OFFLINE = _orig_offline
+        server.clear_cache()
+    check("T280 machine_detail 按 IP 缓存：第二次不再重复远端读",
+          _n1 >= 4 and _n2 == _n1, "n1=%d n2=%d" % (_n1, _n2))
+
+    # ---------------- 后端数据导出（v1.5.9）----------------
+    print("[后端数据导出]")
+    # 版本号只在 T168 卡一次（唯一真源）；这里只确认「v1.5.9 导出那批」已在，不重复钉版本
+    check("T281 v1.5.9 导出那批已在（版本 ≥ 1.5.9）",
+          tuple(int(x) for x in server.VERSION.split(".")) >= (1, 5, 9), server.VERSION)
+    check("T282 EXPORT_WHAT 六件套 + 路由 /api/export 注册",
+          server.EXPORT_WHAT == ("all", "overview", "runs", "machines", "accounts", "pool")
+          and ("GET", "/api/export") in server.ROUTES)
+    check("T283 _send 支持额外响应头（导出要 Content-Disposition: attachment）",
+          "def _send(self, code, body, ctype=" in srv_txt and "headers=None" in srv_txt
+          and "for k, v in (headers or {}).items()" in srv_txt)
+    check("T284 CSV 带 UTF-8 BOM（Excel 打开中文不乱码）",
+          "def _csv_text" in srv_txt and '"\\ufeff" + buf.getvalue()' in srv_txt
+          and 'lineterminator="\\r\\n"' in srv_txt)
+    check("T285 全部数据导出成 zip：4 份 CSV + overview.json",
+          "def _export_zip" in srv_txt and 'z.writestr("%s.csv" % what' in srv_txt
+          and 'z.writestr("overview.json"' in srv_txt)
+    check("T286 导出取数不重复劳动：有构建在跑就等它，否则自己建并存入快照",
+          "def _export_source" in srv_txt and "_overview_build(force_clear=False)" in srv_txt
+          and "if not building:" in srv_txt)
+    check("T287 前端有导出下拉（export-menu / export-list / data-export）",
+          'id="export-menu"' in idx_txt and 'id="export-list"' in idx_txt
+          and 'data-export="runs"' in idx_txt)
+    check("T288 app.js 有 exportData 并走后端 /api/export（fetch + blob 下载）",
+          "function exportData" in app_txt and '"/api/export?what="' in app_txt
+          and "createObjectURL" in app_txt and "Content-Disposition" in app_txt)
+    check("T289 styles.css 有导出下拉样式（.menu / .menu-list）",
+          ".menu-list" in css_txt and ".menu-list[hidden]" in css_txt)
+
+    # 接口实测（直接看响应头 + 原始字节）
+    _ec, _eh, _eb = req_raw(base, "/api/export?what=runs&format=csv")
+    _etxt = _eb.decode("utf-8", "replace")
+    _ecd = _eh.get("Content-Disposition") or ""
+    check("T290 /api/export?what=runs&format=csv：200 + text/csv + BOM + attachment 文件名",
+          _ec == 200 and "text/csv" in (_eh.get("Content-Type") or "")
+          and _etxt.startswith("\ufeff") and "attachment" in _ecd and ".csv" in _ecd)
+    check("T291 runs CSV 表头与面板同源（账号/来源/workflow/run号/状态…）",
+          _etxt.lstrip("\ufeff").splitlines()[0].startswith("账号,来源,workflow,run号,状态"))
+    _ec, _eh, _eb = req_raw(base, "/api/export?what=all&format=csv")
+    try:
+        _zn = sorted(zipfile.ZipFile(io.BytesIO(_eb)).namelist())
+    except Exception:
+        _zn = []
+    check("T292 /api/export?what=all&format=csv：application/zip，含 4 CSV + overview.json",
+          _ec == 200 and "application/zip" in (_eh.get("Content-Type") or "")
+          and _zn == ["accounts.csv", "machines.csv", "overview.json", "pool.csv", "runs.csv"],
+          str(_zn))
+    _ec, _eh, _eb = req_raw(base, "/api/export?what=all&format=json")
+    _ej = json.loads(_eb.decode("utf-8"))
+    check("T293 /api/export?what=all&format=json：200 + JSON + export_meta + 全量键",
+          _ec == 200 and "application/json" in (_eh.get("Content-Type") or "")
+          and (_ej.get("export_meta") or {}).get("what") == "all"
+          and all(k in _ej for k in ("accounts", "machines", "runs", "pool_state")))
+    _ec, _eh, _eb = req_raw(base, "/api/export?what=nonsense&format=xml")
+    check("T294 未知 what/format 回落默认（all/json），不 500",
+          _ec == 200 and "application/json" in (_eh.get("Content-Type") or ""))
+
+    _meta_ok = True
+    for _w in ("runs", "machines", "accounts", "pool"):
+        _ec, _eh, _eb = req_raw(base, "/api/export?what=%s&format=json" % _w)
+        _j = json.loads(_eb.decode("utf-8"))
+        if (_j.get("export_meta") or {}).get("what") != _w or "data" not in _j or "header" not in _j:
+            _meta_ok = False
+    check("T295 每个数据集 JSON 都带 export_meta/header/data（前端与脚本可直接消费）", _meta_ok)
+
+    # ---------------- Linux 端一键登录：远端部署「交给本机」（v1.6.0）----------------
+    print("[一键登录·远端部署]")
+    # 版本号只在 T168 卡一次（唯一真源）；这里只确认「v1.6.0 远端登录那批」已在
+    check("T296 v1.6.0 远端登录那批已在（版本 ≥ 1.6.0）",
+          tuple(int(x) for x in server.VERSION.split(".")) >= (1, 6, 0), server.VERSION)
+    check("T297 rdp_launch_target 默认 auto + rdp_launch_on_server（auto 按平台分工）",
+          server.DEFAULT_CONFIG.get("rdp_launch_target") == "auto"
+          and "def rdp_launch_on_server" in srv_txt and "return IS_WINDOWS" in srv_txt)
+    check("T298 launch_rdp 远端不弹窗（mode=local）+ make_rdp 回 local_target/download_url",
+          'return (False, "", "local",' in srv_txt
+          and '"local_target": not on_server' in srv_txt
+          and '"/api/rdp/download?ip=%s&host=%s"' in srv_txt)
+    check("T299 路由 /api/rdp/download 注册 + api_rdp_download 存在",
+          ("GET", "/api/rdp/download") in server.ROUTES and "def api_rdp_download" in srv_txt)
+    check("T300 下载的 .rdp 用 UTF-16LE+BOM（mstsc 原生编码）+ application/x-rdp",
+          'b"\\xff\\xfe" + build_rdp_text' in srv_txt and "application/x-rdp" in srv_txt)
+    check("T301 Linux 自动探测的 RDP 命令不含明文密码（ps 看不到）",
+          '("xfreerdp", "xfreerdp /v:{ip} /u:{user} /cert:ignore /dynamic-resolution")' in srv_txt
+          and '("xfreerdp3", "xfreerdp3 /v:{ip} /u:{user} /cert:ignore /dynamic-resolution")' in srv_txt)
+    check("T302 conn-info 暴露 local_target / is_windows / auth_check",
+          '"local_target": not on_server' in srv_txt and '"is_windows": IS_WINDOWS' in srv_txt
+          and '"auth_check": bool(IS_WINDOWS and on_server)' in srv_txt)
+    check("T303 overview config 暴露 rdp_local / rdp_launch_target",
+          '"rdp_local": not rdp_launch_on_server()' in srv_txt
+          and '"rdp_launch_target": str(CONFIG.get("rdp_launch_target") or "auto")' in srv_txt)
+    check("T304 前端有下载三件套 + 本机命令/按钮（downloadFrom / downloadRdp / localRdpCmd / rdpBtn）",
+          all(k in app_txt for k in ("function downloadFrom", "function withToken",
+                                     "function downloadRdp", "function localRdpCmd", "function rdpBtn")))
+    check("T305 showConnInfo 有远端分支（local_target → 下载 .rdp / 本机命令）",
+          "if (c.local_target)" in app_txt and "data-rdp-download" in app_txt
+          and "localOsName()" in app_txt)
+    check("T306 远端部署时机器行按钮文案改「下载 .rdp」",
+          "DATA.config.rdp_local" in app_txt and "下载 .rdp" in app_txt)
+    check("T307 styles.css 有本机命令块样式 .conn-cmd",
+          ".conn-cmd" in css_txt and ".conn-cmd .mono" in css_txt)
+    _cfg_ex_txt = (open(os.path.join(wb_dir, "config.example.json"), encoding="utf-8").read()
+                   if os.path.isfile(os.path.join(wb_dir, "config.example.json")) else "")
+    _cfg_ln = os.path.join(os.path.dirname(wb_dir), "deploy", "config.linux.json")
+    _cfg_ln_txt = open(_cfg_ln, encoding="utf-8").read() if os.path.isfile(_cfg_ln) else ""
+    check("T308 配置模板都带 rdp_launch_target（示例 + Linux 部署）",
+          '"rdp_launch_target": "auto"' in _cfg_ex_txt
+          and '"rdp_launch_target": "auto"' in _cfg_ln_txt)
+
+    # rdp_launch_target 三态判定（直接单测函数，不受当前平台影响）
+    _saved_t = server.CONFIG.get("rdp_launch_target")
+    server.CONFIG["rdp_launch_target"] = "local"
+    _t_local = server.rdp_launch_on_server()
+    server.CONFIG["rdp_launch_target"] = "server"
+    _t_server = server.rdp_launch_on_server()
+    server.CONFIG["rdp_launch_target"] = "auto"
+    _t_auto = server.rdp_launch_on_server()
+    server.CONFIG["rdp_launch_target"] = _saved_t
+    check("T309 rdp_launch_target 三态：local→False / server→True / auto→IS_WINDOWS",
+          _t_local is False and _t_server is True and _t_auto == server.IS_WINDOWS)
+
+    # local 模式下 make_rdp：不弹窗、不预存凭据、给出 download_url
+    server.CONFIG["rdp_launch_target"] = "local"
+    try:
+        _r = server.make_rdp("100.1.2.3", "github-rdp-server-1", launch=True, store_cred=True)
+    finally:
+        server.CONFIG["rdp_launch_target"] = _saved_t
+    check("T310 local 模式 make_rdp：local_target + download_url，未在服务端唤起/预存凭据",
+          _r.get("ok") is True and _r.get("local_target") is True
+          and str(_r.get("download_url") or "").startswith("/api/rdp/download?")
+          and _r.get("launched") is False and _r.get("launch_mode") == "local"
+          and not _r.get("cred_stored"), str(_r))
+
+    # 接口实测：下载 .rdp（附件 + UTF-16 BOM + 正文）
+    _ec, _eh, _eb = req_raw(base, "/api/rdp/download?ip=100.1.2.3&host=github-rdp-server-1")
+    _ecd = _eh.get("Content-Disposition") or ""
+    _etxt = _eb.decode("utf-16", "replace") if _eb[:2] in (b"\xff\xfe", b"\xfe\xff") else ""
+    check("T311 /api/rdp/download：200 + application/x-rdp + attachment 文件名 + UTF-16 BOM",
+          _ec == 200 and "application/x-rdp" in (_eh.get("Content-Type") or "")
+          and _eb[:2] == b"\xff\xfe" and "attachment" in _ecd and _ecd.rstrip().endswith('.rdp"'),
+          "%s %s" % (_ec, _ecd))
+    check("T312 下载的 .rdp 正文含目标 IP / 用户名 / authentication level=0",
+          "full address:s:100.1.2.3" in _etxt and "username:s:a" in _etxt
+          and "authentication level:i:0" in _etxt)
+    check("T313 /api/rdp/download 非法 IP → 400",
+          req_raw(base, "/api/rdp/download?ip=a%20b;rm")[0] == 400)
+
+    _ci = json.loads(req(base, "/api/conn-info?ip=1.2.3.4")[1])
+    check("T314 /api/conn-info 带 local_target / is_windows / auth_check / download_url",
+          isinstance(_ci.get("local_target"), bool) and isinstance(_ci.get("is_windows"), bool)
+          and isinstance(_ci.get("auth_check"), bool)
+          and str(_ci.get("download_url") or "").startswith("/api/rdp/download?ip="))
+    _ov = json.loads(req(base, "/api/overview")[1])
+    check("T315 /api/overview config 带 rdp_local / rdp_launch_target",
+          isinstance((_ov.get("config") or {}).get("rdp_local"), bool)
+          and (_ov.get("config") or {}).get("rdp_launch_target") == "auto")
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()
