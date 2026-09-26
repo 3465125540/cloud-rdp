@@ -12,7 +12,7 @@
       且因为目录不存在，连告警都没有。
 
   本库被两处共用，保证「校验口径」只有一个：
-    · restore-snapshot.ps1  —— 还原后取证（写 EDGE_RESTORE / WBAI_RESTORE / USERDATA_RESTORE）
+    · restore-snapshot.ps1  —— 还原后取证（写 EDGE_RESTORE / WBAI_RESTORE / UU_RESTORE / USERDATA_RESTORE）
     · reinstall-apps.ps1    —— 第 10 步（后台重装软件）收尾时兜底校验 + 补漏
 
   目标清单来自 snapshot-config.json 的 restore.userDataTargets；配置缺失时用内置默认值。
@@ -35,7 +35,12 @@ $script:UD_DefaultTargets = @(
     [pscustomobject]@{ name = 'WorkBuddy 用户数据（旧路径）'; path = '%RDPUSERPROFILE%\.workbuddy-ai';                    required = @() },
     [pscustomobject]@{ name = 'WorkBuddy 安装目录';           path = '%RDPUSERPROFILE%\AppData\Local\Programs\WorkBuddy'; required = @() },
     [pscustomobject]@{ name = 'WorkBuddy 运行数据';           path = '%RDPUSERPROFILE%\AppData\Local\WorkBuddy';          required = @() },
-    [pscustomobject]@{ name = 'WorkBuddy 配置';               path = '%RDPUSERPROFILE%\AppData\Roaming\WorkBuddy';        required = @() }
+    [pscustomobject]@{ name = 'WorkBuddy 配置';               path = '%RDPUSERPROFILE%\AppData\Roaming\WorkBuddy';        required = @() },
+    # UU远程（网易 GameViewer）：设备身份分机器级 + 用户级两处，缺一处就会被当成新设备、
+    # 反复要求「登录 / 创建账号 / 重新绑定」。机器级那份在 C:\ProgramData 下（不是 %RDPUSERPROFILE%），
+    # 历史上从未进过清单 —— 这就是「UU远程 每次都当新机」的根因。
+    [pscustomobject]@{ name = 'UU远程（机器级）'; path = 'C:\ProgramData\Netease\GameViewer';                     required = @('user_info.ini', 'config.ini', 'remote_assist_code.ini') },
+    [pscustomobject]@{ name = 'UU远程（用户级）'; path = '%RDPUSERPROFILE%\AppData\Local\GameViewer';              required = @('setting.ini', 'setting_guest_anonymous_id.ini') }
 )
 
 function Write-UDMsg {
@@ -269,6 +274,24 @@ function Format-UDCryptGuidance {
             '要恢复登录态：在 Edge 登录 Microsoft 或 Google 账号并开启「同步」（设置 → 个人资料 → 同步）。')
 }
 
+# ---------------------------------------------------------------- UU远程（网易 GameViewer）
+# 为什么单列：UU远程 用「本机设备身份」而不是账号来决定「你是不是新设备」。
+#   机器级  C:\ProgramData\Netease\GameViewer\user_info.ini  → deviceId（明文，设备指纹）
+#           C:\ProgramData\Netease\GameViewer\config.ini     → uuid
+#           C:\ProgramData\Netease\GameViewer\remote_assist_code.ini → 远程协助码（DPAPI 密文）
+#   用户级  %LOCALAPPDATA%\GameViewer\setting.ini + setting_guest_anonymous_id.ini
+# 历史上两处都不在快照清单里（ProgramData 是机器级路径，不是 %RDPUSERPROFILE% 系）
+# → 每轮新机器都被当成全新设备 → 反复要求登录 / 创建账号 / 重新绑定设备。
+# 实测（本机 + 云机对照）：登录态字段 token / userId 为空是**正常**的 —— UU远程 免登录也能用
+#   远程协助，靠的就是 deviceId + 协助码。所以「创建新账户」提示 = 设备身份丢了，不是账号丢了。
+function Format-UDUUGuidance {
+    return ('UU远程（GameViewer）的设备身份没带全 —— 机器级 C:\ProgramData\Netease\GameViewer（deviceId / uuid / 协助码）' +
+            '与用户级 %LOCALAPPDATA%\GameViewer（setting.ini）已纳入快照。' +
+            '若仍提示「新设备 / 请登录 / 创建账号」：remote_assist_code.ini 里的 code / customize_code 是 DPAPI 密文，' +
+            '跨机解不开（与 Edge 的 os_crypt 同一类问题）→ 协助码会被 UU远程 重新生成，这是预期内的。' +
+            '要彻底免掉新设备提示：在 UU远程 里登录 UU 账号（账号级设备绑定存在服务端；user_info.ini 的 token 是明文，会随快照一起还原）。')
+}
+
 # 以 RDP 用户身份解一次 Local State 里的 os_crypt.encrypted_key
 # 返回 [pscustomobject]@{ state='OK'|'BROKEN'|'UNKNOWN'; note='' }
 function Test-EdgeCryptState {
@@ -368,8 +391,25 @@ function Invoke-UserDataVerifyAndRepair {
     $edgeState = if ($edge.Count -gt 0) { [string]$edge[0].state } else { 'N/A' }
     $wbState   = if ($wb.Count   -gt 0) { [string]$wb[0].state }   else { 'N/A' }
 
+    # UU远程：两个目标（机器级 ProgramData + 用户级 AppData）合并成一个结论 ——
+    # 任一缺失都算「设备身份没带全」，也就是用户看到的「每次都当新设备 / 要创建账号」。
+    $uu      = @($after | Where-Object { $_.name -like 'UU远程*' })
+    $uuJudge = @($uu | Where-Object { $_.state -ne 'ABSENT' })     # 两边都没有 = 没装，不算问题
+    $uuBad   = @($uuJudge | Where-Object { $_.state -ne 'OK' })
+    $uuOkN   = @($uuJudge | Where-Object { $_.state -eq 'OK' }).Count
+    $uuState = 'N/A'
+    if ($uu.Count -gt 0 -and $uuJudge.Count -gt 0) {
+        if     ($uuBad.Count -eq 0) { $uuState = 'OK' }
+        elseif ($uuOkN -gt 0)       { $uuState = 'PARTIAL' }
+        else                        { $uuState = 'MISSING' }
+    }
+
     $detail = ('{0}/{1} 目标完整' -f $okCount, $judge.Count)
     if ($repair) { $detail += ('；补漏 {0} 个 / 失败 {1} 个 / 跳过 {2} 个' -f $repair.repaired, $repair.failed, $repair.skipped) }
+    if ($uuState -ne 'N/A' -and $uuState -ne 'OK') {
+        $detail += ('；UU远程 {0}' -f $uuState)
+        Write-UDMsg ('  ⚠ ' + (Format-UDUUGuidance)) -Log $Log
+    }
 
     # Edge 加密能力探测（可选）：文件「在不在」看不出「解不解得开」，
     # 密码/Cookie 跨机必然解不开 —— 这里把它变成一条可见、可行动的结论。
@@ -391,6 +431,7 @@ function Invoke-UserDataVerifyAndRepair {
             ('USERDATA_RESTORE_DETAIL=' + $detail) | Out-File $env:GITHUB_ENV -Append -Encoding ascii
             ('EDGE_RESTORE=' + $edgeState)         | Out-File $env:GITHUB_ENV -Append -Encoding ascii
             ('WBAI_RESTORE=' + $wbState)           | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+            ('UU_RESTORE=' + $uuState)             | Out-File $env:GITHUB_ENV -Append -Encoding ascii
             if ($ProbeCrypt) {
                 ('EDGE_CRYPT=' + $cryptState)      | Out-File $env:GITHUB_ENV -Append -Encoding ascii
                 ('EDGE_CRYPT_NOTE=' + $cryptNote)  | Out-File $env:GITHUB_ENV -Append -Encoding ascii
@@ -410,6 +451,7 @@ function Invoke-UserDataVerifyAndRepair {
         ok       = ($state -eq 'OK')
         edge     = $edgeState
         wb       = $wbState
+        uu       = $uuState
         crypt    = $cryptState
         cryptNote= $cryptNote
         repaired = $(if ($repair) { $repair.repaired } else { 0 })

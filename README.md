@@ -197,6 +197,7 @@
 |------|------|
 | 文件 | `C:\scripts`、`C:\apps`、用户 `Desktop/Documents/Downloads/Pictures/Videos/Music/Favorites`、**公共桌面 `C:\Users\Public\Desktop`**、`AppData\Roaming\...\Start Menu`、`.ssh`、`.aws`、`.config`、`.vscode\extensions`、`.gitconfig`、**WorkBuddy 全套**（`.workbuddy` = 用户数据/缓存/二进制、`.workbuddy-ai` = 旧路径（兼容老快照）、`AppData\Local\Programs\WorkBuddy` = 安装目录、`AppData\Local\WorkBuddy`、`AppData\Roaming\WorkBuddy`）等 |
 | Edge 浏览器 | `%LOCALAPPDATA%\Microsoft\Edge\User Data`（**浏览记录 `History` / 书签 `Bookmarks` / 全部设置 `Preferences`（含下载位置）/ `Web Data` / `Login Data` 本地已存密码 / `Local State` / cookie / 图标**；缓存类目录已排除，见 ⑨） |
+| UU远程（GameViewer） | **设备身份两处都要**：机器级 `C:\ProgramData\Netease\GameViewer`（`user_info.ini` 的 `deviceId` / `config.ini` 的 `uuid` / `remote_assist_code.ini` 的协助码）+ 用户级 `%LOCALAPPDATA%\GameViewer`（`setting.ini`、内嵌 WebView2 的登录态）。漏一处 = 每轮新机器都被当成**全新设备**、反复要求登录/创建账号（见 §12） |
 | 程序关联数据 | 按程序名/发布商匹配的 `%APPDATA%`、`%LOCALAPPDATA%`、`%LOCALAPPDATA%\Programs`、`%PROGRAMDATA%` 一级子目录（见 ⑨） |
 | 注册表 | RDP 用户的 **HKCU** 子键（`Software`、`Control Panel\Desktop/Colors/International/Mouse/Keyboard`、`Environment`、`Console`、`Explorer\Advanced`）+ 机器级 `TimeZoneInformation`、`Session Manager\Environment`、`Nls\Language/Locale` |
 | 软件清单 | `winget export` + 注册表 Uninstall 扫描（**清单**，不是二进制） |
@@ -240,6 +241,10 @@
   `Local Storage` / `IndexedDB`（不少站点把登录态存在这里）能回来，但 cookie 与已保存密码需靠 **Edge 账号同步**恢复登录态。
   还原阶段会**真去解一次** `Local State` 里的 `os_crypt.encrypted_key`，报 `EDGE_CRYPT=OK|BROKEN|UNKNOWN`
   （见日志 / ENV READY / `apps-status.json`），`BROKEN` 时直接提示去开 Edge 账号同步。另外 cookie 属敏感凭证，会被上传到 139
+- **UU远程（GameViewer）的远程协助码跨机解不开**：设备身份里的 `deviceId` / `uuid` / `token` 是**明文**，
+  会随快照跨机还原（这就是「UU远程 记住这台设备」的关键，见 §12）；但 `remote_assist_code.ini` 里的
+  `code` / `customize_code` 是 **DPAPI 密文**，密钥绑旧机器 → 新机器上 UU远程 会**重新生成协助码**。
+  每轮开机的结论会以 `UU_RESTORE=OK|PARTIAL|MISSING|N/A` 打在 ENV READY 里
 - **体积不设上限**（`files.maxTotalMB` / `programs.maxMBPerApp` / `programs.maxTotalMB` 全为 `0 = 不限`）。
   139 实测约 0.45 MB/s：10 GB 约 6.3 小时，可能超出 6 小时 job 上限。推送前会估算 `SNAPSHOT_ETA_MIN`，
   并按剩余时间给 rclone 设 `--max-duration`；大目录用 `rclone copy`（**可断点续传、被中断也不会毁远端**）
@@ -292,10 +297,10 @@
 - 临时关闭：`Run workflow` 时把 `install_apps` 填 `false`，或改 `restore.installApps`
 - 限量试跑：`restore.maxPackages`（0 = 不限）
 - **收尾还会做「用户数据完整性」校验 + 补漏**（`scripts/userdata-lib.ps1`，与第 8 步同源、口径唯一）：
-  - 逐目标核对 **Edge**（`History` 浏览记录 / `Login Data` 本地已存密码 / `Preferences` 全部设置含下载位置 / `Bookmarks` / `Web Data` / `Local State`）与 **WorkBuddy**（`.workbuddy` 用户数据+缓存、`.workbuddy-ai` 旧路径、安装目录、`AppData\Local\WorkBuddy`、`AppData\Roaming\WorkBuddy`）
+  - 逐目标核对 **Edge**（`History` 浏览记录 / `Login Data` 本地已存密码 / `Preferences` 全部设置含下载位置 / `Bookmarks` / `Web Data` / `Local State`）、**WorkBuddy**（`.workbuddy` 用户数据+缓存、`.workbuddy-ai` 旧路径、安装目录、`AppData\Local\WorkBuddy`、`AppData\Roaming\WorkBuddy`）与 **UU远程**（机器级 `C:\ProgramData\Netease\GameViewer` 的 `user_info.ini`(deviceId) / `config.ini`(uuid) / `remote_assist_code.ini`(协助码)，用户级 `%LOCALAPPDATA%\GameViewer` 的 `setting.ini` / `setting_guest_anonymous_id.ini`）
   - 缺什么补什么：robocopy **只补不删**（不动你在机器上新增的文件）、幂等；补漏前先关闭占用程序，保证 SQLite(WAL)/LevelDB 一致
-  - 结论写 `apps-status.json` 的 `userData` 字段，并透出 `USERDATA_RESTORE` / `USERDATA_RESTORE_DETAIL` / `EDGE_RESTORE` / `WBAI_RESTORE`（第 13 步 ENV READY 会打印）
-  - 目标清单在 `snapshot-config.json` 的 `restore.userDataTargets`；`restore.userData: false` 整体关闭；只重装不校验用 `-SkipUserData`
+  - 结论写 `apps-status.json` 的 `userData` 字段，并透出 `USERDATA_RESTORE` / `USERDATA_RESTORE_DETAIL` / `EDGE_RESTORE` / `WBAI_RESTORE` / `UU_RESTORE`（第 13 步 ENV READY 会打印）
+  - 目标清单在 `snapshot-config.json` 的 `restore.userDataTargets`（8 个：Edge 1 + WorkBuddy 5 + UU远程 2）；`restore.userData: false` 整体关闭；只重装不校验用 `-SkipUserData`
 
 #### ⑥ 139 侧路径与迁移
 
@@ -449,6 +454,7 @@ Windows 更新缓存、安装包残留。
 | **绝不遍历整个 LocalAppData** | 硬排除 `Microsoft` / `Packages` / `Temp` / `Programs` 根；缓存目录继续走 `files.excludeDirNames` |
 | **文件关联 / COM** | 只导出**命中被备份程序 installLocation** 的 ProgID/CLSID（读顶层键默认值与 `shell\open\command` 做子串匹配），**绝不导整棵 HKCR**；可用 `registry.hkcrProgIds` 手动补 |
 | **Edge 数据** | `files.dirs` 里加了 `%LOCALAPPDATA%\Microsoft\Edge\User Data`，并把它列入 `files.noExcludeDirs` —— **保住** `IndexedDB` / `Service Worker` / `File System`（很多站点的登录态存在这里，不只是 cookie）；纯缓存 `ShaderCache` / `Media Cache` / `Crashpad` 仍照删 |
+| **UU远程（网易 GameViewer）设备身份** | 两处都要抓：① 机器级 `C:\ProgramData\Netease\GameViewer`（`deviceId` / `uuid` / 协助码）—— **它不是 `%RDPUSERPROFILE%` 系路径**，历史上从没进过清单；② 用户级 `%LOCALAPPDATA%\GameViewer`（`setting.ini`，底下是内嵌 WebView2，登录态在 `Cache`/`IndexedDB`/`Service Worker` 里）。两处都列入 `files.noExcludeDirs`，并在 `programs.dataGlobs` 里显式点名机器级那份作第二道保险。漏掉 = 每轮新机器都被 UU远程 当成**全新设备**，反复要求登录 / 创建账号（详见第四节 §12） |
 
 - 开关：`programs.dataGlobs`、`registry.hkcr`
 - **不做**：服务（`HKLM\SYSTEM\...\Services`）与计划任务（`System32\Tasks`）—— 按需求排除
@@ -686,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（385 项）
+python workbench\selftest.py   :: 离线自测（400 项）
 ```
 
 | 面板 | 内容 |
@@ -806,6 +812,69 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 **运维开关**：`CLOUDRDP_AV_SKIP=1`（跳过 Defender 调整）、`CLOUDRDP_WATCHDOG_SKIP=1`（跳过看门狗）、
 `CLOUDRDP_AV_KEEP_REALTIME=1`（只加排除项、不关实时扫描）。
 
+### 12. UU远程 每次都当新设备 / 反复要求「登录 / 创建账号」
+
+**现象**（瑀子 2026-09-26）：每轮新机器起来后，UU远程 都像**第一次装**一样，要求登录 / 创建账号 / 重新绑定设备。
+
+**真机取证**（直接 SMB 读在线云机 `github-rdp-server-66` / `100.98.87.44`，以 RDP 用户 `a` 身份）：
+
+| 观察 | 数据 | 结论 |
+|------|------|------|
+| 程序本体 `C:\Program Files\Netease\GameViewer\GameViewer.exe` | `ctime=2026/9/26 14:57:37` 但 **`mtime=2026/9/17 21:23:14`** | robocopy `/COPY:DAT` **保留了原始修改时间** → 是**还原来的**（不是刚装的）。说明「桌面快捷方式线索补抓程序本体」这条链是通的 |
+| `C:\ProgramData\Netease\GameViewer\*`（`user_info.ini` / `config.ini` / `remote_assist_code.ini` / `user_setting.ini` / `cache_setting.ini`） | ctime/mtime 全是开机时刻 `09-26 14:57~14:58` | **UU远程 现建的**，不是还原来的 —— 快照里根本没有它们 |
+| `%LOCALAPPDATA%\GameViewer\setting.ini` | `remoteassist_guide=true` / `remoteassist_guide_step=0` | 应用自己认为「**首次使用引导还没走完**」 |
+| `C:\Users\` 一级目录 | 只有 `a` / `Public` / `Default` / `Default User` / `runneradmin` | 所谓「新账户」**不是 Windows 账户**，是 UU远程 自己的设备/账号概念 |
+| `user_info.ini` | `deviceId=aeawvn3m5abc6x6a` / `token=` / `userId=` | ⚠️ **token/userId 为空是正常态** —— 本机（已正常使用）也是同样的空值。UU远程 免登录也能远程协助，「是不是新设备」由**明文 `deviceId` / `uuid`** 决定，不是账号 |
+| `user_info.ini` 的 ACL | `SYSTEM` / `Administrators` = FullControl，`Users` = ReadAndExecute | **不是权限问题** —— `runneradmin`（属 Administrators）读得到 |
+| `snapshot-config.json` 全文 grep | `Netease` = 0，`GameViewer` = 0，`UU` = 0；`files.dirs` 25 条里 **零条** `ProgramData`；`programs.dataGlobs` 为空 | **根因：这两处身份文件从没进过快照清单** |
+
+**根因**：UU远程 的设备身份分成机器级 + 用户级两处，**都不在原来的清单覆盖范围内**：
+
+```
+机器级  C:\ProgramData\Netease\GameViewer\        ← 机器级路径，不是 %RDPUSERPROFILE% 系
+          user_info.ini      deviceId（明文，设备指纹）
+          config.ini         uuid
+          remote_assist_code.ini   远程协助码（code/customize_code 是 DPAPI 密文）
+用户级  %RDPUSERPROFILE%\AppData\Local\GameViewer\
+          setting.ini / setting_guest_anonymous_id.ini
+```
+
+`files.dirs` 是围绕 `%RDPUSERPROFILE%` 写的（外加 `C:\scripts` / `C:\apps` / `%PUBLIC%\Desktop`），
+而备份/还原脚本以 **`runneradmin`** 身份跑、`C:\ProgramData` 又是**机器级**路径 —— 两头都不搭，
+于是这份「设备身份证」**每轮都被丢掉**，新机器在 UU远程 眼里就是一台**全新设备**。
+
+**对策**（`snapshot-config.json` 一处配置搞定，无需改脚本逻辑）：
+
+| 落点 | 改动 |
+|------|------|
+| `files.dirs` | `+ C:\ProgramData\Netease\GameViewer`、`+ %RDPUSERPROFILE%\AppData\Local\GameViewer`（25 → 27 条） |
+| `files.noExcludeDirs` | 同样两条（6 → 8 条）。用户级那份底下是内嵌 WebView2，登录态在 `Cache`/`IndexedDB`/`Service Worker` 里 —— 不豁免就会被 `excludeDirNames` 按目录名一起排掉（与 Edge、`.workbuddy` 同一个道理） |
+| `programs.dataGlobs` | 显式点名 `C:\ProgramData\Netease\GameViewer`，作为 `files.dirs` 之外的第二道保险（重复命中会被已抓判断跳过，不重复占带宽） |
+| `restore.userDataTargets` | `+ UU远程（机器级）` / `+ UU远程（用户级）`（6 → 8 个目标），收尾会**校验 + 补漏**，结论透出 `UU_RESTORE` |
+
+**分流怎么走**（不需要额外代码）：`restore-snapshot.ps1` 按镜像路径前缀自动分作用域 ——
+`C\ProgramData\...` 不匹配 `c\users\<用户>` → 走**机器级**，开机第 8 步由 `runneradmin` 还原；
+`C\Users\<用户>\AppData\Local\GameViewer` → 走**用户级**，第 8 步 4d 段预还原 + 首次登录任务兜底。
+
+**代价**（实测云机，不拍脑袋）：机器级那份 **5 个文件 / ≈0 MB**；用户级那份 **295 个文件 / 32.21 MB**
+（其中 `webviewcache` 291 个 / 32.21 MB —— 就是内嵌 WebView2 的登录态缓存）。按 139 实测 0.45 MB/s 算，
+**每轮快照只多约 70 秒**，换来「UU远程 认识这台设备」。程序本体 `C:\Program Files\Netease\GameViewer`
+（198 个 / 292.65 MB）由「桌面快捷方式线索补抓」负责，**本次改动不涉及**。
+
+**验证**（离线自测 + 真机冒烟，全 PASS）：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **400 PASS / 0 FAIL**（新增 T137/T142b–g + T316–T324 共 15 条钉死清单与取证链） |
+| 真机冒烟（`Get-UserDataTargets` / `Find-UDSnapshotDir` / `Invoke-UserDataVerifyAndRepair`） | 目标解析 8 个含 UU远程 2 个；快照定位含**用户名迁移尾部兜底**；`UU_RESTORE` 在 OK / PARTIAL / MISSING 三态下判定正确且真写进 `GITHUB_ENV` |
+| 32 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（25 步） |
+
+> **⚠️ 诚实边界（不假装全好了）**：`remote_assist_code.ini` 里的 `code` / `customize_code` 是 **DPAPI 密文**，
+> 与 Edge 的 `os_crypt` 同一类问题 —— 密钥绑「旧机器 + 旧用户」，**跨机解不开**，所以**协助码会被 UU远程 重新生成**。
+> 真正能跨机带过去、也是「让 UU远程 记住这台设备」的是**明文** `deviceId` / `uuid` / `token`。
+> 想彻底免掉「新设备」提示：在 UU远程 里**登录 UU 账号**（账号级设备绑定存在服务端，`token` 是明文、会随快照还原）。
+> 每次开机的结论都会在 ENV READY 里以 `UU远程设备 : OK / PARTIAL / MISSING` 打印出来，不用去猜。
+
 ## 五、目录结构
 
 ```
@@ -813,7 +882,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（385 项）
+│   ├── selftest.py                     #   离线自测（400 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -869,7 +938,7 @@ cloud-rdp/
 | **11** | **C 盘守卫：清理 + 报告** | `disk-guard.ps1 -Enforce` |
 | **12** | **估算额度（仅手动触发）** | `if: workflow_dispatch` —— **定时场跳过额度检测** |
 | **12b** | **中文语言包收尾核对** | `setup-chinese.ps1 -CheckOnly`：0f 转后台的语言包若已装完，这里补报一次；**保活循环**每 10 分钟也补查一次 |
-| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 WorkBuddy 用户数据取证（`USERDATA_RESTORE`）** / **Edge 登录态（`EDGE_CRYPT`：`os_crypt` 加密密钥能否解开）** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
+| **13** | ⭐ **环境就绪汇总（ENV READY）** | 初始化完成；含全部状态行（数据恢复 / 整机还原 / **中文语言包** / **Edge 与 WorkBuddy 用户数据取证（`USERDATA_RESTORE`）** / **UU远程 设备身份（`UU_RESTORE`）** / **Edge 登录态（`EDGE_CRYPT`：`os_crypt` 加密密钥能否解开）** / **失效快捷方式** / **邮件投递结果** / 快照一致性）+ 总耗时；桌面标记改名 `_CloudRDP_READY.txt` |
 | 14 | 保活 | **主/单机**：每 10 分钟同步数据、每 60 分钟快照并推送；**备机**：每 10 分钟**重拉**、每 60 分钟只做本地快照（不写 139），每 5 分钟核对权威角色、主下线即自升为主。每 30 分钟 C 盘守卫。时长收敛到 `360 − 已用 − 8(余量)`。**最后 15 分钟在后台启动收尾**，主循环继续跑 → 远程连接全程不中断 |
 | 15 | 等待后台收尾 | `if: always()`：等 finalize 后台作业完成（最多 4 分钟）；未启动才前台补跑。收尾 = C 盘清理 + 全量同步 + 整机快照（**备机**跳过同步/推送，只做本地快照） |
 
@@ -897,6 +966,7 @@ cloud-rdp/
 | 开机后桌面是空的 | `SNAPSHOT_USER_PRERESTORE=SKIPPED`（预创建 profile 失败） | **已修**（`userprofile-lib.ps1` 显式 `-LoadUserProfile` + ProfileList 兜底）。若仍出现：看 `D:\cloudrdp-sys\_state\user-restore.log`；登录任务会兜底重试，公共桌面会有失败标记 |
 | Edge 登录态没了 | cookie/密码由 DPAPI 加密，跨机解不开（日志 `EDGE_CRYPT=BROKEN`） | 正常。用 Edge 账号同步恢复；历史/书签/偏好/`Local Storage` 应该都在 |
 | Edge 数据**整个**没了（连历史/书签都没有） | profile 没预创建成功 → 用户级还原被整段跳过（`SNAPSHOT_USER_PRERESTORE=SKIPPED`、`EDGE_RESTORE: MISSING`） | **已修**：`userprofile-lib.ps1` 显式 `-LoadUserProfile` + `ProfileList` 兜底，失败计入 `SNAPSHOT_STATUS=PARTIAL`；看 `D:\cloudrdp-sys\_state\user-restore.log` |
+| **UU远程 每次都当新设备 / 反复要求登录或创建账号** | **根因**：UU远程 的设备身份在 `C:\ProgramData\Netease\GameViewer`（`deviceId`/`uuid`/协助码）与 `%LOCALAPPDATA%\GameViewer`（`setting.ini`）—— 前者是**机器级**路径，不在以 `%RDPUSERPROFILE%` 为中心的 `files.dirs` 里，于是每轮新机器都被当成全新设备 | **已修**：两处都进 `files.dirs` + `files.noExcludeDirs`，`programs.dataGlobs` 再兜一层，并加 `restore.userDataTargets` 校验 → ENV READY 打印 `UU远程设备 : OK/PARTIAL/MISSING`（详见第四节 §12）。⚠️ 协助码是 DPAPI 密文、跨机解不开会被重新生成（同 Edge 的 `os_crypt`），想彻底免掉请**登录 UU 账号** |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
 | 定时场不跑额度检测 | 按需求跳过（`if: workflow_dispatch`） | 正常。手动 Run workflow 才显示额度 |

@@ -610,6 +610,14 @@ jobs:
             $wrc = if ($wr -eq "OK") { "Green" } elseif ($wr -eq "MISSING") { "Yellow" } else { "DarkGray" }
             Write-Host "  .workbuddy-ai: $wr   (对话记录/会话数据库)" -ForegroundColor $wrc
           }
+          $ur = $env:UU_RESTORE
+          if (-not [string]::IsNullOrWhiteSpace($ur) -and $ur -ne "N/A") {
+            $urc = if ($ur -eq "OK") { "Green" } elseif ($ur -eq "PARTIAL") { "Yellow" } elseif ($ur -eq "MISSING") { "Yellow" } else { "DarkGray" }
+            Write-Host "  UU远程设备   : $ur   (deviceId/uuid/协助码；未带全则每次都被当成新设备，要求登录/创建账号)" -ForegroundColor $urc
+            if ($ur -ne "OK") {
+              Write-Host "                 (协助码是 DPAPI 密文、跨机解不开会被重新生成；想彻底免掉请登录 UU 账号)" -ForegroundColor DarkGray
+            }
+          }
           $scP = $env:SHORTCUTS_PARKED
           if (-not [string]::IsNullOrWhiteSpace($scP) -and $scP -ne "0") {
             Write-Host "  失效快捷方式 : $scP 个已移入「_失效快捷方式」（目标程序没能还原）" -ForegroundColor Yellow
@@ -698,7 +706,7 @@ jobs:
             if (-not [string]::IsNullOrWhiteSpace($env:USERDATA_RESTORE_DETAIL)) {
               Write-Host "                 $($env:USERDATA_RESTORE_DETAIL)" -ForegroundColor DarkGray
             }
-            Write-Host "                 Edge=$($env:EDGE_RESTORE)  WorkBuddy=$($env:WBAI_RESTORE)   (浏览记录/已存密码/下载位置/用户数据/缓存/安装目录)" -ForegroundColor DarkGray
+            Write-Host "                 Edge=$($env:EDGE_RESTORE)  WorkBuddy=$($env:WBAI_RESTORE)  UU远程=$($env:UU_RESTORE)   (浏览记录/已存密码/下载位置/用户数据/缓存/安装目录/设备身份)" -ForegroundColor DarkGray
           }
           # Edge 加密密钥（DPAPI）能力：文件「在不在」看不出「解不解得开」。
           # 密码 / Cookie 是 DPAPI 加密的、密钥绑旧机器+旧用户 → 跨机必然 BROKEN。

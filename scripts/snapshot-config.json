@@ -8,6 +8,7 @@
     "_comment_data": "注意：C:\\data 由 sync-up/sync-down 独立高频同步（每 10 分钟），此处刻意不重复抓取，避免双倍带宽。",
     "_comment_workbuddy": "WorkBuddy 三处都要抓：① %RDPUSERPROFILE%\\.workbuddy = 真实用户数据/缓存/二进制（新版本路径，实测 4.4GB）；② .workbuddy-ai = 旧版本路径（保留兼容老快照，不存在则自动跳过）；③ AppData\\Local\\Programs\\WorkBuddy 等 = 程序安装目录与运行数据。缺任一处 → 还原后 WorkBuddy 等于全新安装。",
     "_comment_runner": "警告：不要把 C:\\tools 加进来 —— 那是 GitHub runner 镜像自带的工具目录（Apache24 / nginx-* 等，实测 240MB / 1087 文件），不是用户数据。备份它纯浪费带宽，还原时还会用旧版覆盖 runner 自带版本。",
+    "_comment_uu": "UU远程（网易 GameViewer）的设备身份分两处，必须都抓：① 机器级 C:\\ProgramData\\Netease\\GameViewer\\ —— user_info.ini(deviceId) / config.ini(uuid) / remote_assist_code.ini(协助码) / user_setting.ini；② 用户级 %RDPUSERPROFILE%\\AppData\\Local\\GameViewer\\ —— setting.ini / setting_guest_anonymous_id.ini。为什么以前漏：ProgramData 是机器级路径，不在「%RDPUSERPROFILE% 系」的 dirs 里；用户级那份又不在常见目录。后果：整机还原后 UU远程 把本机当全新设备，每次都要求重新登录 / 创建账号 / 重新绑定。⚠️ remote_assist_code.ini 里的 code / customize_code 是 DPAPI 密文，跨机解不开（同 Edge 的 os_crypt，见 restore.userDataTargets 的 dpapi 说明）—— 协助码会被 UU远程 重新生成；真正能跨机带过去、也是「记住这台设备」的是明文 deviceId / uuid / token。",
     "dirs": [
       "C:\\scripts",
       "C:\\apps",
@@ -33,7 +34,9 @@
       "%RDPUSERPROFILE%\\.workbuddy-ai",
       "%RDPUSERPROFILE%\\AppData\\Local\\Programs\\WorkBuddy",
       "%RDPUSERPROFILE%\\AppData\\Local\\WorkBuddy",
-      "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy"
+      "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy",
+      "C:\\ProgramData\\Netease\\GameViewer",
+      "%RDPUSERPROFILE%\\AppData\\Local\\GameViewer"
     ],
     "_comment_excludeDirs": "按目录名排除（任意层级匹配），避免把缓存/依赖/仓库元数据拖进来",
     "excludeDirNames": [
@@ -95,6 +98,7 @@
     ],
 
     "_comment_noExcludeDirs": "豁免排除清单：列出的目录只禁用 excludeDirNames（目录名排除），仍应用 excludeFilePatterns。用于「必须完整保留」的用户数据目录 —— 例：.workbuddy 里的 Cache/GPUCache/Temp 也要抓（Electron 缓存里含登录态与离线数据，丢了等于重装）。",
+    "_comment_noExcludeDirs_uu": "UU远程 的 AppData\\Local\\GameViewer 必须在这里：它底下是内嵌 WebView2（webviewcache\\EBWebView），登录态/Cookie 就在 Cache / IndexedDB / Service Worker 里 —— 与 Edge、.workbuddy 同一个道理（excludeDirNames 按目录名全局匹配，会把这些一起排掉）。机器级的 ProgramData\\Netease\\GameViewer 本身没有同名子目录，列在这里只为「以后加了也不怕」，无害。",
     "_comment_noExcludeDirs_edge": "Edge 的 User Data 必须在这里：excludeDirNames 按目录名全局匹配，会把 Edge 的 IndexedDB / Service Worker / File System 一起排掉 —— 而这三处正是「网页账号数据」（很多站点的登录态、离线数据存在 IndexedDB/Service Worker 里，不走 Cookie）。漏掉它们 = 还原后各站点全部掉登录。Cache / Code Cache / GPUCache 这类纯缓存本来就不该进快照，但为了让 IndexedDB 一起过，这里整体豁免（体积换完整性，本项目 maxTotalMB=0）。",
     "noExcludeDirs": [
       "%RDPUSERPROFILE%\\.workbuddy",
@@ -102,7 +106,9 @@
       "%RDPUSERPROFILE%\\AppData\\Local\\Programs\\WorkBuddy",
       "%RDPUSERPROFILE%\\AppData\\Local\\WorkBuddy",
       "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy",
-      "%RDPUSERPROFILE%\\AppData\\Local\\Microsoft\\Edge\\User Data"
+      "%RDPUSERPROFILE%\\AppData\\Local\\Microsoft\\Edge\\User Data",
+      "C:\\ProgramData\\Netease\\GameViewer",
+      "%RDPUSERPROFILE%\\AppData\\Local\\GameViewer"
     ]
   },
 
@@ -245,6 +251,16 @@
         "name": "WorkBuddy 配置",
         "path": "%RDPUSERPROFILE%\\AppData\\Roaming\\WorkBuddy",
         "required": []
+      },
+      {
+        "name": "UU远程（机器级）",
+        "path": "C:\\ProgramData\\Netease\\GameViewer",
+        "required": [ "user_info.ini", "config.ini", "remote_assist_code.ini" ]
+      },
+      {
+        "name": "UU远程（用户级）",
+        "path": "%RDPUSERPROFILE%\\AppData\\Local\\GameViewer",
+        "required": [ "setting.ini", "setting_guest_anonymous_id.ini" ]
       }
     ],
     "_comment_preRestore": "预还原阶段的开关",
@@ -281,8 +297,11 @@
       "C:\\Program Files\\Unity Hub",
       "C:\\Program Files\\MySQL"
     ],
-    "_comment_dataGlobs": "程序关联数据的显式补充/覆盖：dirs 里写 %VAR% 形式路径。留空则只按程序名/发布商自动匹配",
-    "dataGlobs": [],
+    "_comment_dataGlobs": "程序关联数据的显式补充/覆盖：dirs 里写 %VAR% 形式路径。留空则只按程序名/发布商自动匹配。⚠️ 这里只能用「环境变量」，不能用 %RDPUSERPROFILE%（那是本项目的占位符，只有 files.dirs / noExcludeDirs 认它）；而本脚本以 runneradmin 身份跑，%LOCALAPPDATA% 会指到 runneradmin 的 profile，所以用户级路径一律走 files.dirs，不要写在这。",
+    "_comment_dataGlobs_uu": "UU远程 的程序本体是靠「桌面快捷方式线索补抓」进来的（captureTargets，程序体在 C:\\Program Files\\Netease\\GameViewer，已实测能还原）；这里再显式点名它的机器级数据目录，作为 files.dirs 之外的第二道保险（重复命中会被 files.dirs 的已抓判断跳过，不会重复占带宽）。",
+    "dataGlobs": [
+      { "dirs": [ "C:\\ProgramData\\Netease\\GameViewer" ] }
+    ],
     "_comment_imageBlockPaths": "留空=使用脚本内置的 runner 镜像路径黑名单（VS / Android SDK / hostedtoolcache / AzureCLI …）",
     "imageBlockPaths": [],
     "blocklist": [

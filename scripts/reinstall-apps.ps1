@@ -290,7 +290,7 @@ if ($SkipUserData) {
     $udState = 'no-lib'
     Warn "用户数据校验：跳过（未找到 userdata-lib.ps1）"
 } else {
-    Log "===== 用户数据完整性（Edge 浏览记录/已存密码/设置 + WorkBuddy 数据/缓存/安装目录） ====="
+    Log "===== 用户数据完整性（Edge 浏览记录/已存密码/设置 + WorkBuddy 数据/缓存/安装目录 + UU远程 设备身份） ====="
     try {
         $ud = Invoke-UserDataVerifyAndRepair -Stage $Stage -RdpUser $rdpUser -ConfigPath $ConfigPath `
                 -Log { param($m) Log ("  " + $m); Say $m } -Quiesce -EvidenceLogPath $LogFile
@@ -305,6 +305,7 @@ if ($SkipUserData) {
             detail   = $ud.detail
             edge     = $ud.edge
             wb       = $ud.wb
+            uu       = $ud.uu
             crypt    = $edgeCrypt
             repaired = $ud.repaired
             failed   = $ud.failed
@@ -314,6 +315,11 @@ if ($SkipUserData) {
         }
         Say ("用户数据：{0} —— {1}" -f $ud.state, $ud.detail)
         Log ("用户数据：{0} —— {1}" -f $ud.state, $ud.detail)
+        if ($ud.uu -notin @('OK', 'N/A')) {
+            $uuTip = 'UU远程（GameViewer）设备身份未完整恢复 —— 会表现为「每次都当新设备 / 要求登录或创建账号」。机器级 C:\ProgramData\Netease\GameViewer（deviceId/uuid/协助码）与用户级 %LOCALAPPDATA%\GameViewer 已纳入快照；协助码是 DPAPI 密文、跨机解不开（同 Edge os_crypt）会被重新生成，想彻底免掉请登录 UU 账号。'
+            Say ("  ⚠ " + $uuTip)
+            Log ("  ⚠ " + $uuTip)
+        }
         if ($edgeCrypt -eq 'BROKEN') {
             $tip = 'Edge 已保存的密码 / Cookie 跨机解不开（Windows DPAPI 绑旧机器+旧用户）；历史/收藏夹/偏好/自动填充/站点本地存储已恢复；要恢复登录态请在 Edge 开启账号同步。'
             Say ("  ⚠ " + $tip)

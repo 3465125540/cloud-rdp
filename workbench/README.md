@@ -43,7 +43,7 @@ python workbench\server.py --offline       :: 离线模式（不联网，自测�
 python workbench\selftest.py
 ```
 
-离线起一个服务 + 单测纯函数，共 **385 项**，应全绿。不联网、不碰真机、不写你的桌面。
+离线起一个服务 + 单测纯函数，共 **400 项**，应全绿。不联网、不碰真机、不写你的桌面。
 
 > 自测不只测工作台本身，也把开机脚本的**关键设计**钉成断言（防回归），例如
 > T153+ 的「先探后拉」数据还原铁律、T183+ 的中文语言包「转计划任务 + 状态分段落盘」
@@ -497,7 +497,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（385 项）
+├── selftest.py           # 离线自测（400 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

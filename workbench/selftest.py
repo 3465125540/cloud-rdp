@@ -882,7 +882,8 @@ def main():
 
     udt = (sc.get("restore") or {}).get("userDataTargets") or []
     udt_names = [str(t.get("name", "")) for t in udt]
-    check("T137 restore.userDataTargets 6 个目标", len(udt) == 6, "n=%d" % len(udt))
+    check("T137 restore.userDataTargets 8 个目标（6 个 Edge/WorkBuddy + 2 个 UU远程）",
+          len(udt) == 8, "n=%d" % len(udt))
     edge_t = [t for t in udt if "Edge" in str(t.get("name", ""))]
     check("T138 含 Edge 浏览器目标", len(edge_t) == 1, str(udt_names))
     if edge_t:
@@ -894,6 +895,39 @@ def main():
               "Default\\Preferences" in reqd, str(reqd))
     check("T142 userDataTargets 覆盖 WorkBuddy 用户数据/安装/运行/配置",
           sum(1 for n in udt_names if n.startswith("WorkBuddy")) >= 5, str(udt_names))
+
+    # ---------------- UU远程（网易 GameViewer）「每次都当新设备 / 要创建账号」 ----------------
+    # 瑀子 2026-09-26 反馈。真机取证（云机 SMB 直读）：
+    #   · 程序本体 C:\Program Files\Netease\GameViewer\GameViewer.exe 的 mtime=09-17 而 ctime=09-26
+    #     → 是 robocopy 带 /COPY:DAT 还原来的（时间戳被保留），说明「快捷方式线索补抓」是通的；
+    #   · C:\ProgramData\Netease\GameViewer\*（deviceId / uuid / 协助码）ctime 全是开机时刻
+    #     → 是 UU远程 现建的，不是还原来的 —— 清单里从来没有它（ProgramData 是机器级路径）。
+    #   · user_info.ini 的 token/userId 为空是**正常态**（本机也一样）：UU远程 免登录也能远程协助，
+    #     决定「你是不是新设备」的是明文 deviceId / uuid，不是账号。
+    uu_t = [t for t in udt if str(t.get("name", "")).startswith("UU远程")]
+    check("T142b userDataTargets 含 UU远程 机器级 + 用户级两个目标",
+          len(uu_t) == 2, str(udt_names))
+    _uu_m = [t for t in uu_t if "ProgramData" in str(t.get("path", ""))]
+    _uu_u = [t for t in uu_t if "GameViewer" in str(t.get("path", ""))
+             and "AppData" in str(t.get("path", ""))]
+    check("T142c UU远程 机器级目标 = C:\\ProgramData\\Netease\\GameViewer（deviceId/uuid/协助码所在）",
+          len(_uu_m) == 1 and "Netease\\GameViewer" in str(_uu_m[0].get("path", ""))
+          and "user_info.ini" in [str(x) for x in (_uu_m[0].get("required") or [])]
+          and "config.ini" in [str(x) for x in (_uu_m[0].get("required") or [])]
+          and "remote_assist_code.ini" in [str(x) for x in (_uu_m[0].get("required") or [])],
+          str(_uu_m))
+    check("T142d UU远程 用户级目标 = %RDPUSERPROFILE%\\AppData\\Local\\GameViewer",
+          len(_uu_u) == 1 and "%RDPUSERPROFILE%" in str(_uu_u[0].get("path", "")), str(_uu_u))
+    check("T142e ★ files.dirs 收了 UU远程 两处（机器级 ProgramData 从不在 %RDPUSERPROFILE% 系里）",
+          _has_dir("ProgramData\\Netease\\GameViewer") and _has_dir("AppData\\Local\\GameViewer"),
+          "dirs=%d" % len(sc_dirs))
+    check("T142f ★ noExcludeDirs 也收了 UU远程 两处（否则内嵌 WebView2 的 Cache/IndexedDB 被目录名排除）",
+          all(any(d in x for x in noex) for d in
+              ["ProgramData\\Netease\\GameViewer", "AppData\\Local\\GameViewer"]), str(noex))
+    _uu_globs = [str(d) for g in ((sc.get("programs") or {}).get("dataGlobs") or [])
+                 for d in ((g or {}).get("dirs") or [])]
+    check("T142g programs.dataGlobs 显式点名 UU远程 机器级目录（files.dirs 之外的第二道保险）",
+          any("ProgramData\\Netease\\GameViewer" in g for g in _uu_globs), str(_uu_globs))
 
     ud_lib = os.path.join(repo_dir, "scripts", "userdata-lib.ps1")
     check("T143 存在共享库 userdata-lib.ps1", os.path.isfile(ud_lib))
@@ -1577,6 +1611,30 @@ def main():
     check("T315 /api/overview config 带 rdp_local / rdp_launch_target",
           isinstance((_ov.get("config") or {}).get("rdp_local"), bool)
           and (_ov.get("config") or {}).get("rdp_launch_target") == "auto")
+
+    # ---------------- UU远程 设备身份：取证链（瑀子 2026-09-26「优化uu远程桌面创建新账户的问题」） ----------------
+    print("[UU远程 设备身份 取证链]")
+    check("T316 userdata-lib 内置 UU远程 兜底目标（配置缺失时也能校验）",
+          "UU远程（机器级）" in ud_txt and "UU远程（用户级）" in ud_txt
+          and "ProgramData\\Netease\\GameViewer" in ud_txt)
+    check("T317 userdata-lib 把两个 UU远程 目标合并成一个结论（任一缺失 = 没到位）",
+          "$uuJudge" in ud_txt and "$uuState" in ud_txt
+          and "'UU远程*'" in ud_txt)
+    check("T318 userdata-lib 透出 UU_RESTORE（与 EDGE_RESTORE/WBAI_RESTORE 同一条链）",
+          "UU_RESTORE=" in ud_txt)
+    check("T319 userdata-lib 的返回对象带 uu 字段（供 restore/reinstall 两处消费）",
+          "uu       = $uuState" in ud_txt)
+    check("T320 restore-snapshot 取证带 uu（Get-RestoreEvidence / Write-RestoreEvidence / 日志行）",
+          "$out.uu" in restore_txt and '"UU_RESTORE="' in restore_txt
+          and "uu={7}" in restore_txt)
+    check("T321 reinstall-apps 的 $udObj 带 uu（写进 apps-status.json 的 userData）",
+          "uu       = $ud.uu" in reinstall_txt)
+    check("T322 workflow 第 13 步 ENV READY 打印 UU远程设备状态（人看不到 Actions 之外的日志）",
+          "UU_RESTORE" in wf_txt and "UU远程设备" in wf_txt)
+    check("T323 引导文案说清「协助码是 DPAPI 密文、跨机解不开」（诚实透出，不假装全好了）",
+          "Format-UDUUGuidance" in ud_txt and "DPAPI" in ud_txt and "os_crypt" in ud_txt)
+    check("T324 诚实性：不再把「未登录」当异常（实测本机 token/userId 也是空的）",
+          "token / userId 为空是**正常**" in ud_txt or "token / userId 为空是" in ud_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

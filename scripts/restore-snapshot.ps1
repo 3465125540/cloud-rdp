@@ -133,13 +133,14 @@ function Invoke-RestoreQuiesce {
 function Get-RestoreEvidence {
     param([string]$RdpUser, [string]$Stage = '', [string]$ConfigPath = '', [switch]$ProbeCrypt)
 
-    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = ''; state = 'MISSING'; detail = ''; crypt = 'UNKNOWN'; cryptNote = '' }
+    $out = [ordered]@{ edge = 'MISSING'; edgeDetail = ''; wbai = 'MISSING'; wbaiDetail = ''; uu = 'N/A'; uuDetail = ''; state = 'MISSING'; detail = ''; crypt = 'UNKNOWN'; cryptNote = '' }
     if (-not $script:HasUserDataLib) { return $out }
     try {
         $r = Invoke-UserDataVerifyAndRepair -Stage $Stage -RdpUser $RdpUser -ConfigPath $ConfigPath `
                  -Log { param($m) Say ("  " + $m) } -NoRepair -ProbeCrypt:$ProbeCrypt
         $out.edge   = [string]$r.edge
         $out.wbai   = [string]$r.wb
+        $out.uu     = [string]$r.uu
         $out.state  = [string]$r.state
         $out.detail = [string]$r.detail
         $out.crypt  = [string]$r.crypt
@@ -147,21 +148,23 @@ function Get-RestoreEvidence {
         foreach ($e in @($r.after)) {
             if ($e.name -like 'Edge*') { $out.edgeDetail = [string]$e.detail }
             if ($e.name -like 'WorkBuddy*' -and $e.name -notlike '*旧路径*') { $out.wbaiDetail = [string]$e.detail }
+            if ($e.name -like 'UU远程*') { $out.uuDetail = [string]$e.detail }
         }
     } catch { }
     return $out
 }
 
 # 把取证结果同时写日志与 GITHUB_ENV
-# （EDGE_RESTORE / WBAI_RESTORE 保留原名供老工作流兼容，新增 USERDATA_RESTORE）
+# （EDGE_RESTORE / WBAI_RESTORE 保留原名供老工作流兼容，新增 USERDATA_RESTORE / UU_RESTORE）
 function Write-RestoreEvidence {
     param([string]$RdpUser, [string]$LogPath = '', [string]$Stage = '', [string]$ConfigPath = '', [switch]$ProbeCrypt)
     $ev = Get-RestoreEvidence -RdpUser $RdpUser -Stage $Stage -ConfigPath $ConfigPath -ProbeCrypt:$ProbeCrypt
-    Say ("用户数据取证：Edge {0}（{1}）| WorkBuddy {2}（{3}）| 合计 {4}（{5}）" -f `
-         $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.state, $ev.detail)
+    Say ("用户数据取证：Edge {0}（{1}）| WorkBuddy {2}（{3}）| UU远程 {4}（{5}）| 合计 {6}（{7}）" -f `
+         $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.uu, $ev.uuDetail, $ev.state, $ev.detail)
     if ($ProbeCrypt) { Say ("  Edge 加密密钥：{0}（{1}）" -f $ev.crypt, $ev.cryptNote) }
     Set-GhEnv ("EDGE_RESTORE=" + $ev.edge)
     Set-GhEnv ("WBAI_RESTORE=" + $ev.wbai)
+    Set-GhEnv ("UU_RESTORE=" + $ev.uu)
     Set-GhEnv ("USERDATA_RESTORE=" + $ev.state)
     Set-GhEnv ("USERDATA_RESTORE_DETAIL=" + $ev.detail)
     if ($ProbeCrypt) {
@@ -170,8 +173,8 @@ function Write-RestoreEvidence {
     }
     if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
         try {
-            ("[{0}] evidence userdata={1}({2}) edge={3}({4}) wb={5}({6}) crypt={7}" -f (Get-Date).ToString('o'), `
-             $ev.state, $ev.detail, $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.crypt) |
+            ("[{0}] evidence userdata={1}({2}) edge={3}({4}) wb={5}({6}) uu={7}({8}) crypt={9}" -f (Get-Date).ToString('o'), `
+             $ev.state, $ev.detail, $ev.edge, $ev.edgeDetail, $ev.wbai, $ev.wbaiDetail, $ev.uu, $ev.uuDetail, $ev.crypt) |
                 Out-File -LiteralPath $LogPath -Append -Encoding utf8
         } catch { }
     }
