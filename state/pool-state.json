@@ -1,22 +1,43 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-09-27T00:35:01.1066830Z",
+  "updated_utc": "2026-09-27T05:44:10.1374739Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-1",
     "owner": "yc1966asgf",
     "repo": "cloud-rdp",
-    "run_id": 36265957247,
-    "since": "2026-09-26T19:24:43Z"
+    "run_id": 36283313186,
+    "since": "2026-09-27T00:42:31Z"
   },
   "standby": [
+    {
+      "account": "acc-5",
+      "owner": "code19698fgh",
+      "repo": "cloud-rdp",
+      "run_id": 36283371594,
+      "since": "2026-09-27T00:43:43Z"
+    },
     {
       "account": "acc-3",
       "owner": "3465125540",
       "repo": "cloud-rdp",
-      "run_id": 36275246077,
-      "since": "2026-09-26T22:07:41Z"
+      "run_id": 36297549760,
+      "since": "2026-09-27T05:33:31Z"
+    },
+    {
+      "account": "acc-5",
+      "owner": "code19698fgh",
+      "repo": "cloud-rdp",
+      "run_id": 36297785229,
+      "since": "2026-09-27T05:38:27Z"
+    },
+    {
+      "account": "acc-1",
+      "owner": "yc1966asgf",
+      "repo": "cloud-rdp",
+      "run_id": 36297915096,
+      "since": "2026-09-27T05:41:14Z"
     }
   ],
   "accounts": [
@@ -27,20 +48,20 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_1",
       "token_state": "ok",
-      "alive_count": 1,
+      "alive_count": 2,
       "running_count": 1,
-      "queued_count": 0,
-      "total": 17,
+      "queued_count": 1,
+      "total": 19,
       "last_run": {
-        "run_id": 36265957247,
-        "status": "in_progress",
+        "run_id": 36297915096,
+        "status": "pending",
         "conclusion": "",
-        "created_at": "2026-09-26T19:24:43Z",
-        "event": "workflow_dispatch",
-        "url": "https://github.com/yc1966asgf/cloud-rdp/actions/runs/36265957247"
+        "created_at": "2026-09-27T05:41:14Z",
+        "event": "schedule",
+        "url": "https://github.com/yc1966asgf/cloud-rdp/actions/runs/36297915096"
       },
       "note": "",
-      "role": "primary"
+      "role": "standby"
     },
     {
       "id": "acc-2",
@@ -69,12 +90,12 @@
       "queued_count": 0,
       "total": 20,
       "last_run": {
-        "run_id": 36275246077,
+        "run_id": 36297549760,
         "status": "in_progress",
         "conclusion": "",
-        "created_at": "2026-09-26T22:07:41Z",
-        "event": "workflow_dispatch",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/36275246077"
+        "created_at": "2026-09-27T05:33:31Z",
+        "event": "schedule",
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/36297549760"
       },
       "note": "",
       "role": "standby"
@@ -101,28 +122,28 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_5",
       "token_state": "ok",
-      "alive_count": 0,
-      "running_count": 0,
-      "queued_count": 0,
-      "total": 6,
+      "alive_count": 2,
+      "running_count": 1,
+      "queued_count": 1,
+      "total": 8,
       "last_run": {
-        "run_id": 36256246256,
-        "status": "completed",
-        "conclusion": "cancelled",
-        "created_at": "2026-09-26T16:39:42Z",
-        "event": "workflow_dispatch",
-        "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/36256246256"
+        "run_id": 36297785229,
+        "status": "pending",
+        "conclusion": "",
+        "created_at": "2026-09-27T05:38:27Z",
+        "event": "schedule",
+        "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/36297785229"
       },
       "note": "",
-      "role": ""
+      "role": "standby"
     }
   ],
   "recent_dispatches": {
-    "yc1966asgf": "2026-09-26T19:24:40.4955597Z",
-    "code19698fgh": "2026-09-26T16:39:38.2212936Z",
-    "3465125540": "2026-09-26T22:07:37.6273906Z",
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "code1969sda": "2026-09-23T06:51:01.8204238Z"
+    "code19698fgh": "2026-09-26T16:39:38.2212936Z",
+    "code1969sda": "2026-09-23T06:51:01.8204238Z",
+    "yc1966asgf": "2026-09-26T19:24:40.4955597Z",
+    "3465125540": "2026-09-26T22:07:37.6273906Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z"
   }
 }
