@@ -1808,6 +1808,46 @@ def main():
           "[account]" in wf_txt and wf_txt.count("Test-RdpAccountWhitelist") >= 2
           and wf_txt.count("Hide-RdpNonRdpAccounts") >= 2)
 
+    # ---------------- UU远程 落到 a：控制台会话归属 + 桌面「切到 UU远程」（瑀子 2026-09-28） ----------------
+    # 需求原文：解决 uu远程桌面后账户不一致的问题 → 澄清为「落到的账户不是 a」。
+    # 根因（真机事实）：UU远程（网易 GameViewer）是**屏幕镜像**型工具，连的是机器的
+    #   **控制台会话**（console session）；GitHub-hosted 镜像把 runneradmin 放在控制台上
+    #   （runner 本体就在那跑）→ UU远程 默认看到 runneradmin 的桌面，不是 a。
+    # 修法：Windows 原生 tscon <sid> /dest:console 把 a 的会话交给控制台（**断开**而非 logoff，
+    #   程序保留、runner 不受影响）。刻意「不自动切换」—— 切换会让那次 RDP 断开，
+    #   改为公共桌面放一个「切到 UU远程」快捷方式，由用户按需触发（瑀子 2026-09-28 选定）。
+    print("[UU远程 落到 a / 控制台会话归属]")
+    sess_lib = os.path.join(repo_dir, "scripts", "session-lib.ps1")
+    sess_run = os.path.join(repo_dir, "scripts", "session-handover.ps1")
+    check("T357 存在会话库 session-lib.ps1 + 交接脚本 session-handover.ps1",
+          os.path.isfile(sess_lib) and os.path.isfile(sess_run))
+    sess_lib_txt = open(sess_lib, encoding="utf-8-sig").read() if os.path.isfile(sess_lib) else ""
+    sess_run_txt = open(sess_run, encoding="utf-8-sig").read() if os.path.isfile(sess_run) else ""
+    check("T358 session-lib 导出 3 个函数（报告 / 格式化 / 装快捷方式）",
+          all(("function " + f) in sess_lib_txt for f in
+              ["Get-RdpSessionReport", "Format-RdpSessionReport", "Install-RdpSessionHandoverShortcut"]))
+    check("T359 ★ 交接用 Windows 原生 tscon /dest:console（把 a 的会话交给控制台）",
+          "tscon" in sess_run_txt and "/dest:console" in sess_run_txt)
+    # 安全铁律：只「断开/重定向」，绝不 logoff / shutdown —— 否则会把会话与 runner 一起弄死。
+    # 只查代码（剥掉 <# 块注释 #> 与 # 行注释），头注里为说明「为什么不用 logoff」会提到该词。
+    _sess_code = re.sub(r"<#.*?#>", "", sess_run_txt, flags=re.S)
+    _sess_code = "\n".join(l for l in _sess_code.splitlines() if not l.lstrip().startswith("#"))
+    check("T360 ★ 交接只「断开/重定向」，绝不 logoff / shutdown（会话与 runner 都保留）",
+          not re.search(r"\b(logoff|shutdown|Stop-Computer)\b", _sess_code, re.I),
+          _sess_code[:120])
+    check("T361 交接用 SESSIONNAME 判断当前是否已在控制台（语言无关，不解析中文 qwinsta）",
+          "$env:SESSIONNAME" in sess_run_txt and "Console" in sess_run_txt)
+    check("T362 ★ 公共桌面放「切到 UU远程」快捷方式（指向 session-handover.ps1）",
+          "切到 UU远程" in sess_lib_txt and "session-handover.ps1" in sess_lib_txt
+          and "CreateShortcut" in sess_lib_txt)
+    check("T363 workflow 第 0b2 步诊断控制台归属 + 装快捷方式（写 CONSOLE_OWNER 供 ENV READY 读）",
+          "0b2. 会话归属校正" in wf_txt and "session-lib.ps1" in wf_txt
+          and "Install-RdpSessionHandoverShortcut" in wf_txt and "CONSOLE_OWNER" in wf_txt)
+    check("T364 workflow 第 13 步 ENV READY 打印会话控制台归属",
+          "会话控制台" in wf_txt and "CONSOLE_OWNER" in wf_txt)
+    check("T365 ★ 保活循环复查控制台归属（只在变化时打印；刻意不自动切换）",
+          wf_txt.count("Get-RdpSessionReport") >= 2 and "[session]" in wf_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

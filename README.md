@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（431 项）
+python workbench\selftest.py   :: 离线自测（441 项）
 ```
 
 | 面板 | 内容 |
@@ -865,9 +865,9 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **431 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 加 T325–T336；§14 加 T337–T348；§15 加 T349–T355） |
+| `selftest.py` | **441 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 加 T325–T336；§14 加 T337–T348；§15 加 T349–T355；§16 加 T357–T365） |
 | 真机冒烟（`Get-UserDataTargets` / `Find-UDSnapshotDir` / `Invoke-UserDataVerifyAndRepair`） | 目标解析 8 个含 UU远程 2 个；快照定位含**用户名迁移尾部兜底**；`UU_RESTORE` 在 OK / PARTIAL / MISSING 三态下判定正确且真写进 `GITHUB_ENV` |
-| 33 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（25 步） |
+| 35 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（26 步） |
 
 > **⚠️ 诚实边界（不假装全好了）**：`remote_assist_code.ini` 里的 `code` / `customize_code` 是 **DPAPI 密文**，
 > 与 Edge 的 `os_crypt` 同一类问题 —— 密钥绑「旧机器 + 旧用户」，**跨机解不开**，所以**协助码会被 UU远程 重新生成**。
@@ -929,10 +929,10 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **431 PASS / 0 FAIL**（本批 T325–T336；§14 另加 T337–T348 共 12 条；§15 另加 T349–T355 共 7 条） |
+| `selftest.py` | **441 PASS / 0 FAIL**（本批 T325–T336；§14 另加 T337–T348 共 12 条；§15 另加 T349–T355 共 7 条） |
 | `Get-FilesNoReparse` vs 真 `robocopy /XJ` | 真接合点 + 真文件树实测：两边计数**完全一致**（旧口径会多算） |
 | `Get-MissingFileNames` | 删掉暂存里一个文件 → 精确点出 `b.txt`，且**不会**误报被 `excludeFilePatterns` 排除的 `c.tmp` / `desktop.ini` |
-| 33 个 `scripts/*.ps1` AST 解析 | 全通过 |
+| 35 个 `scripts/*.ps1` AST 解析 | 全通过 |
 
 > **诚实边界**：本次改的是**判定口径**，不是「把 PARTIAL 藏起来」。真正的失败信号仍然照报 ——
 > robocopy 返回码 `>=8`（`file:$src`）、关键文件远端缺失（`SNAPSHOT_VERIFY=PARTIAL`）、
@@ -997,9 +997,9 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **432 PASS / 0 FAIL**（T337–T348 账户批共 12 条 + T349–T355 池行批共 7 条 + T356 会话中复查 1 条）。其中 **T348 已升级为全仓审计**（`.github` / `workbench` / `deploy` 全扫），不只 `scripts/` |
+| `selftest.py` | **441 PASS / 0 FAIL**（T337–T348 账户批共 12 条 + T349–T355 池行批共 7 条 + T356 会话中复查 1 条）。其中 **T348 已升级为全仓审计**（`.github` / `workbench` / `deploy` 全扫），不只 `scripts/` |
 | `account-lib.ps1` 本机 dry-run 冒烟 | 清单 / 白名单 / 隐藏计划 / 报告行四个函数全部正常返回，无异常 |
-| 33 个 `scripts/*.ps1` AST 解析 | 全通过；YAML 合法（25 步） |
+| 35 个 `scripts/*.ps1` AST 解析 | 全通过；YAML 合法（26 步） |
 
 ### 15. 「机器运行实况」把已结束的机器一直显示成「运行中」（信息同步异常）
 
@@ -1034,21 +1034,71 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **431 PASS / 0 FAIL**（本批 T349–T355 共 7 条） |
+| `selftest.py` | **441 PASS / 0 FAIL**（本批 T349–T355 共 7 条） |
 | 功能实测 | 快照说 `in_progress`、实时 run 说 `completed` → 池行纠偏为 `ended` / `run_source=live`；拿不到实时（非 hub）→ 保持快照 `running` |
 | 真机核对 | 修复后 `/api/pool_machines` 返回 `machine_state=ended / run_conclusion=success / run_source=live`；页面池行显示「已结束 · 成功」 |
 
 > **诚实边界**：这只是让**两个面板口径一致**，不改变「机器是一次性的」这个事实 ——
 > run 结束后机器本就会销毁，Tailscale 上看不到它的节点是正常的。真正的「在跑」仍以 GitHub 的 run 状态为准。
 
+### 16. UU远程 连上看到的是 `runneradmin`、不是 `a`（账户不一致）
+
+**现象**（瑀子 2026-09-28）：用 UU远程 连上云机，落到的桌面是 `runneradmin` 的，不是 `a` 的。
+
+**根因**（真机事实，不是猜）：
+
+| 事实 | 说明 |
+|------|------|
+| UU远程 = 网易 GameViewer，是**屏幕镜像**型工具 | 它连的是机器的**控制台会话**（console session，即"物理显示器"上那个会话），**不是**像 RDP 那样新建一个会话 |
+| 控制台会话现在是谁的？ | GitHub-hosted 镜像把 **`runneradmin` 放在控制台**（runner 本体就在那跑）→ 所以 UU远程 默认显示 `runneradmin` |
+| 仓库里有没有自动登录 / 会话脚本？ | **没有**（全仓 grep `AutoAdminLogon` / `DefaultUserName` / `tscon` / `query session` 只命中文档，以及账户守卫的 `Winlogon\SpecialAccounts`） |
+
+**修法**（不删账户、不动 runner）：用 Windows 自带的 **`tscon`** 把 `a` 的会话「交给」控制台：
+
+```
+tscon <a 的会话 ID> /dest:console
+```
+
+- 只**断开 / 重定向**，**绝不 `logoff`** —— 会话不注销、程序不退出；
+- `tscon` 顶掉控制台上的 `runneradmin` 只是把它**断开**（detached），runner agent 进程不受影响 —— 这正是它能安全用的原因。
+
+**为什么是「按需触发」而不是「全自动」**：`tscon` 会让**那一次 RDP 断开**。全自动会在你每次以 `a` 登录时都断一次，很烦；所以做成**公共桌面一个快捷方式**，以 `a` 通过 mstsc 登录后**双击它**即可（瑀子 2026-09-28 选定）。
+
+| 落点 | 改动 |
+|------|------|
+| `scripts/session-handover.ps1`（新） | 双击时执行：`SESSIONNAME == Console` → 提示"无需切换"；否则 `tscon <本会话ID> /dest:console`。全程 fail-soft，失败时窗口停留等回车 |
+| `scripts/session-lib.ps1`（新） | `Get-RdpSessionReport`（解析 `qwinsta`，语言无关）/ `Format-RdpSessionReport` / `Install-RdpSessionHandoverShortcut`（公共桌面放「切到 UU远程」） |
+| workflow **第 0b2 步**（新） | 诊断当前控制台归属 → 写 `CONSOLE_OWNER`；装桌面快捷方式。**刻意不自动切换** |
+| workflow **第 13 步** | ENV READY 打一行 `会话控制台 : <谁>`；不是 `a` 时给出双击提示 |
+| workflow **第 14 步保活循环** | 每 10 分钟复查控制台归属，**只在归属变化时**打一行 `[session] …`（不自动切换） |
+
+**怎么用**：
+
+1. 以 `a` 通过 mstsc 登录（正常流程）；
+2. 双击桌面 **「切到 UU远程」** → 那次 RDP 断开，`a` 成为控制台会话；
+3. 打开 / 重连 UU远程 → 看到的就是 `a` 的桌面（若仍显示旧画面，断开重连一次）；
+4. 想切回 RDP：再用 mstsc 以 `a` 登录即可（Windows 会把 `a` 的会话接回 RDP）。
+
+**验证**：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **441 PASS / 0 FAIL**（本批 T357–T365 共 9 条） |
+| `session-lib.ps1` 本机实测 | 正确解析本机中文 `qwinsta`（`services` / `console` 两行；控制台 = `aigc`、会话 1）；`Format-RdpSessionReport` 输出正确 |
+| `session-handover.ps1 -DryRun` 本机实测 | 正确识别 `SESSIONNAME=Console` → "当前会话（aigc）已经是控制台会话 —— 无需切换" |
+| AST + actionlint | 两个新脚本 + 第 0b2 / 13 / 14 步脚本全部解析通过；`actionlint rc=0` |
+
+> **诚实边界**：`tscon` 需要 `a` **先有一个会话**（即先用 mstsc 登录一次）—— 因为 job 中途无法重启去走自动登录，
+> 所以「开机就自动让 `a` 占控制台」做不到。这就是做成按需触发的根本原因。
+
 ## 五、目录结构
 
 ```
 cloud-rdp/
-├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
+├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（431 项）
+│   ├── selftest.py                     #   离线自测（441 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1075,7 +1125,9 @@ cloud-rdp/
     ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
     ├── userprofile-lib.ps1             # 【新】用户配置文件预创建（显式 -LoadUserProfile + ProfileList 兜底；修「还原后用户数据全丢」）
     ├── watchdog-lib.ps1                # 【新】保命共享库：GitHub 可达性探测 / 主机体征 / Defender 排除 / 有限超时 / 网络自愈 / 连接看门狗
-    ├── account-lib.ps1                 # 【新】账户守卫：隐藏非 RDP 账户（登录界面 SpecialAccounts + profile 目录 +h+s）+ 白名单断言（只留 a）
+    ├── account-lib.ps1                 # 【新】账户守卫：隐藏非 RDP 账户（登录界面 SpecialAccounts + profile 目录 +h+s）+ 白名单断言（只留 a）
+    ├── session-lib.ps1                 # 【新】会话归属：控制台是谁（UU远程 连的就是它）+ 公共桌面「切到 UU远程」快捷方式
+    ├── session-handover.ps1            # 【新】把当前会话交给控制台（tscon /dest:console，只断开不 logoff）
     ├── conn-watchdog.ps1               # 【新】连接看门狗子进程：每分钟探一次，连续不可达即分级自愈 + 打印判定
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
     ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
@@ -1083,7 +1135,7 @@ cloud-rdp/
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 25 步。**0d 之后就能连**，其余在后台继续跑：
+工作流 26 步。**0d 之后就能连**，其余在后台继续跑：
 
 | # | 步骤 | 说明 |
 |---|------|------|

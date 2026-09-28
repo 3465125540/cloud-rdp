@@ -260,6 +260,31 @@ jobs:
             $lnk.Save()
             Write-Host "已创建桌面快捷方式: CloudData -> $dataDir"
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
+      - name: 0b2. 会话归属校正（控制台交给 a）+ 桌面「切到 UU远程」快捷方式
+        shell: pwsh
+        run: |
+          # UU远程（网易 GameViewer）是「屏幕镜像」型工具，连的是机器的**控制台会话**；
+          # 镜像把 runneradmin 放在控制台 → 默认 UU远程 看到的是 runneradmin 的桌面（不是 a）。
+          # 这里只做两件事（都 fail-soft，绝不 logoff、不重启、不动 runner）：
+          #   ① 诊断：打印当前控制台会话归属（写进 ENV READY 第 13 步）；
+          #   ② 在公共桌面放「切到 UU远程」快捷方式 —— 以 a 用 mstsc 登录后双击它，
+          #      用 Windows 原生 tscon 把 a 的会话交给控制台（RDP 断开、程序保留），
+          #      之后 UU远程 连上看到的就是 a。
+          # 刻意「不自动切换」：切换会让那次 RDP 断开，交给用户按需触发（瑀子 2026-09-28 选定）。
+          try {
+            $sessLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\session-lib.ps1'
+            if (Test-Path -LiteralPath $sessLib) {
+              . $sessLib
+              $rep = Get-RdpSessionReport -RdpUser $env:RDP_USERNAME
+              Write-Host ("[0b2] " + (Format-RdpSessionReport -RdpUser $env:RDP_USERNAME))
+              "CONSOLE_OWNER=" + $rep.consoleOwner | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+              $sc = Install-RdpSessionHandoverShortcut -RdpUser $env:RDP_USERNAME
+              if ($sc.ok) { Write-Host ("[0b2] 已放桌面快捷方式: " + $sc.path) }
+              else        { Write-Host ("[0b2] 快捷方式未创建（可忽略）: " + $sc.note) }
+            } else {
+              Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'
+            }
+          } catch { Write-Host "[0b2] 会话校正失败（可忽略）：$($_.Exception.Message)" }
       - name: 0c. 安装并连接 Tailscale
         shell: pwsh
         env:
@@ -664,6 +689,15 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($au)) {
             Write-Host "  !! 出现非预期账户：$au —— 可能有东西在自动建账户，请排查（需求：不要自动创建新的用户账户）" -ForegroundColor Yellow
           }
+          # ---- 会话归属：UU远程 连的是「控制台会话」，控制台是谁，UU远程 就显示谁 ----
+          $co = $env:CONSOLE_OWNER
+          if (-not [string]::IsNullOrWhiteSpace($co)) {
+            if ($co -eq $env:RDP_USERNAME) {
+              Write-Host "  会话控制台   : $co（UU远程 看到的就是 $env:RDP_USERNAME）" -ForegroundColor DarkGray
+            } else {
+              Write-Host "  会话控制台   : $co（不是 $env:RDP_USERNAME）；要让 UU远程 看到 $env:RDP_USERNAME，请在 $env:RDP_USERNAME 桌面双击「切到 UU远程」" -ForegroundColor DarkGray
+            }
+          }
           $scC = $env:SNAPSHOT_SHORTCUTS_CAPTURED
           if (-not [string]::IsNullOrWhiteSpace($scC) -and $scC -ne "0") {
             $scM = $env:SNAPSHOT_SHORTCUTS_MB
@@ -931,6 +965,24 @@ jobs:
                               Write-Host "[account] 账户白名单复核通过（只有 $env:RDP_USERNAME + 内置 + runneradmin）" -ForegroundColor DarkGray
                           }
                       } catch { Write-Host "[account] 账户复查失败（可忽略）：$($_.Exception.Message)" }
+                  }
+
+                  # ---------- 会话归属：控制台是不是 a（UU远程 看的就是控制台）----------
+                  # 只在「归属发生变化」时打印一行，避免每 10 分钟刷屏。
+                  # 刻意不自动切换 —— 切换会让那次 RDP 断开，交给用户双击桌面「切到 UU远程」按需触发。
+                  if (Test-Path -LiteralPath '.\scripts\session-lib.ps1') {
+                      try {
+                          . .\scripts\session-lib.ps1
+                          $sr = Get-RdpSessionReport -RdpUser $env:RDP_USERNAME
+                          if ($script:_lastConsoleOwner -ne $sr.consoleOwner) {
+                              $script:_lastConsoleOwner = $sr.consoleOwner
+                              if ($sr.consoleOwner -eq $env:RDP_USERNAME) {
+                                  Write-Host "[session] 控制台会话 = $env:RDP_USERNAME（UU远程 看到的就是 a）" -ForegroundColor Green
+                              } else {
+                                  Write-Host "[session] 控制台会话 = $($sr.consoleOwner)（不是 $env:RDP_USERNAME）；要让 UU远程 看到 $env:RDP_USERNAME，请在 a 桌面双击「切到 UU远程」" -ForegroundColor DarkGray
+                              }
+                          }
+                      } catch { Write-Host "[session] 会话复查失败（可忽略）：$($_.Exception.Message)" }
                   }
 
                   # ---------- 中文语言包：后台装完就补记（0f 挂的计划任务）----------
