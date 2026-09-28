@@ -1678,6 +1678,57 @@ def main():
     check("T336 文件数不足时列出具体缺失文件名（只给数字没法排查）",
           "function Get-MissingFileNames" in bs_txt and "Get-MissingFileNames -Src" in bs_txt)
 
+    # ---------------- 账户守卫：只留 a 一个「可见」管理员（瑀子 2026-09-28） ----------------
+    # 需求原文：优化uu远程桌面连接创建runneradmin用户账户的问题，只需要有一个管理员账户a即可，
+    #           不要自动创建新的用户账户。
+    # 真机取证（SMB 只读探 100.75.73.81 / 100.85.24.112）：
+    #   · runneradmin 的 profile ctime = 2026/9/22 22:26:18、NTUSER.DAT mtime = 09/22 22:56:20，
+    #     两台机器**完全一致**且早于本次开机（09-28 00:45Z）⇒ 镜像烘焙自带，不是任何脚本建的。
+    #   · 全仓零账户创建代码（New-LocalUser / net user / Add-LocalGroupMember 只命中 workflow 0b 建 a）。
+    #   · runneradmin = GitHub-hosted runner 自己的账户：runs-on: windows-latest、
+    #     工作区是 hosted 专属 D:\a\<repo>\<repo>、slim-image 硬保护名单含 C:\actions-runner。
+    #   · UU远程 = 网易 GameViewer（GameViewer.exe + GameViewerService.exe），只装服务、不建账户。
+    # ⇒ **删不掉**（本 job 的 runner 正以它跑），只能藏 —— 藏完用户视角就只剩 a。
+    print("[账户守卫 runneradmin / 只留 a]")
+    ac_lib = os.path.join(repo_dir, "scripts", "account-lib.ps1")
+    check("T337 存在共享库 account-lib.ps1", os.path.isfile(ac_lib))
+    ac_txt = open(ac_lib, encoding="utf-8-sig").read() if os.path.isfile(ac_lib) else ""
+    check("T338 account-lib 导出 4 个函数（清单 / 隐藏 / 白名单 / 报告）",
+          all(("function " + f) in ac_txt for f in
+              ["Get-RdpAccountInventory", "Hide-RdpNonRdpAccounts",
+               "Test-RdpAccountWhitelist", "Format-RdpAccountReport"]))
+    check("T339 隐藏走 Winlogon\\SpecialAccounts\\UserList（登录界面/切换用户/UAC 都不再列它）",
+          "SpecialAccounts" in ac_txt and "UserList" in ac_txt and "Winlogon" in ac_txt)
+    check("T340 profile 目录用 attrib +h +s 隐藏（资源管理器默认不显示）",
+          "attrib" in ac_txt and "'+h'" in ac_txt and "'+s'" in ac_txt)
+    check("T341 ★ 诚实边界写进库头注：runneradmin 删不掉（job 正以它跑）⇒ 只藏、不删、不降权",
+          "删不掉" in ac_txt and "runneradmin" in ac_txt and "降权" in ac_txt)
+    check("T342 运维开关 CLOUDRDP_ACCOUNT_HIDE=0 / CLOUDRDP_ACCOUNT_HIDE_DRYRUN=1",
+          "CLOUDRDP_ACCOUNT_HIDE" in ac_txt and "CLOUDRDP_ACCOUNT_HIDE_DRYRUN" in ac_txt)
+    check("T343 白名单断言：未知账户 = 异常（直接对应「不要自动创建新的用户账户」）",
+          "unknown" in ac_txt and "known" in ac_txt and "runneradmin" in ac_txt)
+    check("T344 workflow 第 0b 步 dot-source account-lib 并调 Hide-RdpNonRdpAccounts + 白名单",
+          "account-lib.ps1" in wf_txt and "Hide-RdpNonRdpAccounts" in wf_txt
+          and "Test-RdpAccountWhitelist" in wf_txt)
+    check("T345 workflow 第 13 步 ENV READY 打印账户行（ACCOUNT_HIDE / ACCOUNT_UNKNOWN）",
+          "ACCOUNT_HIDE" in wf_txt and "ACCOUNT_UNKNOWN" in wf_txt and "账户" in wf_txt)
+    check("T346 ★ 快捷方式线索跳过其它用户 profile（runneradmin 死链不再误导成「UU远程 建了账户」）",
+          "其它用户的 profile" in bs_txt and "-in @($RdpUser" in bs_txt)
+    check("T347 account-lib 全部 fail-soft（多处 try/catch，永不抛异常）",
+          ac_txt.count("catch") >= 4)
+    _acct_creators = []
+    for _fn in sorted(os.listdir(os.path.join(repo_dir, "scripts"))):
+        if not _fn.endswith(".ps1"):
+            continue
+        _t = open(os.path.join(repo_dir, "scripts", _fn), encoding="utf-8-sig",
+                  errors="replace").read()
+        _code = re.sub(r"<#.*?#>", "", _t, flags=re.S)          # 去块注释
+        _code = "\n".join(l for l in _code.splitlines() if not l.lstrip().startswith("#"))
+        if re.search(r"New-LocalUser|net\s+user\s+\S+\s+/add|Add-LocalGroupMember", _code):
+            _acct_creators.append(_fn)
+    check("T348 ★ 除 workflow 0b 外 scripts/ 零账户创建代码（流程只建 a 一个账户）",
+          _acct_creators == [], str(_acct_creators))
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

@@ -865,9 +865,9 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **412 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 另加 T325–T336 共 12 条） |
+| `selftest.py` | **424 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 加 T325–T336；§14 加 T337–T348） |
 | 真机冒烟（`Get-UserDataTargets` / `Find-UDSnapshotDir` / `Invoke-UserDataVerifyAndRepair`） | 目标解析 8 个含 UU远程 2 个；快照定位含**用户名迁移尾部兜底**；`UU_RESTORE` 在 OK / PARTIAL / MISSING 三态下判定正确且真写进 `GITHUB_ENV` |
-| 32 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（25 步） |
+| 33 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（25 步） |
 
 > **⚠️ 诚实边界（不假装全好了）**：`remote_assist_code.ini` 里的 `code` / `customize_code` 是 **DPAPI 密文**，
 > 与 Edge 的 `os_crypt` 同一类问题 —— 密钥绑「旧机器 + 旧用户」，**跨机解不开**，所以**协助码会被 UU远程 重新生成**。
@@ -929,14 +929,75 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **412 PASS / 0 FAIL**（本批新增 T325–T336 共 12 条） |
+| `selftest.py` | **424 PASS / 0 FAIL**（本批 T325–T336；§14 另加 T337–T348 共 12 条） |
 | `Get-FilesNoReparse` vs 真 `robocopy /XJ` | 真接合点 + 真文件树实测：两边计数**完全一致**（旧口径会多算） |
 | `Get-MissingFileNames` | 删掉暂存里一个文件 → 精确点出 `b.txt`，且**不会**误报被 `excludeFilePatterns` 排除的 `c.tmp` / `desktop.ini` |
-| 32 个 `scripts/*.ps1` AST 解析 | 全通过 |
+| 33 个 `scripts/*.ps1` AST 解析 | 全通过 |
 
 > **诚实边界**：本次改的是**判定口径**，不是「把 PARTIAL 藏起来」。真正的失败信号仍然照报 ——
 > robocopy 返回码 `>=8`（`file:$src`）、关键文件远端缺失（`SNAPSHOT_VERIFY=PARTIAL`）、
 > 远端文件数少于本地（`SNAPSHOT_VERIFY=PARTIAL`）、大目录未传完（`SNAPSHOT_PUSH=PARTIAL`）一个都没放宽。
+
+### 14. 云机上那个 `runneradmin` 账户 —— 它到底是谁、为什么删不掉、怎么让它看不见
+
+**现象**（瑀子 2026-09-28）：连上云机后能看到一个叫 `runneradmin` 的账户，
+以为是「UU远程 / 云机自己新建的」；诉求是 **只需要有一个管理员账户 `a`，不要自动创建新的用户账户**。
+
+**真机取证**（SMB 只读探两台在线云机 `100.75.73.81` / `100.85.24.112`，不是猜）：
+
+| 观察 | 数据 | 结论 |
+|------|------|------|
+| `runneradmin` 的 profile 元数据 | `ctime = 2026/9/22 22:26:18`、`NTUSER.DAT mtime = 09/22 22:56:20` —— **两台机器完全一致** | 是**镜像烘焙时**就有的，不是哪一次开机、哪一个脚本建的 |
+| 与本次开机时间的关系 | 本次开机 `2026-09-28 00:45Z`，而 ctime 是 `09-22` | 早于任何一次开机 ⇒ **不是开机流程建的** |
+| 全仓 grep（含 `.github`） | `New-LocalUser` / `net user` / `Add-LocalGroupMember` / `Remove-LocalUser` / `Disable-LocalUser` / `wmic useraccount` **只命中 workflow 第 0b 步**（建 `a`） | **流程只建 `a` 一个账户**，别的账户都不是我们建的 |
+| `runneradmin` 的身份 | `runs-on: windows-latest`；工作区是 hosted 专属的 `D:\a\<repo>\<repo>`；`slim-image.ps1` 硬保护名单里就有 `C:\actions-runner` | `runneradmin` = **GitHub-hosted runner 自己的 Windows 账户**（本次 job 的 runner agent 正以它身份在跑） |
+| UU远程 是否建账户 | `C:\Program Files\Netease\GameViewer\` 里是 `GameViewer.exe` + **`GameViewerService.exe`**（服务） | UU远程 = 网易 GameViewer，**只装服务、不建 Windows 账户**；它的「设备/账号」是应用自己的概念（见 §12） |
+| `C:\Users\` 一级目录 | `a` / `runneradmin` / `Public` / `Default` / `Default User` | 与 §12 一致，没有第三张「新面孔」 |
+
+**根因**：`runneradmin` 是 **GitHub 托管 runner 的基础设施** —— 不是「UU远程 建的」，也不是流程建的。
+真机日志里那两条
+
+```
+快捷方式线索跳过：LightC.lnk -> 目标不存在: C:\Users\runneradmin\AppData\Local\LightC\LightC.exe
+快捷方式线索跳过：UU远程.lnk -> 目标不存在: C:\Users\runneradmin\Downloads\GameViewer\GameViewer.exe
+```
+
+之所以出现 `C:\Users\runneradmin\...`，只是因为**备份脚本本身以 `runneradmin` 身份在跑**，
+`%LOCALAPPDATA%` / `$env:USERPROFILE` 自然指到它的 profile —— 并不是「UU远程 装到了 runneradmin 下」。
+
+**诚实边界（不假装能全做到）**：`runneradmin` **删不掉**。
+本次 job 的 runner agent 就是以它身份在跑，删它 / 降它的权 = 当场把 job（连同这个远程桌面）弄死；
+它也不归我们管（GitHub 镜像的一部分）。所以**能做且该做的是「让它彻底看不见」**，
+于是「用户视角只有 `a` 一个管理员账户」。
+
+**对策**（新增 `scripts/account-lib.ps1`，两条都可逆、fail-soft）：
+
+| 落点 | 改动 |
+|------|------|
+| ① 登录界面隐藏 | `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList\<name> = 0` —— 锁屏 / 切换用户 / UAC 凭据选择器 / 「用户账户」控制面板都不再列它。**认证本身不受影响**（显式指定用户名照样能登），runner 服务更不受影响 |
+| ② profile 目录隐藏 | `attrib +h +s C:\Users\<name>` —— 资源管理器默认不显示（即便开了「显示隐藏文件」，system 属性仍会被「隐藏受保护的操作系统文件」挡掉） |
+| ③ 白名单断言 | `Test-RdpAccountWhitelist`：除「`a` + 内置账户 + `runneradmin`」之外的账户一律判为**异常**并打 `##[warning]` —— 直接对应「不要自动创建新的用户账户」 |
+| ④ 报告透出 | workflow 第 13 步 ENV READY 打一行 `账户 : 唯一可见 = a  已隐藏 runneradmin, …`；有未知账户时另打黄字告警 |
+| ⑤ 顺手修误导 | `backup-snapshot.ps1` 的「快捷方式线索」把**其它用户 profile**（尤其 `C:\Users\runneradmin`）加进 `-SkipPrefixes` —— 那些死链再也不会出现在日志里把人带偏 |
+
+**调用点**：workflow **第 0b 步**（建完 `a` 立刻隐藏 + 白名单），结论写 `ACCOUNT_HIDE` / `ACCOUNT_UNKNOWN` 进 `GITHUB_ENV`。
+
+**运维开关**：
+
+| 开关 | 作用 |
+|------|------|
+| `CLOUDRDP_ACCOUNT_HIDE=0` | 跳过隐藏（什么都不做） |
+| `CLOUDRDP_ACCOUNT_HIDE_DRYRUN=1` | 只看不改（打印将隐藏谁） |
+
+**撤销**：`. scripts/account-lib.ps1; Restore-RdpHiddenAccounts -RdpUser a` —— 删掉 `SpecialAccounts` 项 + 目录属性复原。
+
+**验证**：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **424 PASS / 0 FAIL**（本批 T337–T348 共 12 条） |
+| `account-lib.ps1` 本机 dry-run 冒烟 | 清单 / 白名单 / 隐藏计划 / 报告行四个函数全部正常返回，无异常 |
+| 33 个 `scripts/*.ps1` AST 解析 | 全通过；YAML 合法（25 步） |
 
 ## 五、目录结构
 
@@ -972,6 +1033,7 @@ cloud-rdp/
     ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
     ├── userprofile-lib.ps1             # 【新】用户配置文件预创建（显式 -LoadUserProfile + ProfileList 兜底；修「还原后用户数据全丢」）
     ├── watchdog-lib.ps1                # 【新】保命共享库：GitHub 可达性探测 / 主机体征 / Defender 排除 / 有限超时 / 网络自愈 / 连接看门狗
+    ├── account-lib.ps1                 # 【新】账户守卫：隐藏非 RDP 账户（登录界面 SpecialAccounts + profile 目录 +h+s）+ 白名单断言（只留 a）
     ├── conn-watchdog.ps1               # 【新】连接看门狗子进程：每分钟探一次，连续不可达即分级自愈 + 打印判定
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
     ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
@@ -1030,6 +1092,7 @@ cloud-rdp/
 | Edge 登录态没了 | cookie/密码由 DPAPI 加密，跨机解不开（日志 `EDGE_CRYPT=BROKEN`） | 正常。用 Edge 账号同步恢复；历史/书签/偏好/`Local Storage` 应该都在 |
 | Edge 数据**整个**没了（连历史/书签都没有） | profile 没预创建成功 → 用户级还原被整段跳过（`SNAPSHOT_USER_PRERESTORE=SKIPPED`、`EDGE_RESTORE: MISSING`） | **已修**：`userprofile-lib.ps1` 显式 `-LoadUserProfile` + `ProfileList` 兜底，失败计入 `SNAPSHOT_STATUS=PARTIAL`；看 `D:\cloudrdp-sys\_state\user-restore.log` |
 | **UU远程 每次都当新设备 / 反复要求登录或创建账号** | **根因**：UU远程 的设备身份在 `C:\ProgramData\Netease\GameViewer`（`deviceId`/`uuid`/协助码）与 `%LOCALAPPDATA%\GameViewer`（`setting.ini`）—— 前者是**机器级**路径，不在以 `%RDPUSERPROFILE%` 为中心的 `files.dirs` 里，于是每轮新机器都被当成全新设备 | **已修**：两处都进 `files.dirs` + `files.noExcludeDirs`，`programs.dataGlobs` 再兜一层，并加 `restore.userDataTargets` 校验 → ENV READY 打印 `UU远程设备 : OK/PARTIAL/MISSING`（详见第四节 §12）。⚠️ 协助码是 DPAPI 密文、跨机解不开会被重新生成（同 Edge 的 `os_crypt`），想彻底免掉请**登录 UU 账号** |
+| 云机上看到一个 `runneradmin` 账户 | 它是 **GitHub 托管 runner 自己的 Windows 账户**（镜像烘焙自带、本次 job 的 runner agent 正以它身份跑），**不是 UU远程 / 流程建的**（全仓零账户创建代码，只建 `a`） | **已处理**：删不掉（删了 job 当场死），但已从「登录界面 + 资源管理器」隐藏 → 用户视角只剩 `a`。ENV READY 会打 `账户 : 唯一可见 = a  已隐藏 runneradmin`；有未知账户会黄字告警（详见第四节 §14） |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
 | 定时场不跑额度检测 | 按需求跳过（`if: workflow_dispatch`） | 正常。手动 Run workflow 才显示额度 |

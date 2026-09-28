@@ -227,6 +227,26 @@ jobs:
           if (-not $created) { throw "创建管理员账号失败" }
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
           Write-Host "[0b] 账号就绪: $env:RDP_USERNAME"
+          # ── 账户守卫：让「用户视角只有 a 一个管理员账户」 ──────────────────────
+          # runneradmin 是 GitHub-hosted runner 自己的 Windows 账户（镜像烘焙时就有，
+          # 本次 job 的 runner agent 正以它身份在跑）—— 删它/降它的权 = 当场把 job 弄死，
+          # 所以这里**不删、不降权**，只把它从「登录界面 + 资源管理器」里藏掉。
+          # 真机取证与诚实边界见 scripts/account-lib.ps1 头注 / README §14。
+          try {
+            $accLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\account-lib.ps1'
+            if (Test-Path -LiteralPath $accLib) {
+              . $accLib
+              $acc = Hide-RdpNonRdpAccounts -RdpUser $env:RDP_USERNAME -Log { param($m) Write-Host ('[0b] ' + $m) }
+              $wl  = Test-RdpAccountWhitelist -RdpUser $env:RDP_USERNAME
+              if (-not $wl.ok) {
+                Write-Warning ('[0b] 出现非预期账户（可能有东西在偷偷建账户）：' + ($wl.unknown -join ', '))
+              }
+              "ACCOUNT_HIDE=" + ($acc.hidden -join ',') | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+              "ACCOUNT_UNKNOWN=" + ($wl.unknown -join ',') | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+            } else {
+              Write-Host '[0b] 未找到 account-lib.ps1 —— 跳过账户隐藏（不影响开机）'
+            }
+          } catch { Write-Host "[0b] 账户隐藏失败（可忽略）：$($_.Exception.Message)" }
           "RDP_USER=$env:RDP_USERNAME" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
           # 数据目录 + 可移动程序暂存目录（公共桌面放快捷方式，避免把文件存到不会被同步的地方）
           try {
@@ -634,6 +654,16 @@ jobs:
             Write-Host "  连接信息邮件 : $mr   (诊断日志 $sysDir\_state\mail.log)" -ForegroundColor $mrc
           }
           Write-Host "  快照一致性   : $env:SNAP_QUIESCE  (全量快照前关闭占用程序，保证 SQLite/LevelDB 落盘一致)" -ForegroundColor DarkGray
+          $ah = $env:ACCOUNT_HIDE
+          if (-not [string]::IsNullOrWhiteSpace($ah)) {
+            Write-Host "  账户         : 唯一可见 = $($env:RDP_USERNAME)   已隐藏 $ah   (登录界面/资源管理器不显示；runneradmin 是 GitHub runner 本体、删不掉，详见 README §14)" -ForegroundColor DarkGray
+          } else {
+            Write-Host "  账户         : 只有 $($env:RDP_USERNAME) 一个已启用账户（无需要隐藏的镜像账户）" -ForegroundColor DarkGray
+          }
+          $au = $env:ACCOUNT_UNKNOWN
+          if (-not [string]::IsNullOrWhiteSpace($au)) {
+            Write-Host "  !! 出现非预期账户：$au —— 可能有东西在自动建账户，请排查（需求：不要自动创建新的用户账户）" -ForegroundColor Yellow
+          }
           $scC = $env:SNAPSHOT_SHORTCUTS_CAPTURED
           if (-not [string]::IsNullOrWhiteSpace($scC) -and $scC -ne "0") {
             $scM = $env:SNAPSHOT_SHORTCUTS_MB

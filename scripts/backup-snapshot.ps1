@@ -796,6 +796,13 @@ else {
                              $env:CLOUDRDP_SNAPSHOT_STAGE, $env:CLOUDRDP_PROGRAMS_DIR, $env:CLOUDRDP_PORTABLE_DIR)) {
                 if (-not [string]::IsNullOrWhiteSpace($b)) { $skipPrefixes.Add([string]$b) }
             }
+            # ⚠️ 其它用户的 profile（尤其是 runneradmin —— 本脚本正以它身份跑）不能进「快捷方式线索」：
+            #    否则会读出一堆 C:\Users\runneradmin\... 的死链，把人误导成「UU远程 在 runneradmin 下装东西」。
+            #    真机日志实证：快捷方式线索跳过：UU远程.lnk -> 目标不存在: C:\Users\runneradmin\Downloads\GameViewer\GameViewer.exe
+            foreach ($ud in @(Get-ChildItem -LiteralPath "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyContinue)) {
+                if ($ud.Name -in @($RdpUser, 'Public', 'Default', 'Default User', 'All Users')) { continue }
+                $skipPrefixes.Add($ud.FullName)
+            }
 
             $scRes = Get-ShortcutTargets -Dirs $scDirs.ToArray() -Boundaries $boundaries.ToArray() `
                         -SkipPrefixes $skipPrefixes.ToArray() `
