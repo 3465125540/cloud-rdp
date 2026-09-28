@@ -1716,18 +1716,38 @@ def main():
           "其它用户的 profile" in bs_txt and "-in @($RdpUser" in bs_txt)
     check("T347 account-lib 全部 fail-soft（多处 try/catch，永不抛异常）",
           ac_txt.count("catch") >= 4)
-    _acct_creators = []
-    for _fn in sorted(os.listdir(os.path.join(repo_dir, "scripts"))):
-        if not _fn.endswith(".ps1"):
-            continue
-        _t = open(os.path.join(repo_dir, "scripts", _fn), encoding="utf-8-sig",
-                  errors="replace").read()
-        _code = re.sub(r"<#.*?#>", "", _t, flags=re.S)          # 去块注释
-        _code = "\n".join(l for l in _code.splitlines() if not l.lstrip().startswith("#"))
-        if re.search(r"New-LocalUser|net\s+user\s+\S+\s+/add|Add-LocalGroupMember", _code):
-            _acct_creators.append(_fn)
-    check("T348 ★ 除 workflow 0b 外 scripts/ 零账户创建代码（流程只建 a 一个账户）",
-          _acct_creators == [], str(_acct_creators))
+    # ★ 全仓审计（不只 scripts/）：把「零账户创建代码」的证据面扩到 .github / workbench / deploy。
+    #   结论必须成立：全仓唯一建账户的代码 = workflow 0b，且只建 $env:RDP_USERNAME（= a）。
+    #   注释与文档不算（README / 库头注里会「提到」这些 cmdlet，属于说明而非执行）。
+    _acct_re = re.compile(r"New-LocalUser|net\s+user\s+\S+\s+/add|net1\s+user|Add-LocalGroupMember|"
+                          r"New-LocalGroup|wmic\s+useraccount|Win32_UserAccount", re.I)
+    _skip_dirs = {".git", "__pycache__", "node_modules", ".tmp-lint", ".tools", "static"}
+    _skip_files = {os.path.join(repo_dir, "workbench", "selftest.py")}   # 本测试自身含模式串
+    _acct_hits = []
+    for _r, _ds, _fs in os.walk(repo_dir):
+        _ds[:] = [d for d in _ds if d not in _skip_dirs]
+        for _fn in _fs:
+            _ext = os.path.splitext(_fn)[1].lower()
+            if _ext not in (".ps1", ".psm1", ".py", ".yml", ".yaml", ".json", ".cmd", ".bat", ".vbs"):
+                continue
+            _fp = os.path.join(_r, _fn)
+            if _fp in _skip_files:
+                continue
+            try:
+                _t = open(_fp, encoding="utf-8-sig", errors="replace").read()
+            except Exception:
+                continue
+            _c = re.sub(r"<#.*?#>", "", _t, flags=re.S)     # PowerShell 块注释
+            _c = "\n".join(l for l in _c.splitlines() if not l.lstrip().startswith("#"))
+            for _i, _l in enumerate(_c.splitlines(), 1):
+                if _acct_re.search(_l):
+                    _acct_hits.append((os.path.relpath(_fp, repo_dir).replace("\\", "/"),
+                                       _i, _l.strip()[:90]))
+    check("T348 ★ 全仓（含 .github / workbench / deploy）只有 workflow 0b 建账户，且只建 a",
+          len(_acct_hits) > 0 and all(
+              h[0] == ".github/workflows/windows-rdp.yml" and "RDP_USERNAME" in h[2]
+              for h in _acct_hits),
+          str(_acct_hits[:5]))
 
     # ---------------- 池行实时纠偏：机器实况 vs 账号面板口径一致（v1.6.1） ----------------
     # 需求原文：「优化 机器运行实况 acc-3 · 3465125540 / 池内机器 · primary / 100.93.93.91 /
@@ -1780,6 +1800,13 @@ def main():
     check("T355 拿不到实时 run（非 hub）→ 保持 pool-state 的 in_progress / run_source=pool-state",
           len(_r_stale) == 1 and _r_stale[0].get("machine_state") == "running"
           and _r_stale[0].get("run_source") == "pool-state", str(_r_stale[:1]))
+
+    # ★ 会话中复查（不只开机一次）：保活循环每 10 分钟复核账户白名单 ——
+    #   若真有人偷偷建账户，日志当场黄字点名；没有则每 10 分钟留一条「复核通过」的正面证据。
+    #   这一步把「不要自动创建新的用户账户」从「开机一次性断言」升级为「全程监控」。
+    check("T356 ★ 保活循环每 10 分钟复查账户白名单（会话中新建账户也会被抓到，不止开机一次）",
+          "[account]" in wf_txt and wf_txt.count("Test-RdpAccountWhitelist") >= 2
+          and wf_txt.count("Hide-RdpNonRdpAccounts") >= 2)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

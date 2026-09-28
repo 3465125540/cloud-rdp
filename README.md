@@ -949,7 +949,7 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 |------|------|------|
 | `runneradmin` 的 profile 元数据 | `ctime = 2026/9/22 22:26:18`、`NTUSER.DAT mtime = 09/22 22:56:20` —— **两台机器完全一致** | 是**镜像烘焙时**就有的，不是哪一次开机、哪一个脚本建的 |
 | 与本次开机时间的关系 | 本次开机 `2026-09-28 00:45Z`，而 ctime 是 `09-22` | 早于任何一次开机 ⇒ **不是开机流程建的** |
-| 全仓 grep（含 `.github`） | `New-LocalUser` / `net user` / `Add-LocalGroupMember` / `Remove-LocalUser` / `Disable-LocalUser` / `wmic useraccount` **只命中 workflow 第 0b 步**（建 `a`） | **流程只建 `a` 一个账户**，别的账户都不是我们建的 |
+| 全仓 grep（含 `.github`） | `New-LocalUser` / `net user` / `Add-LocalGroupMember` / `Remove-LocalUser` / `Disable-LocalUser` / `wmic useraccount` **只命中 workflow 第 0b 步**（建 `a`） | **流程只建 `a` 一个账户**，别的账户都不是我们建的（现已由 **T348 常驻守护**：全仓 `.ps1/.py/.yml/.json/.cmd/.vbs` 逐行扫，0b 之外任何建账户代码都会让自测失败） |
 | `runneradmin` 的身份 | `runs-on: windows-latest`；工作区是 hosted 专属的 `D:\a\<repo>\<repo>`；`slim-image.ps1` 硬保护名单里就有 `C:\actions-runner` | `runneradmin` = **GitHub-hosted runner 自己的 Windows 账户**（本次 job 的 runner agent 正以它身份在跑） |
 | UU远程 是否建账户 | `C:\Program Files\Netease\GameViewer\` 里是 `GameViewer.exe` + **`GameViewerService.exe`**（服务） | UU远程 = 网易 GameViewer，**只装服务、不建 Windows 账户**；它的「设备/账号」是应用自己的概念（见 §12） |
 | `C:\Users\` 一级目录 | `a` / `runneradmin` / `Public` / `Default` / `Default User` | 与 §12 一致，没有第三张「新面孔」 |
@@ -976,11 +976,13 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 |------|------|
 | ① 登录界面隐藏 | `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList\<name> = 0` —— 锁屏 / 切换用户 / UAC 凭据选择器 / 「用户账户」控制面板都不再列它。**认证本身不受影响**（显式指定用户名照样能登），runner 服务更不受影响 |
 | ② profile 目录隐藏 | `attrib +h +s C:\Users\<name>` —— 资源管理器默认不显示（即便开了「显示隐藏文件」，system 属性仍会被「隐藏受保护的操作系统文件」挡掉） |
-| ③ 白名单断言 | `Test-RdpAccountWhitelist`：除「`a` + 内置账户 + `runneradmin`」之外的账户一律判为**异常**并打 `##[warning]` —— 直接对应「不要自动创建新的用户账户」 |
+| ③ 白名单断言 | `Test-RdpAccountWhitelist`：除「`a` + 内置账户 + `runneradmin`」之外的账户一律判为**异常** —— 直接对应「不要自动创建新的用户账户」。**开机（0b）与保活循环各查一次**，不是只查一次 |
 | ④ 报告透出 | workflow 第 13 步 ENV READY 打一行 `账户 : 唯一可见 = a  已隐藏 runneradmin, …`；有未知账户时另打黄字告警 |
 | ⑤ 顺手修误导 | `backup-snapshot.ps1` 的「快捷方式线索」把**其它用户 profile**（尤其 `C:\Users\runneradmin`）加进 `-SkipPrefixes` —— 那些死链再也不会出现在日志里把人带偏 |
+| ⑥ 会话中监控 | 保活循环（第 14 步）**每 10 分钟**复核白名单：没变化就留一条 `[account] 账户白名单复核通过` 的正面证据；真冒出未知账户 → **黄字点名**（写出账户名）+ 顺手隐藏 —— 把「开机一次性断言」升级成「全程监控」，任何时刻建的账户都跑不掉 |
 
-**调用点**：workflow **第 0b 步**（建完 `a` 立刻隐藏 + 白名单），结论写 `ACCOUNT_HIDE` / `ACCOUNT_UNKNOWN` 进 `GITHUB_ENV`。
+**调用点**：workflow **第 0b 步**（建完 `a` 立刻隐藏 + 白名单），结论写 `ACCOUNT_HIDE` / `ACCOUNT_UNKNOWN` 进 `GITHUB_ENV`；
+**第 14 步保活循环**每 10 分钟再复核一次（日志前缀 `[account]`）。
 
 **运维开关**：
 
@@ -995,7 +997,7 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **431 PASS / 0 FAIL**（本批 T337–T348 共 12 条；§15 另加 T349–T355 共 7 条） |
+| `selftest.py` | **432 PASS / 0 FAIL**（T337–T348 账户批共 12 条 + T349–T355 池行批共 7 条 + T356 会话中复查 1 条）。其中 **T348 已升级为全仓审计**（`.github` / `workbench` / `deploy` 全扫），不只 `scripts/` |
 | `account-lib.ps1` 本机 dry-run 冒烟 | 清单 / 白名单 / 隐藏计划 / 报告行四个函数全部正常返回，无异常 |
 | 33 个 `scripts/*.ps1` AST 解析 | 全通过；YAML 合法（25 步） |
 
