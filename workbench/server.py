@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -222,7 +222,8 @@ _CACHE_LOCK = threading.Lock()
 #   building   —— 正在跑的构建数（>0 = 已有后台重建在跑；被动重建据此不叠）
 #   seq/store_seq —— 单调序号：只有「更晚开始的那次构建」才允许覆盖快照，
 #                    免得一个慢的后台构建盖掉用户刚点「刷新」拿到的结果
-_OV = {"data": None, "at": 0.0, "dirty": False, "building": 0, "seq": 0, "store_seq": 0}
+_OV = {"data": None, "at": 0.0, "dirty": False, "building": 0, "seq": 0, "store_seq": 0,
+       "build_secs": 0.0}
 _OV_LOCK = threading.Lock()
 
 
@@ -241,6 +242,9 @@ def cached(key, ttl, fn):
 def clear_cache():
     with _CACHE_LOCK:
         _CACHE.clear()
+    # 「刷新」/写操作后允许重新尝试 net use（清掉失败冷却）。已成功建过会话的 IP 不动 ——
+    # 对已有会话再 net use 一次会报 1219「多重连接」，反而把一次正常读取判成失败。
+    _SMB_FAIL.clear()
     # 快照也一并标记作废 → 下次 /api/overview 会重建。
     # 这样「触发 workflow / 改账号 / 下发备份」后调的 clear_cache() 才真能让面板拿到新数据。
     with _OV_LOCK:
@@ -525,8 +529,21 @@ def job_tailscale_ip(owner, repo, run_id):
             return ""
         m = _JOB_IP_RE.search(txt or "")
         return m.group(1) if m else ""
-    # job 一旦结束，它的日志内容与 IP 都不再变 —— 缓存久一点，省得每次刷新都拉日志。
-    return cached("job_ip:%s/%s:%s" % (owner, repo, run_id), 3600, probe)
+
+    # 命中（拿到 IP）缓存 1 小时 —— job 一旦结束，日志内容与 IP 都不再变。
+    # **落空只缓存 60 秒**：机器还在初始化时日志里还没有 [0c] 那一行，若把空值也缓存
+    # 1 小时，机器起来了面板也永远学不到它的 IP —— 这正是「实况刷新不准确」的真凶之一
+    # （点刷新 → clear_cache 清掉之后才会重新学，于是表现成「刷新一下有时才对」）。
+    key = "job_ip:%s/%s:%s" % (owner, repo, run_id)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+    if hit and hit[1] and time.time() - hit[0] < 3600:
+        return hit[1]
+    ip = cached(key + ":probe", 60, probe)
+    if ip:
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.time(), ip)   # 学到了就长期记住（1 小时）
+    return ip
 
 
 def tcp_open(ip, port, timeout=2.0):
@@ -554,6 +571,47 @@ def pool_row_netinfo(owner, repo, run_id):
     info["ip_source"] = "Actions job 日志（机器自报 [0c] Tailscale IP）"
     info["reachable"] = cached("reach:%s" % ip, 60, lambda: tcp_open(ip, 3389))
     return info
+
+
+def pool_ip_accounts():
+    """「账号池里正在跑的 run」→ 它机器的 Tailscale IP → 账号。返回 {ip: (account_id, owner)}。
+
+    用途：「机器运行实况」归属的**兜底来源 ③**。机器上的 D$ 共享没起来时（`net use`
+    报系统错误 67 / 1702），`_state\\pool-info.txt`（来源①）与 runner 工作区
+    `.git\\config`（来源②）都读不到，唯一还能说明「这台是谁的」的线索就是
+    「哪个账号的 run 正在跑、那个 run 的机器自报的 IP 是多少」。
+
+    只认 keepalive 的 `in_progress` run —— 一次性 runner 的存在性 = job 的存在性。
+    刻意**不用** `last_run` 兜底：已结束的 run 的 IP 可能已被新机器复用，拿它反查会把
+    归属标错，比留空更糟。
+
+    `job_tailscale_ip` 自身按 run 缓存，所以这里每次调用只是一批廉价缓存查询。
+    """
+    out = {}
+    try:
+        runs = get_runs(include_accounts=True)
+    except Exception:
+        return out
+    if not runs.get("ok"):
+        return out
+    for g in (runs.get("accounts") or []):
+        if not isinstance(g, dict):
+            continue
+        owner = str(g.get("owner") or "")
+        repo_name = str(g.get("repo") or "")
+        if not owner or not repo_name:
+            continue
+        aid = str(g.get("id") or "")
+        for r in (g.get("keepalive") or []):
+            if not isinstance(r, dict) or (r.get("status") or "") != "in_progress":
+                continue
+            rid = r.get("id")
+            if rid is None:
+                continue
+            ip = job_tailscale_ip(owner, repo_name, rid)
+            if ip:
+                out[str(ip)] = (aid, owner)
+    return out
 
 
 # ==================================================================== 时间工具
@@ -763,37 +821,74 @@ def smb_backend():
     return "unc" if IS_WINDOWS else "smbclient"
 
 
-_SMB_DONE = set()
+_SMB_DONE = set()        # 已经成功建过 net use 会话的 IP（成功才进这里）
+_SMB_FAIL = {}           # ip -> 最近一次 net use 失败的时刻
+_SMB_FAIL_COOLDOWN = 60.0  # 失败后 60 秒内不再折腾 net use（避免每读一个文件都白等一次超时）
 
 
 def _smb_preauth(ip):
-    """Windows 下用 net use 预建会话，让后续 open(UNC) 能通过鉴权。"""
+    """Windows 下用 net use 预建会话，让后续 open(UNC) 能通过鉴权。
+
+    **只有 `net use` 真的成功（returncode 0）才返回 True。** 早先不管成败都返回 True，
+    调用方随即把 IP 记进 `_SMB_DONE`，于是一次失败（机器还在初始化、D$ 共享还没起来 →
+    系统错误 67）就被永久判死，之后再也不会重试 —— 机器起来了「主机」列还一直是
+    「账号未知」，点多少次刷新都没用。这是「实况刷新不准确」的真凶之一。
+    """
     if not IS_WINDOWS:
         return False
     try:
         share = "\\\\%s\\%s" % (ip, CONFIG.get("smb_share") or "D$")
-        subprocess.run(["net", "use", share, "/user:" + str(CONFIG.get("rdp_user") or "a"),
-                        str(CONFIG.get("rdp_password") or "a")],
-                       capture_output=True, timeout=25, creationflags=NO_WINDOW)
-        return True
+        out = subprocess.run(["net", "use", share, "/user:" + str(CONFIG.get("rdp_user") or "a"),
+                              str(CONFIG.get("rdp_password") or "a")],
+                             capture_output=True, timeout=25, creationflags=NO_WINDOW)
+        return out.returncode == 0
     except Exception:
         return False
 
 
+def _smb_preauth_once(ip):
+    """要不要、能不能为这个 IP 做一次 `net use` 预鉴权。
+
+    已成功建过会话的 → 不再建（对已有会话再 net use 会报 1219「多重连接」）；
+    刚失败过的 → 冷却期内不折腾（见 `_SMB_FAIL_COOLDOWN`）；否则试一次并如实记录成败。
+    """
+    if ip in _SMB_DONE:
+        return False
+    now = time.time()
+    if now - _SMB_FAIL.get(ip, 0.0) < _SMB_FAIL_COOLDOWN:
+        return False
+    if _smb_preauth(ip):
+        _SMB_DONE.add(ip)
+        return True
+    _SMB_FAIL[ip] = now
+    return False
+
+
 def _read_unc(ip, unc):
     """读一个 UNC 文本文件。首次失败时 `net use` 预鉴权后重试一次；仍失败抛异常。"""
-    err = None
-    for attempt in (0, 1):
-        try:
-            with open(unc, "r", encoding="utf-8-sig", errors="replace") as f:
-                return f.read()
-        except Exception as e:
-            err = e
-            if attempt == 0 and ip not in _SMB_DONE and _smb_preauth(ip):
-                _SMB_DONE.add(ip)
-                continue
-            break
-    raise err
+    try:
+        with open(unc, "r", encoding="utf-8-sig", errors="replace") as f:
+            return f.read()
+    except Exception:
+        if not _smb_preauth_once(ip):
+            raise
+        with open(unc, "r", encoding="utf-8-sig", errors="replace") as f:
+            return f.read()
+
+
+def smb_err_text(e):
+    """把 SMB 读取异常翻成人话 —— 原始 errno 文本（`[Errno 22] Invalid argument: '\\\\\\\\ip\\\\D$\\\\...'`）
+    对用户毫无意义，还会把远端路径糊在 tooltip 里。"""
+    s = "%s" % (e or "")
+    if "Errno 22" in s or "Invalid argument" in s:
+        return "远端共享不可达（机器上 D$ 还没共享出来 / net use 预鉴权失败）"
+    if "Errno 13" in s or "Permission denied" in s:
+        return "远端共享拒绝访问（凭据不对 / 共享权限）"
+    if "Errno 2" in s or "No such file" in s:
+        return "远端文件不存在（机器还没写这个文件）"
+    if "Errno 53" in s or "Errno 67" in s:
+        return "找不到远端网络名（SMB 服务未就绪）"
+    return s
 
 
 # ---------- Linux：smbclient 后端 ----------
@@ -889,8 +984,7 @@ def write_remote_text(ip, rel, text):
             f.write(text)
         return True
     except Exception:
-        if ip not in _SMB_DONE and _smb_preauth(ip):
-            _SMB_DONE.add(ip)
+        if _smb_preauth_once(ip):
             with open(unc, "w", encoding="utf-8", newline="\n") as f:
                 f.write(text)
             return True
@@ -950,6 +1044,12 @@ def collect_machines(peers, account_list):
 
     `/api/overview` 与 `/api/machines` 必须走同一条路，否则两个端点出来的机器形状不一致
     （曾经 `/api/machines` 漏了归属映射，直接打它拿到的 account_id 是空的）。
+
+    归属三个来源，依次兜底：
+      ① 机器自己写的 `_state\\pool-info.txt`（pool_owner）—— 最权威，但需 SMB 可读
+      ② runner 工作区 `D:\\a\\<repo>\\.git\\config` 的 origin owner —— 需 SMB 可读
+      ③ **账号池反查**：哪个账号的 run 正在跑、那个 run 自报的 IP 是哪台 → 这台就是它的
+         （SMB 完全读不到时的唯一线索；见 `pool_ip_accounts`）
     """
     machines = []
     peers = peers or []
@@ -959,6 +1059,27 @@ def collect_machines(peers, account_list):
         for p, d in zip(peers, details):
             machines.append(dict(p, **d))
     map_machine_accounts(machines, account_list or [])
+    # 来源 ③：SMB 读不到归属时，用「账号池里正在跑的 run」反查 IP → 账号。
+    # 放在 map_machine_accounts **之后** —— 这样它补上的 account_id 不会被再覆盖一次。
+    owner2id = {}
+    for a in (account_list or []):
+        if a.get("owner"):
+            owner2id[str(a["owner"])] = a.get("id") or ""
+    try:
+        ip2acct = pool_ip_accounts()
+    except Exception:
+        ip2acct = {}
+    if ip2acct:
+        for m in machines:
+            if m.get("pool_owner"):
+                continue          # ① / ② 已经读到了，别覆盖（权威优先）
+            hit = ip2acct.get(str(m.get("ip") or ""))
+            if not hit:
+                continue
+            aid, owner = hit
+            m["pool_owner"] = owner
+            m["account_id"] = owner2id.get(owner, "") or aid
+            m["owner_source"] = "账号池反查（该账号的 run 正在跑，其 job 日志自报此 IP）"
     return machines
 
 
@@ -1180,7 +1301,7 @@ def _machine_detail_reads(ip):
         detail["role"] = r
         detail["role_source"] = "本机 _state/pool-role.txt"
     elif isinstance(r, Exception):
-        detail["error"] = "读角色失败：%s" % r
+        detail["error"] = "读角色失败：%s" % smb_err_text(r)
     # 快照清单
     detail["snapshot"] = (res.get("manifest") if isinstance(res.get("manifest"), dict)
                           else {"ok": False})
@@ -2390,7 +2511,16 @@ def build_overview():
 #     稍后自动取到新值）—— 不让按钮把页面冻住十几秒。
 # 代价：任何一次响应看到的数据最多落后一轮（≈ overview_seconds），对监控面板够用。
 def _overview_ttl():
-    return float(CONFIG.get("overview_seconds") or CONFIG.get("cache_seconds") or 20)
+    """快照的「新鲜期」：配置值，但**不小于**上次构建耗时 + 5 秒。
+
+    一次 build_overview 冷构建实测 13~49 秒，而 `overview_seconds` 默认只有 20 ——
+    只看配置值的话，构建一完成就已经「过期」，于是每个请求都在踢重建、面板永远显示
+    「后台刷新中」，看着就像「实况刷新不准确」（点刷新也永远是旧的）。用实测耗时兜住它。
+    """
+    base = float(CONFIG.get("overview_seconds") or CONFIG.get("cache_seconds") or 20)
+    with _OV_LOCK:
+        took = float(_OV.get("build_secs") or 0.0)
+    return max(base, took + 5.0)
 
 
 def _overview_decorate(d, age, stale):
@@ -2409,7 +2539,9 @@ def _overview_build(force_clear):
     if force_clear:
         clear_cache()
         resolve_token(force=True)
+    t0 = time.time()
     d = build_overview()
+    took = time.time() - t0
     with _OV_LOCK:
         # 只有「不更早开始的那次构建」才允许覆盖 —— 免得慢的后台构建盖掉刚点刷新的结果。
         if my >= _OV["store_seq"]:
@@ -2417,6 +2549,7 @@ def _overview_build(force_clear):
             _OV["at"] = time.time()
             _OV["store_seq"] = my
             _OV["dirty"] = False
+        _OV["build_secs"] = took     # 实测耗时 → 用来兜住 _overview_ttl（别一建好就过期）
         return _OV["data"], _OV["at"]
 
 
@@ -2509,7 +2642,11 @@ def overview_snapshot(force=False):
     age = time.time() - at
     if dirty or age >= ttl:
         _overview_kick()
-        return _overview_decorate(data, age, True)
+        with _OV_LOCK:
+            building = _OV["building"] > 0
+        # stale **只表示「后端正在重建，马上会有新值」** —— 不再是「比 ttl 旧就算陈旧」。
+        # 否则构建耗时 > ttl 时面板会永远显示「后台刷新中」，正是「刷新不准确」的表象。
+        return _overview_decorate(data, age, bool(building or dirty))
     return _overview_decorate(data, age, False)
 
 

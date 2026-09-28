@@ -8,6 +8,9 @@ var RUNS_LIMIT = 0;        // 日志表格行数上限（0 = 不限；「缩略�
 var TIMER = null;
 var BUSY = false;
 var STALE_RETRY = null;    // 收到「陈旧快照」后的补拉定时器（后端在后台重建，稍后取新值）
+var REFRESHING = false;    // 用户点了「刷新」，正在等后端后台重建出**新**快照（stale=false 才收工）
+var REFRESH_TRIES = 0;     // 为这次刷新补拉了几次（防止永远转圈）
+var FORCE_PENDING = false; // 点刷新时正好有请求在途 → 记下来，等它结束再补发（否则点击被静默丢掉）
 
 /* ------------------------------------------------------------ 小工具 */
 function $(sel) { return document.querySelector(sel); }
@@ -130,17 +133,53 @@ function localRdpCmd(c) {
 /* ------------------------------------------------------------ 拉数据 */
 // 收到「陈旧快照」后，稍后补拉一次：后端正在后台重建，早点把新值取回来（别一直看旧值）。
 // 若正好撞上一次在途请求（BUSY）就顺延，别把这次补拉丢了。
+// 用户点了「刷新」时（REFRESHING）用更短的间隔 —— 那是他在盯着屏幕等，不能 5 秒一跳。
 function scheduleStaleRetry(ms) {
   if (STALE_RETRY) return;
   STALE_RETRY = setTimeout(function () {
     STALE_RETRY = null;
     if (BUSY) { scheduleStaleRetry(ms); return; }
     load(false);
-  }, ms || 5000);
+  }, ms || (REFRESHING ? 2500 : 5000));
+}
+// 「刷新」按钮的忙碌态：转圈期间按钮变「刷新中…」并禁用，让「点了没反应」不再发生。
+// 首次调用时把原始文案记进 dataset.idle —— 两个按钮文案不同（刷新 / 强制刷新缓存）。
+function setRefreshBtns(on) {
+  ["#btn-refresh", "#btn-refresh2"].forEach(function (sel) {
+    var b = $(sel);
+    if (!b) return;
+    if (b.dataset.idle === undefined) b.dataset.idle = b.textContent;
+    b.disabled = !!on;
+    b.textContent = on ? "刷新中…" : b.dataset.idle;
+  });
+}
+// 顶部「更新于 …」：诚实说明**这份数据**有多旧、后端是否还在后台重建。
+// 以前只写「更新于 <数据生成时刻>」，点刷新后时间戳原地不动甚至倒退 → 看着就像「刷新不准确」。
+// 现在恒定带上「（N 秒前）」—— 数据有多旧一眼可见，不用猜。
+function updateStamp(d) {
+  var el = $("#last-updated");
+  if (!el) return;
+  var when = d.generated_at ? new Date(d.generated_at) : new Date();
+  var age = Math.max(0, Math.round(d.age_seconds || 0));
+  var stamp = "更新于 " + when.toLocaleTimeString("zh-CN") + "（" + age + " 秒前）";
+  if (REFRESHING) {
+    el.textContent = "刷新中…（当前数据 " + age + " 秒前）";
+    el.title = "已让后端丢弃缓存重建。屏幕上这份快照生成于 " + (d.generated_at || "?") +
+      "（约 " + age + " 秒前）；重建完会自动切到新数据（「刷新」不会阻塞页面）。";
+    scheduleStaleRetry(2500);
+  } else if (d.stale) {
+    el.textContent = stamp + " · 正在后台重建";
+    el.title = "后端正在后台重建这份快照，建好后面板会自动切到新数据（不会阻塞页面）。";
+    scheduleStaleRetry();
+  } else {
+    el.textContent = stamp;
+    el.title = "数据生成于 " + (d.generated_at || "?") + "（服务 v" + (d.version || "?") + "）";
+  }
 }
 function load(force) {
-  if (BUSY) return;
+  if (BUSY) { if (force) FORCE_PENDING = true; return; }   // 别把用户这次点击静默丢掉
   BUSY = true;
+  if (force) { REFRESHING = true; REFRESH_TRIES = 0; setRefreshBtns(true); }
   var url = "/api/overview" + (force ? "?refresh=1" : "");
   api(url).then(function (d) {
     if (d.warming) {
@@ -154,21 +193,23 @@ function load(force) {
     }
     DATA = d;
     render();
-    // 后端现在返回的是「快照」：陈旧时会先把旧值秒回、再在后台重建。
+    // 后端返回的是「快照」：陈旧时会先把旧值秒回、再在后台重建。
     // 所以「更新于」要用数据自己的生成时间（generated_at），而不是「这次请求到达的时间」。
-    var when = d.generated_at ? new Date(d.generated_at) : new Date();
-    var el = $("#last-updated");
-    var txt = "更新于 " + when.toLocaleTimeString("zh-CN");
-    if (d.stale) {
-      txt += " · 后台刷新中…";
-      el.title = "当前显示的是约 " + (d.age_seconds || 0) + " 秒前的快照；后端正在后台拉取最新数据，稍后自动更新";
-      scheduleStaleRetry();
-    } else {
-      el.title = "数据生成于 " + (d.generated_at || "?") + "（服务 v" + (d.version || "?") + "）";
+    if (REFRESHING) {
+      if (!d.stale) {
+        REFRESHING = false;                 // 后端交出新快照了，收工
+        setRefreshBtns(false);
+        toast("已刷新到最新数据", "ok", 2500);
+      } else if (++REFRESH_TRIES > 60) {    // ~150 秒还没好：别再转圈骗人，如实说明
+        REFRESHING = false;
+        setRefreshBtns(false);
+        toast("后台刷新较慢（面板仍显示约 " + age0(d) + " 秒前的数据），稍后会自动更新", "warn", 8000);
+      }
     }
-    el.textContent = txt;
+    updateStamp(d);
   }).catch(function (e) {
     toast("拉取失败：" + esc(e.message), "bad", 12000);
+    if (REFRESHING) { REFRESHING = false; setRefreshBtns(false); }
     if (!DATA) {
       // 首次就失败：把原因常驻在页面上（别让它几秒后消失），并给出正确入口
       $("#brand-sub").textContent = "未连上工作台后端";
@@ -180,8 +221,10 @@ function load(force) {
     }
   }).then(function () {
     BUSY = false;
+    if (FORCE_PENDING) { FORCE_PENDING = false; load(true); }   // 补发被挡下的那次刷新
   });
 }
+function age0(d) { return Math.max(0, Math.round((d && d.age_seconds) || 0)); }
 
 /* ------------------------------------------------------------ 渲染 */
 function render() {
@@ -495,6 +538,13 @@ function renderMachines() {
     metaParts.push("另有 " + poolOnly.length + " 台池内机器" +
       (poolRunning ? "（" + poolRunning + " 台运行中）" : "") + "，本机 Tailscale 视图未看到其节点");
   }
+  // 在线却读不到归属的机器：在标题里点出来，别让用户自己一行行找「账号未知」。
+  var unknownOwner = nodes.filter(function (m) {
+    return m.online && !m.account_id && !m.pool_owner;
+  }).length;
+  if (unknownOwner) {
+    metaParts.push(unknownOwner + " 台在线机器读不到归属（机器上 D$ 共享未就绪，SMB 读不到）");
+  }
   metaEl.textContent = metaParts.join(" · ");
   // 离线节点基本都是一次性 Actions runner 跑完没从 tailnet 摘掉的残留（不是故障）。
   metaEl.title = nodes.length
@@ -573,13 +623,21 @@ function renderMachines() {
     // 主机列第二行：机器归属的账号
     //   来源① 池机器写的 _state\pool-info.txt（pool_owner）→ 映射成账号池 id
     //   来源② 单机/老机器：runner 工作区 .git\config 的 origin owner（owner_source 标明来源）
+    //   来源③ 账号池反查：哪个账号的 run 正在跑、其 job 日志自报这个 IP（SMB 读不到时的兜底）
     var acct = "";
     if (m.account_id || m.pool_owner) {
       var label = [m.account_id, m.pool_owner].filter(function (x) { return !!x; }).join(" · ");
       var src = m.owner_source ? "，来源：" + m.owner_source : "";
       acct = '<div class="acct muted" title="该机器由这个账号派发' + esc(src) + '">' + esc(label) + "</div>";
     } else if (online) {
-      acct = '<div class="acct muted" title="读不到机器上的归属信息（SMB 鉴权失败 / 机器未就绪）">账号未知</div>';
+      // 在线却读不到归属 —— 说清楚「为什么读不到」「怎么才能读到」，
+      // 而不是干巴巴一句「账号未知」（用户只会以为面板坏了，然后反复点刷新）。
+      acct = '<div class="acct muted" data-tip="这台机器在线，但读不到它的归属账号：' +
+        '机器上的 D$ 共享还没起来（net use 预鉴权失败 / 系统错误 67），于是 ' +
+        '_state\\pool-info.txt 与 runner 工作区 .git\\config 都读不到。' +
+        (m.error ? "\n" + m.error : "") +
+        '\n点右上角「刷新」可立刻重试一次 SMB（不再被旧的失败结果卡住）；机器就绪后会自动补上。">' +
+        '账号未知 <span class="none">· SMB 不可达</span></div>';
     }
     return "<tr>" +
       "<td class=\"strong\"><span data-tip=\"" + esc(hostTip) + "\">" + esc(nodeName || "-") + "</span>" + acct + "</td>" +

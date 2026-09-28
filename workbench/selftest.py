@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 import zipfile
@@ -1027,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.1", server.VERSION == "1.6.1", server.VERSION)
+    check("T168 server.py 版本 1.6.2", server.VERSION == "1.6.2", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -1419,8 +1420,8 @@ def main():
           '"overview_seconds": 20' in srv_txt and '"machine_detail_seconds": 30' in srv_txt)
     check("T276 前端处理 warming（首屏骨架）+ stale 补拉（scheduleStaleRetry）",
           "d.warming" in app_txt and "scheduleStaleRetry" in app_txt and "STALE_RETRY" in app_txt)
-    check("T277 前端「更新于」用 generated_at（快照真实生成时间），stale 时提示后台刷新中",
-          "d.generated_at" in app_txt and "后台刷新中" in app_txt)
+    check("T277 前端「更新于」用 generated_at（快照真实生成时间），stale 时提示后台重建中",
+          "d.generated_at" in app_txt and "正在后台重建" in app_txt)
 
     # 接口实测：离线时 /api/overview 也必须带 stale / age_seconds（前端据此判断新鲜度）
     _code, _body, _ = req(base, "/api/overview")
@@ -1913,6 +1914,232 @@ def main():
             _0p_syn_why = "skip:%s" % type(_ex).__name__
     check("T374 0p 的 run 块能通过 PowerShell AST 解析（缩进/语法护栏）",
           _0p_syn_ok is not False, _0p_syn_why)
+
+    # ---------------- 机器实况「账号未知」+ 刷新不准确（v1.6.2） ----------------
+    # 需求原文：「优化  机器运行实况 主机 账号未知 ，实况刷新不准确」
+    # 现场（2026-09-28）：github-rdp-server-87 / 100.64.46.76 明明 online:true、445+3389 都通，
+    #   「主机」列却写「账号未知」。取证：
+    #     · net use \\100.64.46.76\D$ /user:a a → 系统错误 67「找不到网络名」
+    #     · net view \\100.64.46.76          → 系统错误 1702「绑定句柄无效」
+    #     · 但 ping 通（204ms）、TCP 445/3389 OPEN → 机器在跑，只是 D$ 共享还没起来
+    #       （Windows 还在初始化）⇒ 读 pool-info.txt / .git\config 全失败 ⇒ 归属为空。
+    # 三个真凶：
+    #   ① `_smb_preauth` 不管 net use 成败都 return True → 调用方把 IP 记进 `_SMB_DONE`
+    #      ⇒ 一次失败即**永久**不再重试，机器起来了面板还一直是「账号未知」；
+    #   ② `job_tailscale_ip` 把「落空」也缓存 1 小时 ⇒ 机器起来后面板永远学不到它的 IP；
+    #   ③ 「刷新」按钮后端是 stale-while-revalidate：立刻返回**旧**快照 + 后台重建，
+    #      前端只写「更新于 <旧时刻>」⇒ 时间戳原地不动，看着就是「刷新不准确」。
+    print("[机器实况 归属兜底 + 刷新口径 v1.6.2]")
+    check("T375 v1.6.2 那批已在（版本 ≥ 1.6.2）",
+          tuple(int(x) for x in server.VERSION.split(".")) >= (1, 6, 2), server.VERSION)
+    check("T376 ★ _smb_preauth 只在 net use 真成功（returncode 0）时才返回 True",
+          "return out.returncode == 0" in srv_txt
+          and "capture_output=True, timeout=25, creationflags=NO_WINDOW)" in srv_txt)
+    check("T377 ★ _smb_preauth_once：成功才进 _SMB_DONE，失败进 _SMB_FAIL 冷却（不再一票否决）",
+          "def _smb_preauth_once" in srv_txt and "_SMB_FAIL[ip] = now" in srv_txt
+          and "_SMB_DONE.add(ip)" in srv_txt and "_SMB_FAIL_COOLDOWN" in srv_txt)
+    check("T378 _read_unc 不再「先记 _SMB_DONE 再重试」（旧写法会把失败也当成做过）",
+          "_smb_preauth_once(ip)" in srv_txt
+          and "if attempt == 0 and ip not in _SMB_DONE and _smb_preauth(ip)" not in srv_txt)
+    check("T379 clear_cache() 顺带清掉 net use 失败冷却（点「刷新」即可立刻重试 SMB）",
+          "_SMB_FAIL.clear()" in srv_txt)
+    check("T380 ★ job_tailscale_ip 落空只缓存 60 秒（不再把空值缓存 1 小时）",
+          'key + ":probe", 60, probe' in srv_txt
+          and 'cached("job_ip:%s/%s:%s" % (owner, repo, run_id), 3600, probe)' not in srv_txt)
+    _pia_at = srv_txt.find("def pool_ip_accounts")
+    _pia_txt = srv_txt[_pia_at:srv_txt.find("\ndef ", _pia_at + 10)] if _pia_at >= 0 else ""
+    check("T381 ★ pool_ip_accounts 存在 + 只认 in_progress 的 keepalive run（不用 last_run 兜底）",
+          _pia_at >= 0 and '(r.get("status") or "") != "in_progress"' in _pia_txt
+          and 'g.get("keepalive")' in _pia_txt
+          and '.get("last_run")' not in _pia_txt and '["last_run"]' not in _pia_txt,
+          _pia_txt[:120])
+    check("T382 ★ collect_machines 归属来源③：SMB 读不到时按账号池反查补 account_id / owner_source",
+          "pool_ip_accounts()" in srv_txt
+          and "账号池反查（该账号的 run 正在跑，其 job 日志自报此 IP）" in srv_txt
+          and "if m.get(\"pool_owner\"):" in srv_txt)
+    check("T383 smb_err_text 把 Errno 22 / 13 / 2 / 53 翻成人话（不再把 UNC 路径糊进 tooltip）",
+          "def smb_err_text" in srv_txt and "远端共享不可达" in srv_txt
+          and 'smb_err_text(r)' in srv_txt)
+    check("T384 ★ 前端「账号未知」说清原因 + 给出动作（SMB 不可达 / 点刷新重试）",
+          '账号未知 <span class="none">· SMB 不可达</span>' in app_txt
+          and "点右上角「刷新」可立刻重试一次 SMB" in app_txt)
+    check("T385 ★ 前端「刷新」有忙碌态 + 诚实的数据年龄（恒定显示 N 秒前）",
+          "function setRefreshBtns" in app_txt and "刷新中…" in app_txt
+          and 'el.textContent = "刷新中…（当前数据 " + age + " 秒前）"' in app_txt
+          and '"（" + age + " 秒前）"' in app_txt and "function updateStamp" in app_txt)
+    check("T386 ★ 在途请求挡住点击时不再静默丢弃（FORCE_PENDING 补发那次刷新）",
+          "FORCE_PENDING" in app_txt
+          and "if (BUSY) { if (force) FORCE_PENDING = true; return; }" in app_txt)
+    check("T387 前端在面板标题里点名「N 台在线机器读不到归属」",
+          "unknownOwner" in app_txt and " 台在线机器读不到归属" in app_txt)
+
+    # 功能实测 ①：net use 失败 → _smb_preauth 返回 False（旧代码这里返回 True，是「永久账号未知」的根）
+    _orig_sub, _orig_win = server.subprocess, server.IS_WINDOWS
+    try:
+        server.IS_WINDOWS = True
+        server.subprocess = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=2, stdout=b"", stderr=b""))
+        _pa_bad = server._smb_preauth("9.9.9.7")
+        server.subprocess = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=b"", stderr=b""))
+        _pa_ok = server._smb_preauth("9.9.9.7")
+    finally:
+        server.subprocess, server.IS_WINDOWS = _orig_sub, _orig_win
+    check("T388 ★ net use 返回 2（系统错误 67）→ _smb_preauth=False；返回 0 → True",
+          _pa_bad is False and _pa_ok is True, "bad=%s ok=%s" % (_pa_bad, _pa_ok))
+
+    # 功能实测 ②：失败只进冷却、成功才进 _SMB_DONE；点「刷新」清冷却后可重试
+    _orig_pa = server._smb_preauth
+    try:
+        server._SMB_DONE.clear()
+        server._SMB_FAIL.clear()
+        server._smb_preauth = lambda ip: False
+        _r1 = server._smb_preauth_once("9.9.9.6")
+        _d1 = "9.9.9.6" in server._SMB_DONE
+        _f1 = "9.9.9.6" in server._SMB_FAIL
+        _r2 = server._smb_preauth_once("9.9.9.6")      # 冷却期内不再折腾
+        server._smb_preauth = lambda ip: True
+        server.clear_cache()                            # 点「刷新」→ 清冷却
+        _r3 = server._smb_preauth_once("9.9.9.6")
+        _d3 = "9.9.9.6" in server._SMB_DONE
+        _r4 = server._smb_preauth_once("9.9.9.6")      # 已建过会话 → 不再建
+    finally:
+        server._smb_preauth = _orig_pa
+        server._SMB_DONE.discard("9.9.9.6")
+        server._SMB_FAIL.pop("9.9.9.6", None)
+    check("T389 ★ 失败→冷却不进 _SMB_DONE；刷新清冷却后重试成功→进 _SMB_DONE 且不再重试",
+          _r1 is False and _d1 is False and _f1 is True and _r2 is False
+          and _r3 is True and _d3 is True and _r4 is False,
+          "r1=%s d1=%s f1=%s r2=%s r3=%s d3=%s r4=%s" % (_r1, _d1, _f1, _r2, _r3, _d3, _r4))
+
+    # 功能实测 ③：job 日志还没打印 [0c] 时落空 → 60 秒内不重复拉；之后重拉就能学到 IP 并长期记住
+    _orig_rji, _orig_fjl, _orig_off = server.run_job_id, server.fetch_job_log, server.OFFLINE
+    try:
+        server.OFFLINE = False
+        server.run_job_id = lambda o, r, i: "1"
+        _log = {"n": 0}
+
+        def _fl(url, **kw):
+            _log["n"] += 1
+            return "" if _log["n"] == 1 else "[0c] Tailscale IP: 10.1.2.3"
+        server.fetch_job_log = _fl
+        server.clear_cache()
+        _a = server.job_tailscale_ip("o", "r", "999001")    # 第一次：日志里还没 [0c] → ""
+        _b = server.job_tailscale_ip("o", "r", "999001")    # 60 秒内：不重复拉日志 → 仍 ""
+        server._CACHE.pop("job_ip:o/r:999001:probe", None)  # 模拟「60 秒后」
+        _c = server.job_tailscale_ip("o", "r", "999001")    # 重拉 → 学到 IP
+        _d = server.job_tailscale_ip("o", "r", "999001")    # 命中缓存（1 小时）→ 不再拉日志
+        _n = _log["n"]
+    finally:
+        server.run_job_id, server.fetch_job_log = _orig_rji, _orig_fjl
+        server.OFFLINE = _orig_off
+        server._CACHE.pop("job_ip:o/r:999001", None)
+        server._CACHE.pop("job_ip:o/r:999001:probe", None)
+    check("T390 ★ 落空 60 秒内不重拉；之后重拉即学到 IP 并长期缓存（共拉 2 次日志）",
+          _a == "" and _b == "" and _c == "10.1.2.3" and _d == "10.1.2.3" and _n == 2,
+          "a=%r b=%r c=%r d=%r n=%s" % (_a, _b, _c, _d, _n))
+
+    # 功能实测 ④：pool_ip_accounts 只认 in_progress（已结束的 run 不参与反查）
+    _orig_gr, _orig_jti = server.get_runs, server.job_tailscale_ip
+    try:
+        server.get_runs = lambda **kw: {"ok": True, "accounts": [
+            {"id": "acc-A", "owner": "oA", "repo": "r", "keepalive": [
+                {"id": 1, "status": "in_progress"}, {"id": 2, "status": "completed"}]},
+            {"id": "acc-B", "owner": "oB", "repo": "r", "keepalive": [
+                {"id": 3, "status": "completed"}]}]}
+        _calls = []
+
+        def _jti(o, r, i):
+            _calls.append((o, r, i))
+            return {1: "10.1.1.1", 3: "10.2.2.2"}.get(i, "")
+        server.job_tailscale_ip = _jti
+        _m = server.pool_ip_accounts()
+    finally:
+        server.get_runs, server.job_tailscale_ip = _orig_gr, _orig_jti
+    check("T391 ★ pool_ip_accounts 只对 in_progress 的 run 反查（已结束的不进表）",
+          _m == {"10.1.1.1": ("acc-A", "oA")} and _calls == [("oA", "r", 1)],
+          "m=%r calls=%r" % (_m, _calls))
+
+    # 功能实测 ⑤：collect_machines 用来源③补归属；但 ①② 已读到时不覆盖
+    _orig_pia, _orig_md = server.pool_ip_accounts, server.machine_detail
+    try:
+        server.pool_ip_accounts = lambda: {"10.0.0.7": ("acc-9", "owner9"),
+                                           "10.0.0.8": ("acc-9", "owner9")}
+        server.machine_detail = lambda ip, online: dict(server._empty_machine_detail())
+        _ms = server.collect_machines([{"ip": "10.0.0.7", "online": True, "hostname": "h"}], [])
+
+        def _md2(ip, online):
+            d = server._empty_machine_detail()
+            d["pool_owner"] = "realowner"
+            d["owner_source"] = "_state/pool-info.txt"
+            return d
+        server.machine_detail = _md2
+        _ms2 = server.collect_machines([{"ip": "10.0.0.8", "online": True, "hostname": "h"}], [])
+    finally:
+        server.pool_ip_accounts, server.machine_detail = _orig_pia, _orig_md
+    check("T392 ★ SMB 读不到归属 → collect_machines 按账号池反查补 account_id/owner/owner_source",
+          len(_ms) == 1 and _ms[0].get("account_id") == "acc-9"
+          and _ms[0].get("pool_owner") == "owner9"
+          and "账号池反查" in (_ms[0].get("owner_source") or ""), str(_ms[:1]))
+    check("T393 来源①②已读到归属时，账号池反查不覆盖（只兜底，不抢权威）",
+          len(_ms2) == 1 and _ms2[0].get("pool_owner") == "realowner"
+          and _ms2[0].get("owner_source") == "_state/pool-info.txt", str(_ms2[:1]))
+
+    # ---------------- 快照 TTL vs 实测构建耗时（v1.6.2 第二部分：刷新不准确） ----------------
+    # 真凶③（最隐蔽的一个）：build_overview 冷构建实测 13~49 秒，而 overview_seconds 默认 20。
+    # 旧逻辑 `if dirty or age >= ttl: stale=True` ⇒ 构建**一完成就已过期** ⇒ 每个请求都踢重建、
+    # 面板永远显示「后台刷新中…」，时间戳还一直停在旧值 —— 用户看到的就是「实况刷新不准确」。
+    check("T394 ★ _overview_ttl() 不小于上次构建耗时 + 5 秒（构建比 TTL 慢时不再永远「陈旧」）",
+          "took + 5.0" in srv_txt and 'max(base, took + 5.0)' in srv_txt
+          and '_OV.get("build_secs")' in srv_txt)
+    check("T395 _overview_build 记录实测构建耗时 build_secs",
+          '_OV["build_secs"] = took' in srv_txt and "took = time.time() - t0" in srv_txt)
+    check("T396 ★ 被动重建时 stale 只在「真的在重建 / 脏」时置位（不再「比 ttl 旧就算陈旧」）",
+          "bool(building or dirty)" in srv_txt
+          and "_overview_decorate(data, age, True)\n    return _overview_decorate(data, age, False)" not in srv_txt)
+    check("T397 前端恒定显示「更新于 …（N 秒前）」+ 重建中才加「正在后台重建」",
+          "正在后台重建" in app_txt and "秒前）" in app_txt)
+
+    _orig_ovs = server.CONFIG.get("overview_seconds")
+    _ov_keep = {}
+    with server._OV_LOCK:
+        for _k in ("data", "at", "dirty", "build_secs"):
+            _ov_keep[_k] = server._OV.get(_k)
+    try:
+        server.CONFIG["overview_seconds"] = 20
+        server._OV["build_secs"] = 0.0
+        _ttl_fast = server._overview_ttl()
+        server._OV["build_secs"] = 47.0
+        _ttl_slow = server._overview_ttl()
+
+        # 同一份「25 秒前」的快照：TTL=20 时算陈旧，TTL=52（实测耗时兜底）时算新鲜
+        server._OV["data"] = {"ok": True, "generated_at": "2026-01-01T00:00:00Z",
+                              "version": server.VERSION}
+        server._OV["dirty"] = False
+        server._OV["building"] = 0
+        server._OV["at"] = time.time() - 25
+        server._OV["build_secs"] = 0.0
+        _snap_old = server.overview_snapshot(force=False)     # age 25 >= ttl 20 → 陈旧
+        server._OV["dirty"] = False
+        server._OV["at"] = time.time() - 25
+        server._OV["build_secs"] = 47.0
+        _snap_new = server.overview_snapshot(force=False)     # age 25 < ttl 52 → 新鲜
+    finally:
+        with server._OV_LOCK:
+            for _k, _v in _ov_keep.items():
+                server._OV[_k] = _v
+        if _orig_ovs is None:
+            server.CONFIG.pop("overview_seconds", None)
+        else:
+            server.CONFIG["overview_seconds"] = _orig_ovs
+        server._overview_kick(force_clear=True)   # 让快照尽快恢复成真数据
+    check("T398 ★ _overview_ttl：实测构建 47s → TTL 52s（配置 20s 被兜住）；无实测时用配置值",
+          _ttl_fast == 20.0 and _ttl_slow == 52.0, "fast=%s slow=%s" % (_ttl_fast, _ttl_slow))
+    check("T399 ★ 同一份「25 秒前」快照：TTL=20 判陈旧，TTL=52 判新鲜（不再一建好就过期）",
+          _snap_old.get("stale") is True and _snap_old.get("age_seconds") == 25
+          and _snap_new.get("stale") is False and _snap_new.get("age_seconds") == 25,
+          "old=%s/%s new=%s/%s" % (_snap_old.get("stale"), _snap_old.get("age_seconds"),
+                                   _snap_new.get("stale"), _snap_new.get("age_seconds")))
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()
