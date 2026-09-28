@@ -32,6 +32,7 @@
     Test-RdpGithubReachable   DNS + TCP443 双判，返回结构化结果（不依赖 ICMP，Azure 屏蔽 ping）
     Get-RdpHostVitals         空闲内存 / 内存占用率 / C: D: 剩余 / Top3 内存进程（诊断用）
     Enable-RdpAvExclusions    Defender 排除项（+ 可选关实时扫描/脚本扫描/下载扫描），fail-soft
+    Repair-RdpTailscaleDns    tailscale up 抢走整机 DNS 时收回（--accept-dns=false），fail-soft
     Get-RdpRcloneNetArgs      pull / push 两套 rclone 网络参数
     Invoke-RdpNetSelfHeal     轻量网络自愈（分级，绝不碰网卡本身）
     Repair-RdpProcessEnvDupes 去掉 Path/PATH/path 这类大小写重复键（Start-Process 的 5.1 老坑）
@@ -42,6 +43,7 @@
     CLOUDRDP_AV_SKIP=1        跳过 Defender 调整（别动本机杀软配置）
     CLOUDRDP_WATCHDOG_SKIP=1  跳过看门狗子进程
     CLOUDRDP_AV_KEEP_REALTIME=1  只加排除项、不关实时扫描（生产可用）
+    CLOUDRDP_TAILSCALE_DNS_SKIP=1  跳过 Tailscale DNS 兜底（别动本机 Tailscale 配置）
 #>
 
 Set-StrictMode -Off
@@ -205,6 +207,67 @@ function Enable-RdpAvExclusions {
 
     Write-WdgMsg -Tag $Tag -M ('Defender：排除路径 {0} 条 / 进程已加；实时扫描={1}{2}' -f $added, $rtState, $(if ($note) { ' —— ' + $note } else { '' }))
     return [pscustomobject]@{ ok = $true; added = $added; rtState = $rtState; note = $note }
+}
+
+# ------------------------------------------------------------------ Tailscale DNS 兜底
+function Repair-RdpTailscaleDns {
+    <#
+      「tailscale up 抢走整机 DNS」兜底修复 —— 幂等、fail-soft、随时可调。
+
+      背景（保命四件套之②）：workflow 0c 跑 `tailscale up --authkey=...`，必须带
+      `--accept-dns=false`，否则 Tailscale 会把本机 DNS 改成 100.100.100.100。
+      本 tailnet 已开 MagicDNS（tailf6704b.ts.net）→ runner agent 访问 api.github.com
+      的长轮询也被拽进隧道解析，一抖就发不出心跳 → GitHub 中途把 job 判成 cancelled
+      （annotation：「The operation was canceled.」）。
+
+      ⚠️ 为什么要在 scripts 里再做一遍：0p 只同步 `scripts/`，**改不到老 fork 里内联的 0c**。
+      acc-5 的 fork 停在 d67e81d（早于保命四件套 fbbfd48），就吃了这个亏：scripts/ 是新的、
+      workflow 是旧的 → 0c 少一个 --accept-dns=false，于是 step 8 跑到一半整机失联被判 cancelled。
+      把兜底下沉到 scripts，任何 fork 只要 0p 同步过脚本，重 IO 之前就会被修一次。
+
+      返回：@{ ok; wasOn; nowOn; note }
+    #>
+    param([string]$Tag = 'dns')
+
+    $res = [pscustomobject]@{ ok = $false; wasOn = $null; nowOn = $null; note = '' }
+
+    # 本地联调 / 单测开关（不真去动本机 Tailscale 配置）
+    if ($env:CLOUDRDP_TAILSCALE_DNS_SKIP -eq '1') {
+        $res.note = 'CLOUDRDP_TAILSCALE_DNS_SKIP=1'
+        return $res
+    }
+
+    $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+    if (-not (Test-Path -LiteralPath $ts)) {
+        $res.ok = $true; $res.note = '未装 Tailscale —— 无需处理'
+        return $res
+    }
+
+    $readCorpDns = {
+        try {
+            $j = (& $ts debug prefs 2>$null | Out-String)
+            if ([string]::IsNullOrWhiteSpace($j)) { return $null }
+            return [bool](($j | ConvertFrom-Json).CorpDNS)
+        } catch { return $null }
+    }
+
+    $res.wasOn = & $readCorpDns
+    if ($res.wasOn -eq $false) {
+        $res.ok = $true; $res.nowOn = $false; $res.note = '已是 --accept-dns=false'
+        Write-WdgMsg -Tag $Tag -M 'Tailscale 没接管 DNS（CorpDNS=false）—— 无需处理'
+        return $res
+    }
+
+    try { & $ts set --accept-dns=false 2>&1 | Out-Null } catch { }
+    try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch { }
+
+    $res.nowOn = & $readCorpDns
+    $res.ok = ($res.nowOn -eq $false)
+    $res.note = $(if ($res.ok) { '已把 DNS 收回（--accept-dns=false）' } else { 'tailscale set 未生效（可能服务未就绪）' })
+    Write-WdgMsg -Tag $Tag -M ('Tailscale DNS 兜底：CorpDNS {0} -> {1} —— {2}' -f `
+        $(if ($null -eq $res.wasOn) { '?' } else { $res.wasOn }), `
+        $(if ($null -eq $res.nowOn) { '?' } else { $res.nowOn }), $res.note)
+    return $res
 }
 
 # ------------------------------------------------------------------ rclone 网络参数

@@ -316,6 +316,10 @@ function Invoke-PullSnapshot {
     if (Get-Command Enable-RdpAvExclusions -ErrorAction SilentlyContinue) {
         try { $null = Enable-RdpAvExclusions } catch { Warn "设置 Defender 排除项失败（可忽略）：$_" }
     }
+    # tailscale up 没带 --accept-dns=false 时会把整机 DNS 抢走（老 fork 的 0c 拿不到该参数）
+    if (Get-Command Repair-RdpTailscaleDns -ErrorAction SilentlyContinue) {
+        try { $null = Repair-RdpTailscaleDns } catch { Warn "Tailscale DNS 兜底失败（可忽略）：$_" }
+    }
     if (Get-Command Start-RdpConnWatchdog -ErrorAction SilentlyContinue) {
         try { $wdHandle = Start-RdpConnWatchdog -IntervalSec 60 -FailThreshold 3 } catch { Warn "拉起看门狗失败（可忽略）：$_" }
     }

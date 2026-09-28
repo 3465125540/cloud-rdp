@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1847,6 +1848,71 @@ def main():
           "会话控制台" in wf_txt and "CONSOLE_OWNER" in wf_txt)
     check("T365 ★ 保活循环复查控制台归属（只在变化时打印；刻意不自动切换）",
           wf_txt.count("Get-RdpSessionReport") >= 2 and "[session]" in wf_txt)
+
+    # ---------------- 老 fork 自愈：0p 只覆盖 scripts/、不覆盖 workflow（瑀子 2026-09-28） ----------------
+    # 现场（acc-5 · code19698fgh · 池内机器 standby · 100.78.202.22）两条 annotation：
+    #   ① 0p. 跟随上游 hub 同步脚本（fork 自愈，永不跑旧逻辑）→ "Process completed with exit code 1."
+    #   ② 8. 预还原（校验 → 规划 → 准备 → 驱动全量还原）      → "The operation was canceled."
+    # 根因：
+    #   ① robocopy /MIR 复制了文件 → rc=1（0/1/2/3 都算成功，只有 >=8 才失败），
+    #      而 GitHub 会给 pwsh 步骤自动追加 `exit $LASTEXITCODE` → 把成功判成步骤失败（假警）。
+    #   ② acc-5 的 fork 停在 d67e81d（2026-09-24），**早于**保命四件套 fbbfd48（09-26）。
+    #      Actions 用的是「触发 commit 里的 workflow」，而 0p 只 /MIR scripts/ ⇒
+    #      fork 内联的 0c 永远拿不到 --accept-dns=false。本 tailnet 已开 MagicDNS
+    #      （tailf6704b.ts.net）→ tailscale up 把整机 DNS 抢成 100.100.100.100 →
+    #      runner agent 访问 api.github.com 的长轮询被拽进隧道，一抖就发不出心跳 →
+    #      GitHub 中途把 job 判成 cancelled（step 8 跑到 4h16m 挂掉）。
+    #      对照：hub（自带该参数）step 8 正常跑完、整场 6h04m —— 同 tailnet、同 MagicDNS，
+    #      唯一差别就是那个参数。
+    # 修法：
+    #   · 0p 归一化 robocopy 退出码（$global:LASTEXITCODE = 0，只在 rc>=8 时提示），末尾 exit 0；
+    #   · 把 DNS 兜底**下沉到 scripts/**（Repair-RdpTailscaleDns）—— 0p 能覆盖到的文件，
+    #     任何 fork 重 IO 之前都会被修一次（fork 无法自愈 workflow，但能自愈 scripts）。
+    print("[老 fork 自愈 / 0p 只覆盖 scripts]")
+    _i0p = wf_txt.find("- name: 0p.")
+    _nxt = wf_txt.find("- name:", _i0p + 12) if _i0p >= 0 else -1
+    _0p = wf_txt[_i0p:_nxt if _nxt > 0 else len(wf_txt)] if _i0p >= 0 else ""
+    check("T366 ★ 0p 归一化 robocopy 退出码（rc=1 不再被 GitHub 判成 exit 1 假警）",
+          "$rc = [int]$LASTEXITCODE" in _0p and "$global:LASTEXITCODE = 0" in _0p
+          and "if ($rc -ge 8)" in _0p)
+    check("T367 0p 收尾 exit 0（fail-soft，永不因同步失败挡住开机）",
+          _0p.rstrip().endswith("exit 0"))
+    check("T368 ★ 0p 做 workflow 漂移检查（本 fork vs hub 的 windows-rdp.yml SHA256 比对）",
+          "Get-FileHash" in _0p and "workflow 与 hub 一致" in _0p
+          and "workflow 漂移检查" in _0p)
+    check("T369 ★ DNS 兜底下沉到 scripts/：watchdog-lib 导出 Repair-RdpTailscaleDns",
+          "function Repair-RdpTailscaleDns" in wd_txt)
+    check("T370 三个重 IO 脚本都在动手前调 Repair-RdpTailscaleDns（fork 自愈可达）",
+          all("Repair-RdpTailscaleDns" in t for t in (sd_txt, pre_txt, restore_txt)))
+    check("T371 ★ 兜底 = tailscale set --accept-dns=false + 读 debug prefs 的 CorpDNS（幂等）",
+          "--accept-dns=false" in wd_txt and "debug prefs" in wd_txt and "CorpDNS" in wd_txt)
+    check("T372 兜底可跳过（CLOUDRDP_TAILSCALE_DNS_SKIP=1）+ fail-soft（try/catch，永不抛）",
+          "CLOUDRDP_TAILSCALE_DNS_SKIP" in wd_txt and "catch" in wd_txt)
+    check("T373 ★ 诚实边界写进库头注：0p 改不到老 fork 的 workflow（只能同步 scripts/）",
+          "0p 只同步" in wd_txt and "d67e81d" in wd_txt and "fbbfd48" in wd_txt)
+    # ★ 语法护栏：0p 的 run 块必须能被 PowerShell 解析（曾因手改 YAML 缩进踩坑）。
+    #   用 pwsh 的 Parser 静态方法；拿不到 pwsh 就跳过（不误判）。
+    _0p_syn_ok = None
+    _0p_syn_why = "no-powershell"
+    _pwsh = shutil.which("pwsh") or shutil.which("powershell")
+    if _pwsh and _0p:
+        try:
+            _tf = os.path.join(tempfile.gettempdir(), "cloudrdp-0p-ast.ps1")
+            with open(_tf, "w", encoding="utf-8-sig") as _fh:
+                _fh.write(_0p[_0p.find("run: |") + len("run: |"):].replace("\r\n", "\n"))
+            _ps = subprocess.run(
+                [_pwsh, "-NoProfile", "-NonInteractive", "-Command",
+                 "try{$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile"
+                 "('%s',[ref]$null,[ref]$e); if($e -and $e.Count){exit 1}else{exit 0}}catch{exit 2}"
+                 % _tf],
+                capture_output=True, timeout=60)
+            _0p_syn_ok = (_ps.returncode == 0)
+            _0p_syn_why = "ast-ok" if _0p_syn_ok else "ast-rc=%d" % _ps.returncode
+        except Exception as _ex:
+            _0p_syn_ok = None
+            _0p_syn_why = "skip:%s" % type(_ex).__name__
+    check("T374 0p 的 run 块能通过 PowerShell AST 解析（缩进/语法护栏）",
+          _0p_syn_ok is not False, _0p_syn_why)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

@@ -1091,6 +1091,62 @@ tscon <a 的会话 ID> /dest:console
 > **诚实边界**：`tscon` 需要 `a` **先有一个会话**（即先用 mstsc 登录一次）—— 因为 job 中途无法重启去走自动登录，
 > 所以「开机就自动让 `a` 占控制台」做不到。这就是做成按需触发的根本原因。
 
+### 17. 老 fork「同步了脚本却还是旧逻辑」：`0p` 只覆盖 `scripts/`、覆盖不到 `workflow`（acc-5 事故复盘）
+
+**现场**（瑀子 2026-09-28，`acc-5 · code19698fgh`，`池内机器 · standby`，`100.78.202.22`，run `36382948275`，job `4h16m`）：
+
+| 步骤 | annotation |
+|------|-----------|
+| `0p. 跟随上游 hub 同步脚本（fork 自愈，永不跑旧逻辑）` | `Process completed with exit code 1.` |
+| `8. 预还原（校验 → 规划 → 准备 → 驱动全量还原）` | `The operation was canceled.` |
+
+**根因 ①（`0p` 报错 = 假警）**：`0p` 用 `robocopy /MIR` 把 hub 的 `scripts/` 镜像到本机。
+robocopy 的退出码**不是**「成功 / 失败」——`0 = 无变化`、`1 = 有复制`、`2 = 有额外文件`、`3 = 1+2`，**这四个都算成功**，只有 `>= 8` 才是真失败。
+而 GitHub 会给 `shell: pwsh` 的步骤**自动追加 `exit $LASTEXITCODE`** → 一旦真的复制了文件（`rc=1`），整步就被判成失败。
+
+> 所以这条 annotation 其实是**「同步成功」的证据**：脚本确实从 hub 拉下来了。纯属误报。
+
+**根因 ②（step 8 被 cancel = 老 fork 吃不到保命参数）**：
+
+| 事实 | 说明 |
+|------|------|
+| acc-5 的 fork 停在 `d67e81d`（2026-09-24 14:50 +0800） | 它是 fork 来的，自己不会往前跑 |
+| 保命四件套 `fbbfd48`（2026-09-26）**晚于**它 | 见 §11 之② |
+| `0p` 只 `/MIR` 同步 `scripts/`，**改不到 `.github/workflows/`** | Actions 用的是**触发 commit 里的 workflow**；运行期改工作区里的 workflow 文件不生效 |
+| ⇒ fork 内联的 `0c` 里**没有** `--accept-dns=false` | 而该参数只写在 workflow（`scripts/*.ps1` 里根本没有），`0p` 永远送不到 |
+| 本 tailnet 已开 **MagicDNS**（`tailf6704b.ts.net`） | `tailscale up` 把整机 DNS 抢成 `100.100.100.100` → runner agent 访问 `api.github.com` 的长轮询被拽进隧道，一抖就发不出心跳 → GitHub 中途把 job 判成 `cancelled` |
+
+**决定性对照**：**hub** 自己（`3465125540/cloud-rdp`，workflow 里**有** `--accept-dns=false`）同一天、同一个 tailnet 跑，
+step 8 正常跑完、整场 **6h04m**；acc-5（缺这个参数）跑到 **4h16m** 挂在 step 8。**唯一差别就是这个参数。**
+
+**修法**（两条，缺一不可）：
+
+| # | 改动 | 落点 |
+|---|------|------|
+| ① | **归一化 robocopy 退出码**：`$rc = [int]$LASTEXITCODE; $global:LASTEXITCODE = 0`，只在 `rc >= 8` 时提示，步骤末尾显式 `exit 0` —— 别再报假警 | workflow **0p** |
+| ② | **把 DNS 兜底「下沉」到 `scripts/`**：新增 `Repair-RdpTailscaleDns`（幂等、fail-soft），在任何重 IO 之前先 `tailscale set --accept-dns=false` 并清 DNS 缓存 —— 这是 **`0p` 覆盖得到**的文件，**任何 fork** 只要同步过脚本就会被修一次 | `scripts/watchdog-lib.ps1`（新函数）+ `sync-down.ps1` / `pre-restore.ps1` / `restore-snapshot.ps1`（各调一次） |
+
+> **为什么兜底要下沉到 `scripts/`**：fork 无法自愈 workflow（`0p` 改不到），但**能**自愈 `scripts/`。
+> 把「保命」放进 `0p` 能覆盖的文件里，老 fork 下次开机就自动拿到 —— 不用人去点 Sync。
+
+**可见性**：`0p` 现在会 SHA256 比对「本 fork 的 `windows-rdp.yml`」与「hub 的 `windows-rdp.yml`」，
+不一致就打一行 `[upstream] ⚠️ 本 fork 的 workflow 与 hub 不一致 …`（**只 `Write-Host`，不打 `::warning`** —— 免得又刷出一条 annotation）。
+
+**运维开关**：`CLOUDRDP_TAILSCALE_DNS_SKIP=1`（跳过 DNS 兜底、不动本机 Tailscale 配置；本地单测用）。
+
+**验证**：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **450 PASS / 0 FAIL**（本批 T366–T374 共 9 条） |
+| AST 解析 | `watchdog-lib` / `sync-down` / `pre-restore` / `restore-snapshot` + `0p` 的 run 块全部通过 |
+| `actionlint` | `rc=0`（全部 workflow） |
+| 编码 | `scripts/*.ps1` = **BOM + CRLF**；`windows-rdp.yml` = **无 BOM + CRLF**（逐字节校验，零裸 LF） |
+
+> **诚实边界**：① 这个 DNS 故障是**间歇性**的 —— acc-5 更早一次 run（`36363377079`）就顺利过了 step 8。
+> ② workflow 里的 `--accept-dns=false`（§11 之②）**仍是第一道防线**；脚本级兜底是给「`0p` 够不到 workflow」的老 fork 的**后手**。
+> ③ 老 fork 的**根治**仍然是把它与上游 **Sync 一次**（`0p` 现在会打印这条建议）。
+
 ## 五、目录结构
 
 ```
@@ -1125,8 +1181,8 @@ cloud-rdp/
     ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
     ├── userprofile-lib.ps1             # 【新】用户配置文件预创建（显式 -LoadUserProfile + ProfileList 兜底；修「还原后用户数据全丢」）
     ├── watchdog-lib.ps1                # 【新】保命共享库：GitHub 可达性探测 / 主机体征 / Defender 排除 / 有限超时 / 网络自愈 / 连接看门狗
-    ├── account-lib.ps1                 # 【新】账户守卫：隐藏非 RDP 账户（登录界面 SpecialAccounts + profile 目录 +h+s）+ 白名单断言（只留 a）
-    ├── session-lib.ps1                 # 【新】会话归属：控制台是谁（UU远程 连的就是它）+ 公共桌面「切到 UU远程」快捷方式
+    ├── account-lib.ps1                 # 【新】账户守卫：隐藏非 RDP 账户（登录界面 SpecialAccounts + profile 目录 +h+s）+ 白名单断言（只留 a）
+    ├── session-lib.ps1                 # 【新】会话归属：控制台是谁（UU远程 连的就是它）+ 公共桌面「切到 UU远程」快捷方式
     ├── session-handover.ps1            # 【新】把当前会话交给控制台（tscon /dest:console，只断开不 logoff）
     ├── conn-watchdog.ps1               # 【新】连接看门狗子进程：每分钟探一次，连续不可达即分级自愈 + 打印判定
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
@@ -1140,8 +1196,10 @@ cloud-rdp/
 | # | 步骤 | 说明 |
 |---|------|------|
 | 0 | 拉仓库 | `actions/checkout` |
+| **0p** | **跟随上游 hub 同步脚本（fork 自愈）** | 从 hub 仓库下 `scripts/` 覆盖本机脚本（`/MIR`）—— **老 fork 不必手点 Sync 也能拿到最新逻辑**。⚠️ 只覆盖 `scripts/`、**覆盖不到 `.github/workflows/`**（Actions 用的是触发 commit 里的 workflow），所以 workflow 内联的保命参数对老 fork 不生效（acc-5 事故，见 §17）。本步 fail-soft、末尾 `exit 0`，robocopy 退出码已归一化（不再误报 `exit 1`）；顺带 SHA256 比对 workflow 是否与 hub 漂移 |
 | **0a** | 记录 job 起点 + 开 RDP + **关防火墙** + **加 Defender 排除项** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算）；顺手把 `watchdog-lib.ps1` 的 `Enable-RdpAvExclusions` 调了 —— 后面第 7/8 步要落地 ≈1.8 万个小文件，**必须**在重 IO 之前把实时扫描摘掉（见 §11） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
+| **0b2** | **会话归属校正 + 装「切到 UU远程」快捷方式** | `session-lib.ps1`：诊断当前控制台会话归属 → 写 `CONSOLE_OWNER`；公共桌面放「切到 UU远程」（**刻意不自动切换**，见 §16） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」。`tailscale up` 带 **`--accept-dns=false`**，避免 VPN 接管系统 DNS 把 runner 自己的长轮询也拽进隧道（见 §11） |
 | **0c2** | **解析账号池角色** | `pool_role` 留空=单机（等同历史行为）；`primary`=唯一写 139；`standby`=只读热备、主下线自升为主。角色写入 `_state\pool-role.txt` |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |

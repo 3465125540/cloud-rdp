@@ -160,10 +160,38 @@ jobs:
           # /MIR = 镜像同步（含删除上游已移除的旧脚本），保证两边完全一致
           $dstScripts = Join-Path $env:GITHUB_WORKSPACE 'scripts'
           robocopy $srcScripts $dstScripts /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+          # ⚠️ robocopy 的退出码不是「成功/失败」：0=无变化 1=有复制 2=有额外文件 3=1+2 都算成功，
+          #    只有 >=8 才是真失败。而 GitHub 会给 pwsh 步骤自动追加 `exit $LASTEXITCODE`，
+          #    于是「复制了文件(rc=1)」会被判成步骤失败 → annotation「Process completed with exit code 1.」。
+          #    本步本来就是 fail-soft（上面每条失败路径都 exit 0），这里把退出码归一化，别再报假警。
+          $rc = [int]$LASTEXITCODE
+          $global:LASTEXITCODE = 0
           $copied = @(Get-ChildItem -LiteralPath $dstScripts -File -ErrorAction SilentlyContinue).Count
           $hasLib = Test-Path -LiteralPath (Join-Path $dstScripts 'remote-lib.ps1')
-          Write-Host "[upstream] scripts/ 已同步自 $hub —— $copied 个文件，remote-lib.ps1=$hasLib"
+          Write-Host "[upstream] scripts/ 已同步自 $hub —— $copied 个文件（robocopy rc=$rc），remote-lib.ps1=$hasLib"
+          if ($rc -ge 8) { Write-Host "[upstream] ⚠️ robocopy 真失败（rc=$rc）—— 保留现有脚本继续（不影响开机）" }
           if (-not $hasLib) { Write-Host "[upstream] ⚠️ 上游脚本里没有 remote-lib.ps1 —— 本次将退化为旧判定逻辑" }
+
+          # ---- workflow 漂移检查（只打日志，不打 ::warning，避免刷 annotation）----
+          # ⚠️ 0p 只能同步 scripts/，**同步不了 .github/workflows/**：Actions 用的是本次 commit 里的
+          #    workflow，运行期改工作区文件不生效。所以老 fork 的 workflow 可能停在很旧的版本，
+          #    workflow 内联的东西（保命参数、新步骤）永远到不了这台机器 —— acc-5 就是这么吃亏的
+          #    （fork 停在 d67e81d，早于保命四件套 fbbfd48，0c 少一个 --accept-dns=false）。
+          #    真正的兜底已下沉到 scripts/（watchdog-lib.ps1 的 Repair-RdpTailscaleDns），任何 fork 都能拿到。
+          try {
+              $localWf = Join-Path $env:GITHUB_WORKSPACE '.github\workflows\windows-rdp.yml'
+              $hubWf   = Join-Path $root '.github\workflows\windows-rdp.yml'
+              if ((Test-Path -LiteralPath $localWf) -and (Test-Path -LiteralPath $hubWf)) {
+                  $lh = (Get-FileHash -LiteralPath $localWf -Algorithm SHA256).Hash
+                  $hh = (Get-FileHash -LiteralPath $hubWf   -Algorithm SHA256).Hash
+                  if ($lh -ne $hh) {
+                      Write-Host "[upstream] ⚠️ 本 fork 的 workflow 与 hub 不一致（scripts/ 已自愈，workflow 不会）—— workflow 内联的保命参数/新步骤本次不生效；建议把 fork 与上游 Sync 一次"
+                  } else {
+                      Write-Host '[upstream] workflow 与 hub 一致 ✓'
+                  }
+              }
+          } catch { Write-Host "[upstream] workflow 漂移检查跳过：$($_.Exception.Message)" }
+          exit 0
       - name: 0a. 记录 job 起点 + 开启远程桌面 + 关闭 Windows 防火墙
         shell: pwsh
         run: |
