@@ -396,20 +396,28 @@ function poolOnlyRow(m) {
   var ip = m.ip || "";
   var ipNote = ip ? "（来自该机器的 Actions job 日志）" : "";
   var badgeHtml, tip;
+  // 这个状态从哪来：live = 已按 GitHub 实时 run 核对；pool-state = 协调器快照（可能陈旧数小时）
+  var liveNote = m.run_source === "live"
+    ? "（已按 GitHub 实时 run 核对，非协调器快照）" : "";
+  var concl = m.run_conclusion || "";
   if (state === "running") {
     // 一次性 runner 的存在性 = job 的存在性：job 在跑 ⇒ 机器在跑。
     badgeHtml = badge("运行中", "ok");
-    tip = "GitHub Actions 的 job 仍是 in_progress —— 这台机器确实在运行。" +
+    tip = "GitHub Actions 的 job 仍是 in_progress —— 这台机器确实在运行" + liveNote + "。" +
       "本机 Tailscale 视图看不到它的节点（tailnet 状态同步滞后 / 节点掉线都可能），" +
       (ip ? "IP 是从它自己的 job 日志里读出来的。" : "IP 也读不到（job 日志拿不到）。") +
       "点右侧「运行日志」可看实时进度。";
   } else if (state === "dispatched") {
     badgeHtml = badge("已派发 · 排队中", "warn");
-    tip = "账号池已把这台派出去，但 job 还没进入运行（排队 / 等待启动）。" +
+    tip = "账号池已把这台派出去，但 job 还没进入运行（排队 / 等待启动）" + liveNote + "。" +
       "本机 Tailscale 视图也还没看到它的节点。" + (ip ? "IP 已从 job 日志读到。" : "");
   } else if (state === "ended") {
-    badgeHtml = badge("已结束", "mute");
-    tip = "这个池槽位对应的 run 已经结束，机器应已销毁 —— Tailscale 上看不到它的节点是正常的。";
+    badgeHtml = badge(concl === "success" ? "已结束 · 成功" : "已结束", "mute");
+    tip = "这个池槽位对应的 run 已经结束（" + (concl || "无结论") + "）" + liveNote +
+      "，机器应已销毁 —— Tailscale 上看不到它的节点是正常的。" +
+      (m.run_source === "live"
+        ? "　⚠️ 协调器的池状态快照还停在旧值（说它在跑），本行已按实时 run 纠偏。"
+        : "（协调器还没重跑，状态可能滞后几小时）");
   } else {
     badgeHtml = badge("已派发 · 状态未知", "warn");
     tip = "账号池里这个槽位被占用，但拿不到对应 run 的状态（例如 fork 仓库不可读 / run_id 缺失）。" +

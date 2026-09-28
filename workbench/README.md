@@ -286,6 +286,24 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 > 「查看信息」用的 `GET /api/conn-info?ip=...` 会把用户名/密码回给前端 —— 服务默认只监听
 > `127.0.0.1`，仅本机可访问；别把 `host` 改成 `0.0.0.0` 再暴露到公网。
 
+### 「池内机器」行的 run 状态按实时纠偏（v1.6.1）
+
+`pool_machine_rows()` 原来**直接信 `pool-state`** 里的 `last_run`。但 `pool-state` 是协调器
+（`pool-coordinator.yml`）**每隔几小时**发一次的**快照**，GitHub cron 又常被延迟 2~5 小时 ——
+于是出现「协调器抓快照时 run 还在 `in_progress`、之后 run 结束、协调器还没重跑」的窗口，
+机器实况就一直显示「运行中」，而账号面板（走 `hub_live_probe` 实时查）早已显示「已结束」——
+**两个面板打架**（瑀子 2026-09-28 报的「信息同步异常」，run `36343475821`）。
+
+**修法**：新增 `live_runs_by_id(owner, repo)` —— hub 账号（= 工作台自己配的仓库）返回
+`{run_id: 实时 run}`（复用 `get_runs("keepalive")` 的**同一份缓存**，几乎零成本），非 hub 返回 `None`。
+`pool_machine_rows()` 能拿到实时 run 就按它纠偏 `run_status / run_conclusion / run_url`，
+并新增 `run_source` 字段标明来源：`live`（已按实时 run 核对）或 `pool-state`（协调器快照，可能陈旧）。
+
+前端池行徽标据此：run 结束且 `success` → 「**已结束 · 成功**」；tooltip 按 `run_source`
+说明「已按 GitHub 实时 run 核对」还是「协调器还没重跑，状态可能滞后几小时」。
+
+> 口径：能实时查的（hub 账号）一律实时；查不到的（fork / 不可读）才回落到快照，并**显式标注**来源。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**

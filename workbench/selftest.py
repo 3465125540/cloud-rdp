@@ -1026,7 +1026,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.0", server.VERSION == "1.6.0", server.VERSION)
+    check("T168 server.py 版本 1.6.1", server.VERSION == "1.6.1", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -1728,6 +1728,58 @@ def main():
             _acct_creators.append(_fn)
     check("T348 ★ 除 workflow 0b 外 scripts/ 零账户创建代码（流程只建 a 一个账户）",
           _acct_creators == [], str(_acct_creators))
+
+    # ---------------- 池行实时纠偏：机器实况 vs 账号面板口径一致（v1.6.1） ----------------
+    # 需求原文：「优化 机器运行实况 acc-3 · 3465125540 / 池内机器 · primary / 100.93.93.91 /
+    #           运行中 / Actions job 运行中 · run 36343475821 · 自 2026/9/28-03:12 / 信息同步异常」
+    # 根因：pool_machine_rows 直接信 pool-state 的 last_run，而 pool-state 由协调器几小时一次发布
+    #       （GitHub cron 常被延迟 2~5 小时）。协调器抓快照时 run 还在 in_progress、之后 run 已结束，
+    #       但协调器还没重跑 → 机器实况一直显示「运行中」；账号面板走 hub_live_probe 早已显示「已结束」。
+    #       实测（2026-09-28）：run 36343475821 = completed/success、updated 2.19h 前；
+    #       池状态 updated_utc = 01:03:13Z（正好卡在 run 结束 01:11:55Z 之前）→ 两个面板打架。
+    print("[池行实时纠偏 v1.6.1]")
+    check("T349 v1.6.1 池行纠偏那批已在（版本 ≥ 1.6.1）",
+          tuple(int(x) for x in server.VERSION.split(".")) >= (1, 6, 1), server.VERSION)
+    check("T350 live_runs_by_id 存在 + 非 hub 账号返回 None（只有 hub 能实时查）",
+          "def live_runs_by_id" in srv_txt
+          and "h_owner, h_repo = cfg_repo.split" in srv_txt
+          and "return None" in srv_txt)
+    check("T351 ★ pool_machine_rows 按 run_id 实时纠偏（run_source 标记来源）",
+          "live_runs_by_id(owner, repo)" in srv_txt and "run_source" in srv_txt
+          and 'run_source = "live"' in srv_txt)
+    check("T352 池行暴露 run_source / run_conclusion 字段",
+          '"run_source": run_source' in srv_txt
+          and '"run_conclusion": run.get("conclusion")' in srv_txt)
+    check("T353 前端池行按 run_source 说明来源 + 结束带结论（已结束 · 成功）",
+          'm.run_source === "live"' in app_txt and "已结束 · 成功" in app_txt
+          and "已按 GitHub 实时 run 核对" in app_txt)
+
+    # 功能实测：pool-state 说「在跑」（陈旧），实时 run 说「已结束」→ 池行必须纠偏
+    _saved_lrbi = server.live_runs_by_id
+    try:
+        server.live_runs_by_id = lambda owner, repo: {"36343475821": {
+            "id": 36343475821, "status": "completed", "conclusion": "success",
+            "url": "https://github.com/3465125540/cloud-rdp/actions/runs/36343475821"}}
+        _ps_stale = {"state": {
+            "primary": {"account": "acc-3", "owner": "3465125540", "repo": "cloud-rdp",
+                        "run_id": 36343475821, "since": "2026-09-27T19:12:04Z"},
+            "standby": [],
+            "accounts": [{"id": "acc-3",
+                          "last_run": {"run_id": 36343475821, "status": "in_progress"}}],
+        }}
+        _r_live = server.pool_machine_rows(_ps_stale, [])
+        server.live_runs_by_id = lambda owner, repo: None   # 非 hub：拿不到实时 → 保持 pool-state
+        _r_stale = server.pool_machine_rows(_ps_stale, [])
+    finally:
+        server.live_runs_by_id = _saved_lrbi
+    check("T354 ★ 实时 run 已结束 → 池行纠偏为 ended / run_source=live（不再谎报「运行中」）",
+          len(_r_live) == 1 and _r_live[0].get("machine_state") == "ended"
+          and _r_live[0].get("run_source") == "live"
+          and _r_live[0].get("run_status") == "completed"
+          and _r_live[0].get("run_conclusion") == "success", str(_r_live[:1]))
+    check("T355 拿不到实时 run（非 hub）→ 保持 pool-state 的 in_progress / run_source=pool-state",
+          len(_r_stale) == 1 and _r_stale[0].get("machine_state") == "running"
+          and _r_stale[0].get("run_source") == "pool-state", str(_r_stale[:1]))
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

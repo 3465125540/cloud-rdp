@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（412 项）
+python workbench\selftest.py   :: 离线自测（431 项）
 ```
 
 | 面板 | 内容 |
@@ -865,7 +865,7 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **424 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 加 T325–T336；§14 加 T337–T348） |
+| `selftest.py` | **431 PASS / 0 FAIL**（UU远程 那批 T137/T142b–g + T316–T324；§13 加 T325–T336；§14 加 T337–T348；§15 加 T349–T355） |
 | 真机冒烟（`Get-UserDataTargets` / `Find-UDSnapshotDir` / `Invoke-UserDataVerifyAndRepair`） | 目标解析 8 个含 UU远程 2 个；快照定位含**用户名迁移尾部兜底**；`UU_RESTORE` 在 OK / PARTIAL / MISSING 三态下判定正确且真写进 `GITHUB_ENV` |
 | 33 个 `scripts/*.ps1` AST 解析 | 全通过；两个 JSON + 两个 YAML 合法（25 步） |
 
@@ -929,7 +929,7 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **424 PASS / 0 FAIL**（本批 T325–T336；§14 另加 T337–T348 共 12 条） |
+| `selftest.py` | **431 PASS / 0 FAIL**（本批 T325–T336；§14 另加 T337–T348 共 12 条；§15 另加 T349–T355 共 7 条） |
 | `Get-FilesNoReparse` vs 真 `robocopy /XJ` | 真接合点 + 真文件树实测：两边计数**完全一致**（旧口径会多算） |
 | `Get-MissingFileNames` | 删掉暂存里一个文件 → 精确点出 `b.txt`，且**不会**误报被 `excludeFilePatterns` 排除的 `c.tmp` / `desktop.ini` |
 | 33 个 `scripts/*.ps1` AST 解析 | 全通过 |
@@ -995,9 +995,49 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **424 PASS / 0 FAIL**（本批 T337–T348 共 12 条） |
+| `selftest.py` | **431 PASS / 0 FAIL**（本批 T337–T348 共 12 条；§15 另加 T349–T355 共 7 条） |
 | `account-lib.ps1` 本机 dry-run 冒烟 | 清单 / 白名单 / 隐藏计划 / 报告行四个函数全部正常返回，无异常 |
 | 33 个 `scripts/*.ps1` AST 解析 | 全通过；YAML 合法（25 步） |
+
+### 15. 「机器运行实况」把已结束的机器一直显示成「运行中」（信息同步异常）
+
+**现象**（瑀子 2026-09-28）：机器实况里 `acc-3` 那一行显示
+「运行中 · Actions job 运行中 · run 36343475821」，但**同一台机器**在「账号」面板里早已是「已结束 · 成功」。
+
+**真机取证**（GitHub API + 工作台 API，不是猜）：
+
+| 观察 | 数据 | 结论 |
+|------|------|------|
+| 账号面板（走实时） | `acc-3 source=live, running_count=0, last_run=completed/success` | 实时口径：**已结束** |
+| 机器实况（走快照） | `run_status=in_progress, machine_state=running` | 快照口径：**还在跑**（陈旧） |
+| 那个 run 的真相 | run `36343475821`：`status=completed` / `conclusion=success` / `updated_at=2026-09-28T01:11:55Z`（2.19 小时前） | 确实早就结束了 |
+| 协调器最后一次发布 | `pool-state.updated_utc = 2026-09-28T01:03:13Z` | **正好卡在 run 结束之前**抓的快照 |
+
+**根因**：`pool-state` 是 `pool-coordinator.yml` **每隔几小时**（GitHub cron 常被延迟 2~5 小时）发的**快照**，
+不是实时状态。协调器抓快照那一刻 run 还在 `in_progress`，之后 run 结束、协调器还没重跑 ——
+于是「机器实况」一直信快照说「在跑」，而「账号面板」走 `hub_live_probe` 实时查早已说「已结束」，
+**两个面板打架**。
+
+**修法**（`workbench/server.py` + `static/app.js`）：
+
+| 落点 | 改动 |
+|------|------|
+| `live_runs_by_id()`（新） | hub 账号（= 工作台自己配的那个仓库）→ `{run_id: 实时 run}`；非 hub → `None`。走 `get_runs("keepalive")` **同一份缓存**，几乎零成本 |
+| `pool_machine_rows()` | 有实时 run 就按它**纠偏** `run_status/conclusion/url`，并加 `run_source`（`live` / `pool-state`）标记来源 |
+| 前端池行徽标 | 结束且 `success` → 「已结束 · 成功」；tooltip 按 `run_source` 说明「已按 GitHub 实时 run 核对」还是「协调器快照可能滞后几小时」 |
+
+**口径**：能实时查的（hub 账号）一律实时；查不到的（fork / 不可读）才回落到快照，并**显式标注**来源。
+
+**验证**（离线自测 + 真机等价复现）：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **431 PASS / 0 FAIL**（本批 T349–T355 共 7 条） |
+| 功能实测 | 快照说 `in_progress`、实时 run 说 `completed` → 池行纠偏为 `ended` / `run_source=live`；拿不到实时（非 hub）→ 保持快照 `running` |
+| 真机核对 | 修复后 `/api/pool_machines` 返回 `machine_state=ended / run_conclusion=success / run_source=live`；页面池行显示「已结束 · 成功」 |
+
+> **诚实边界**：这只是让**两个面板口径一致**，不改变「机器是一次性的」这个事实 ——
+> run 结束后机器本就会销毁，Tailscale 上看不到它的节点是正常的。真正的「在跑」仍以 GitHub 的 run 状态为准。
 
 ## 五、目录结构
 
@@ -1006,7 +1046,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（25 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（412 项）
+│   ├── selftest.py                     #   离线自测（431 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1093,6 +1133,7 @@ cloud-rdp/
 | Edge 数据**整个**没了（连历史/书签都没有） | profile 没预创建成功 → 用户级还原被整段跳过（`SNAPSHOT_USER_PRERESTORE=SKIPPED`、`EDGE_RESTORE: MISSING`） | **已修**：`userprofile-lib.ps1` 显式 `-LoadUserProfile` + `ProfileList` 兜底，失败计入 `SNAPSHOT_STATUS=PARTIAL`；看 `D:\cloudrdp-sys\_state\user-restore.log` |
 | **UU远程 每次都当新设备 / 反复要求登录或创建账号** | **根因**：UU远程 的设备身份在 `C:\ProgramData\Netease\GameViewer`（`deviceId`/`uuid`/协助码）与 `%LOCALAPPDATA%\GameViewer`（`setting.ini`）—— 前者是**机器级**路径，不在以 `%RDPUSERPROFILE%` 为中心的 `files.dirs` 里，于是每轮新机器都被当成全新设备 | **已修**：两处都进 `files.dirs` + `files.noExcludeDirs`，`programs.dataGlobs` 再兜一层，并加 `restore.userDataTargets` 校验 → ENV READY 打印 `UU远程设备 : OK/PARTIAL/MISSING`（详见第四节 §12）。⚠️ 协助码是 DPAPI 密文、跨机解不开会被重新生成（同 Edge 的 `os_crypt`），想彻底免掉请**登录 UU 账号** |
 | 云机上看到一个 `runneradmin` 账户 | 它是 **GitHub 托管 runner 自己的 Windows 账户**（镜像烘焙自带、本次 job 的 runner agent 正以它身份跑），**不是 UU远程 / 流程建的**（全仓零账户创建代码，只建 `a`） | **已处理**：删不掉（删了 job 当场死），但已从「登录界面 + 资源管理器」隐藏 → 用户视角只剩 `a`。ENV READY 会打 `账户 : 唯一可见 = a  已隐藏 runneradmin`；有未知账户会黄字告警（详见第四节 §14） |
+| **机器实况显示「运行中」，但账号面板显示「已结束」**（信息同步异常） | 机器实况原来直接信协调器每几小时发一次的 `pool-state` 快照；协调器抓快照时 run 还在 `in_progress`、之后 run 结束而协调器还没重跑 → 快照口径滞后 | **已修**：机器实况对能实时查的账号（hub）按 GitHub 实时 run 纠偏，并标 `run_source=live/pool-state`，两个面板口径一致（详见第四节 §15） |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
 | 定时场不跑额度检测 | 按需求跳过（`if: workflow_dispatch`） | 正常。手动 Run workflow 才显示额度 |

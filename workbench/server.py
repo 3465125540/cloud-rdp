@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1023,6 +1023,17 @@ def pool_machine_rows(pool_state, machines):
         owner = str(s.get("owner") or "")
         repo = str(s.get("repo") or "cloud-rdp")
         rid = s.get("run_id") or run.get("run_id") or None
+        # 实时纠偏：pool-state 是协调器几小时前发的快照，可能仍说「在跑」而 run 其实已结束
+        # （协调器 cron 常被 GitHub 延迟数小时）。能拿到实时 run（hub 账号）就按它来 ——
+        # 与「账号面板」口径保持一致，别让两个面板打架（瑀子报过「信息同步异常」）。
+        run_source = "pool-state"
+        live = live_runs_by_id(owner, repo)
+        if live is not None and rid is not None and str(rid) in live:
+            lr = live[str(rid)]
+            run = {"run_id": lr.get("id"), "status": lr.get("status") or "",
+                   "conclusion": lr.get("conclusion") or "", "url": lr.get("url") or ""}
+            run_source = "live"
+        rid = run.get("run_id") if run.get("run_id") is not None else rid
         url = run.get("url") or ("https://github.com/%s/%s/actions/runs/%s" % (owner, repo, rid)
                                  if rid else "")
         out.append({
@@ -1038,6 +1049,7 @@ def pool_machine_rows(pool_state, machines):
             "run_status": run.get("status") or "",
             "run_conclusion": run.get("conclusion") or "",
             "run_url": url,
+            "run_source": run_source,   # live=已按实时 run 核对；pool-state=协调器快照（可能陈旧）
             # 机器状态口径：job in_progress ⇒ running（机器确实在跑）。
             # 前端按它出徽标，避免「job 在跑却显示未上线」的自相矛盾。
             "machine_state": pool_run_state(run.get("status")),
@@ -1487,6 +1499,36 @@ def hub_live_probe(owner, repo_name):
             "running_count": len(running),
             "queued_count": len(alive) - len(running),
             "last_run": (rows[0] if rows else None)}
+
+
+def live_runs_by_id(owner, repo_name):
+    """hub 账号（= 工作台自己配的那个仓库）→ {run_id(str): 实时 run}；非 hub → None。
+
+    与 hub_live_probe 同一思路：本机 token 能直接查 hub 的 runs（**走同一份缓存**，
+    几乎零成本），比协调器几小时一次的 pool-state 新鲜得多。
+
+    为什么需要：`pool_machine_rows` 原来直接信 pool-state 的 `last_run`，于是
+    「协调器抓快照时 run 还在 in_progress、之后 run 已结束、但协调器还没重跑」
+    的窗口里，机器实况会一直显示「运行中」—— 而账号面板（走 live）早已显示「已结束」，
+    两个面板打架。这里让机器实况也按实时 run 纠偏，两边口径一致。
+    """
+    cfg_repo = str(CONFIG.get("repo") or "")
+    if "/" not in cfg_repo:
+        return None
+    h_owner, h_repo = cfg_repo.split("/", 1)
+    if str(owner) != h_owner or str(repo_name) != h_repo:
+        return None
+    try:
+        runs = get_runs(workflow_key="keepalive")
+    except Exception:
+        return None
+    if not runs.get("ok"):
+        return None
+    m = {}
+    for r in (runs.get("keepalive") or []):
+        if r.get("id") is not None:
+            m[str(r["id"])] = r
+    return m
 
 
 def get_accounts():
