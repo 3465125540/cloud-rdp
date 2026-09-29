@@ -288,16 +288,18 @@ jobs:
             $lnk.Save()
             Write-Host "已创建桌面快捷方式: CloudData -> $dataDir"
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
-      - name: 0b2. 会话归属校正（控制台交给 a）+ 桌面「切到 UU远程」快捷方式
+      - name: 0b2. 会话归属校正（控制台交给 a）+ 装 SYSTEM 交接任务 + 桌面「切到 UU远程」快捷方式
         shell: pwsh
         run: |
           # UU远程（网易 GameViewer）是「屏幕镜像」型工具，连的是机器的**控制台会话**；
-          # 镜像把 runneradmin 放在控制台 → 默认 UU远程 看到的是 runneradmin 的桌面（不是 a）。
-          # 这里只做两件事（都 fail-soft，绝不 logoff、不重启、不动 runner）：
+          # 镜像把 runneradmin 放在控制台（AutoAdminLogon=runneradmin）→ 默认 UU远程 看到的
+          # 是 runneradmin 的桌面（不是 a）。这里只做两件事（都 fail-soft，绝不 logoff、不重启、
+          # 不动 runner）：
           #   ① 诊断：打印当前控制台会话归属（写进 ENV READY 第 13 步）；
-          #   ② 在公共桌面放「切到 UU远程」快捷方式 —— 以 a 用 mstsc 登录后双击它，
-          #      用 Windows 原生 tscon 把 a 的会话交给控制台（RDP 断开、程序保留），
-          #      之后 UU远程 连上看到的就是 a。
+          #   ② 装 SYSTEM 计划任务 CloudRDP-UUHandover + 公共桌面「切到 UU远程」快捷方式。
+          #      为什么必须是 SYSTEM 任务：2026-09-29 真机实测，以 a 的普通令牌跑
+          #      `tscon /dest:console` 会 Error 5（缺 SeTcbPrivilege）；快捷方式只负责触发那个
+          #      SYSTEM 任务，由它以 tscon 把 a 的会话交给控制台（RDP 断开、程序保留）。
           # 刻意「不自动切换」：切换会让那次 RDP 断开，交给用户按需触发（瑀子 2026-09-28 选定）。
           try {
             $sessLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\session-lib.ps1'
@@ -306,9 +308,9 @@ jobs:
               $rep = Get-RdpSessionReport -RdpUser $env:RDP_USERNAME
               Write-Host ("[0b2] " + (Format-RdpSessionReport -RdpUser $env:RDP_USERNAME))
               "CONSOLE_OWNER=" + $rep.consoleOwner | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-              $sc = Install-RdpSessionHandoverShortcut -RdpUser $env:RDP_USERNAME
-              if ($sc.ok) { Write-Host ("[0b2] 已放桌面快捷方式: " + $sc.path) }
-              else        { Write-Host ("[0b2] 快捷方式未创建（可忽略）: " + $sc.note) }
+              $tk = Install-RdpSessionHandoverTask -RdpUser $env:RDP_USERNAME
+              if ($tk.ok) { Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut) }
+              else        { Write-Host ("[0b2] 交接任务未安装（可忽略）: " + $tk.note) }
             } else {
               Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'
             }

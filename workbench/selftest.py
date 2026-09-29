@@ -1825,9 +1825,11 @@ def main():
           os.path.isfile(sess_lib) and os.path.isfile(sess_run))
     sess_lib_txt = open(sess_lib, encoding="utf-8-sig").read() if os.path.isfile(sess_lib) else ""
     sess_run_txt = open(sess_run, encoding="utf-8-sig").read() if os.path.isfile(sess_run) else ""
-    check("T358 session-lib 导出 3 个函数（报告 / 格式化 / 装快捷方式）",
+    check("T358 session-lib 导出 6 个函数（报告 / 格式化 / 计划 / 执行 / 装 SYSTEM 任务 / 装快捷方式）",
           all(("function " + f) in sess_lib_txt for f in
-              ["Get-RdpSessionReport", "Format-RdpSessionReport", "Install-RdpSessionHandoverShortcut"]))
+              ["Get-RdpSessionReport", "Format-RdpSessionReport", "Get-RdpHandoverPlan",
+               "Invoke-RdpSessionHandover", "Install-RdpSessionHandoverTask",
+               "Install-RdpSessionHandoverShortcut"]))
     check("T359 ★ 交接用 Windows 原生 tscon /dest:console（把 a 的会话交给控制台）",
           "tscon" in sess_run_txt and "/dest:console" in sess_run_txt)
     # 安全铁律：只「断开/重定向」，绝不 logoff / shutdown —— 否则会把会话与 runner 一起弄死。
@@ -1842,9 +1844,9 @@ def main():
     check("T362 ★ 公共桌面放「切到 UU远程」快捷方式（指向 session-handover.ps1）",
           "切到 UU远程" in sess_lib_txt and "session-handover.ps1" in sess_lib_txt
           and "CreateShortcut" in sess_lib_txt)
-    check("T363 workflow 第 0b2 步诊断控制台归属 + 装快捷方式（写 CONSOLE_OWNER 供 ENV READY 读）",
+    check("T363 workflow 第 0b2 步诊断控制台归属 + 装 SYSTEM 交接任务（写 CONSOLE_OWNER 供 ENV READY 读）",
           "0b2. 会话归属校正" in wf_txt and "session-lib.ps1" in wf_txt
-          and "Install-RdpSessionHandoverShortcut" in wf_txt and "CONSOLE_OWNER" in wf_txt)
+          and "Install-RdpSessionHandoverTask" in wf_txt and "CONSOLE_OWNER" in wf_txt)
     check("T364 workflow 第 13 步 ENV READY 打印会话控制台归属",
           "会话控制台" in wf_txt and "CONSOLE_OWNER" in wf_txt)
     check("T365 ★ 保活循环复查控制台归属（只在变化时打印；刻意不自动切换）",
@@ -2140,6 +2142,92 @@ def main():
           and _snap_new.get("stale") is False and _snap_new.get("age_seconds") == 25,
           "old=%s/%s new=%s/%s" % (_snap_old.get("stale"), _snap_old.get("age_seconds"),
                                    _snap_new.get("stale"), _snap_new.get("age_seconds")))
+
+    # ---------------- UU远程 交接：两层设计 + 状态锚定解析（2026-09-29 真机复核） ----------------
+    # 2026-09-29 在 acc-5 / github-rdp-server-91 / 100.86.253.112 真机实测，把 T357~T365 的
+    # 「单层 tscon」方案推翻并升级为「两层」：
+    #   · 以 a 的普通令牌 tscon /dest:console → Error 5（缺 SeTcbPrivilege）；
+    #   · 以 SYSTEM 单独 tscon <a> /dest:console → 顶不掉已被占用的控制台（只把 a 断开）；
+    #   · 以 SYSTEM **先 tsdiscon <控制台会话ID>、再 tscon <a会话ID> /dest:console** → 成功。
+    # 因此新增：SYSTEM 计划任务 CloudRDP-UUHandover（真正执行交接）+ 桌面快捷方式只负责触发它。
+    # 另修一个解析 bug：qwinsta 里**断开中的会话** SESSIONNAME 列为空（`<空> a 1 Disc`），
+    #   旧解析把 a 当会话名 → Get-RdpHandoverPlan 误判 no-user。改为「锚定 STATE 再往左走」。
+    print("[UU远程 交接 两层设计 + 状态锚定解析]")
+    _cmsg = os.path.join(repo_dir, "scripts", "send-connection-mail.ps1")
+    cmsg_txt = open(_cmsg, encoding="utf-8-sig").read() if os.path.isfile(_cmsg) else ""
+    check("T400 session-lib 的 Get-RdpSessionReport 支持 -RawLines（解析可离线单测，不依赖真机 qwinsta）",
+          "[string[]]$RawLines" in sess_lib_txt and "if ($RawLines) { $lines = $RawLines }" in sess_lib_txt)
+    check("T401 ★ 状态锚定解析：先找 STATE 词、再往左取 ID/USERNAME（断开布局 `<空> a 1 Disc` 不再漏掉用户）",
+          "$states = @(" in sess_lib_txt and "$t[$i] -in $states" in sess_lib_txt
+          and "$t[$si - 1] -match '^\\d+$'" in sess_lib_txt)
+    check("T402 Get-RdpHandoverPlan 三态齐备：none（已是 a）/ no-user（a 没会话）/ handover（可切）",
+          "function Get-RdpHandoverPlan" in sess_lib_txt
+          and all(("'" + s + "'") in sess_lib_txt for s in ("none", "no-user", "handover")))
+    # ★ 交接顺序铁律：tsdiscon 必须在 tscon 之前 —— 真机实测先 tscon 会 rc=0 但控制台不动。
+    _inv_at = sess_lib_txt.find("function Invoke-RdpSessionHandover")
+    _inv_txt = sess_lib_txt[_inv_at:sess_lib_txt.find("\nfunction ", _inv_at + 10)] if _inv_at >= 0 else ""
+    _tdi = _inv_txt.find("$tsdiscon")
+    _tco = _inv_txt.find("& $tscon $sid /dest:console")
+    check("T403 ★ Invoke-RdpSessionHandover 顺序：先 tsdiscon（断开当前控制台）再 tscon（把 a 接到控制台）",
+          _tdi >= 0 and _tco >= 0 and _tdi < _tco, "tsdiscon@%d tscon@%d" % (_tdi, _tco))
+    check("T404 ★ SYSTEM 交接任务：principal = SYSTEM / ServiceAccount / RunLevel Highest（SeTcbPrivilege 所在）",
+          "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest" in sess_lib_txt
+          and "Register-ScheduledTask -TaskName $TaskName" in sess_lib_txt)
+    check("T405 ★ SYSTEM 任务用 -System 入口真正执行交接（普通令牌不直接 tscon，避开 Error 5）",
+          "-System -User" in sess_lib_txt and "Invoke-RdpSessionHandover -RdpUser $User" in sess_run_txt
+          and "$System" in sess_run_txt)
+    check("T406 ★ 桌面快捷方式走 -Apply：普通令牌只触发 SYSTEM 任务（Start-ScheduledTask / schtasks /run）",
+          "-Apply -User" in sess_lib_txt and "Start-ScheduledTask -TaskName $taskName" in sess_run_txt
+          and "schtasks /run /tn $taskName" in sess_run_txt)
+    check("T407 任务名 CloudRDP-UUHandover 在库与交接脚本里一致（触发方/被触发方对得上）",
+          sess_lib_txt.count("CloudRDP-UUHandover") >= 1 and sess_run_txt.count("CloudRDP-UUHandover") >= 1)
+    check("T408 交接可跳过（CLOUDRDP_UU_HANDOVER_SKIP=1）+ 全程 fail-soft（try/catch，永不抛）",
+          "CLOUDRDP_UU_HANDOVER_SKIP" in sess_lib_txt and "catch { $res.note" in sess_lib_txt)
+    check("T409 ★ 老 fork 自愈：安装钩子下沉到 scripts/send-connection-mail.ps1（0p 可达，d67e81d 也会装）",
+          "Install-RdpSessionHandoverTask" in cmsg_txt and "session-lib.ps1" in cmsg_txt)
+    check("T410 脚本落到持久目录（job 结束清 workspace，任务目标必须留盘）",
+          "cloudrdp-sys" in sess_lib_txt
+          and "Copy-Item -LiteralPath $ScriptPath -Destination $dstScript" in sess_lib_txt)
+
+    # ★ 行为护栏：真的用 pwsh 跑一遍状态锚定解析（拿到 pwsh 才跑，拿不到跳过不误判）。
+    _parse_ok = None
+    _parse_why = "no-powershell"
+    if _pwsh:
+        try:
+            _pf = os.path.join(tempfile.gettempdir(), "cloudrdp-sess-parse.ps1")
+            _L = [
+                "$ErrorActionPreference='Stop'",
+                ". '" + sess_lib + "'",
+                "$hdr = ' SESSIONNAME               USERNAME                 ID  STATE   TYPE        DEVICE'",
+                "$r1 = Get-RdpSessionReport -RdpUser a -RawLines @($hdr,"
+                "'>services                                            0  Disc',"
+                "'                          a                         1  Disc',"
+                "' console                   runneradmin               2  Active')",
+                "if ($r1.consoleOwner -ne 'runneradmin') { exit 11 }",
+                "if ([string]$r1.aSessionId -ne '1') { exit 12 }",
+                "if ($r1.ok) { exit 13 }",
+                "$r2 = Get-RdpSessionReport -RdpUser a -RawLines @($hdr,"
+                "'>services                                            0  Disc',"
+                "' console                   a                         1  Active',"
+                "'                          runneradmin               2  Disc')",
+                "if (-not $r2.ok) { exit 14 }",
+                "if ($r2.consoleOwner -ne 'a') { exit 15 }",
+                "$p = Get-RdpHandoverPlan -RdpUser a -Report $r1",
+                "if ($p.action -ne 'handover') { exit 16 }",
+                "exit 0",
+            ]
+            with open(_pf, "w", encoding="utf-8-sig") as _fh:
+                _fh.write("\r\n".join(_L) + "\r\n")
+            _ps2 = subprocess.run(
+                [_pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", _pf],
+                capture_output=True, timeout=60)
+            _parse_ok = (_ps2.returncode == 0)
+            _parse_why = "ok" if _parse_ok else "rc=%d" % _ps2.returncode
+        except Exception as _ex:
+            _parse_ok = None
+            _parse_why = "skip:%s" % type(_ex).__name__
+    check("T411 ★ 真跑 pwsh：断开布局仍识别 a=会话1 + 已切到 a 时 ok=True + 计划 action=handover",
+          _parse_ok is not False, _parse_why)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

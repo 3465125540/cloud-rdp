@@ -1053,43 +1053,70 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 | 控制台会话现在是谁的？ | GitHub-hosted 镜像把 **`runneradmin` 放在控制台**（runner 本体就在那跑）→ 所以 UU远程 默认显示 `runneradmin` |
 | 仓库里有没有自动登录 / 会话脚本？ | **没有**（全仓 grep `AutoAdminLogon` / `DefaultUserName` / `tscon` / `query session` 只命中文档，以及账户守卫的 `Winlogon\SpecialAccounts`） |
 
-**修法**（不删账户、不动 runner）：用 Windows 自带的 **`tscon`** 把 `a` 的会话「交给」控制台：
+**第一版修法（2026-09-28，已被推翻）**：公共桌面放「切到 UU远程」快捷方式，双击时直接
+`tscon <本会话ID> /dest:console`。**2026-09-29 真机实测发现这条路走不通**（见下）。
+
+**2026-09-29 真机实测**（acc-5 · `github-rdp-server-91` · `100.86.253.112`，console = `runneradmin`、`a` = 会话 1）：
+
+| 做法 | 结果 |
+|------|------|
+| 以 `a` 的普通令牌 `tscon 1 /dest:console` | ❌ **Error 5 / Access is denied**（需要 `SeTcbPrivilege`，普通令牌没有） |
+| 以 SYSTEM 单独 `tscon 1 /dest:console` | ❌ 只把 `a` 断开（变 `Disc`），**顶不掉已被占用的控制台**（`runneradmin` 仍在 console） |
+| 以 SYSTEM **先 `tsdiscon <控制台会话ID>`、再 `tscon <a会话ID> /dest:console`** | ✅ **成功**：控制台变成 `a`，`runneradmin` 变 `Disc` |
+
+> 关键顺序铁律：**`tsdiscon` 必须在 `tscon` 之前**。反过来先 `tscon` 会返回 `rc=0` 但控制台纹丝不动
+> （实测两次都失败）—— 因为控制台被 `runneradmin` 占着，必须先把它断开腾出控制台。
+
+**因此改成「两层」设计**（不删账户、不动 runner、绝不 `logoff`）：
 
 ```
-tscon <a 的会话 ID> /dest:console
+① SYSTEM 计划任务 CloudRDP-UUHandover（按需触发、无触发器）
+     → 以 SYSTEM 令牌执行 tsdiscon <控制台> + tscon <a会话> /dest:console（SeTcbPrivilege 只在 SYSTEM 有）
+② 公共桌面快捷方式「切到 UU远程」
+     → 普通令牌双击，只负责「触发 ①」，自己绝不去 tscon（所以不会撞 Error 5）
 ```
 
 - 只**断开 / 重定向**，**绝不 `logoff`** —— 会话不注销、程序不退出；
-- `tscon` 顶掉控制台上的 `runneradmin` 只是把它**断开**（detached），runner agent 进程不受影响 —— 这正是它能安全用的原因。
+- 顶掉控制台上的 `runneradmin` 只是把它**断开**（detached），`Runner.Listener` / `Runner.Worker` 不受影响；
+- `GameViewerServer` / `GameViewerHealthd` 会自动在**新的**控制台会话里重生（PID 变，但服务不丢）—— 对 UU远程 与 runner 都安全。
 
-**为什么是「按需触发」而不是「全自动」**：`tscon` 会让**那一次 RDP 断开**。全自动会在你每次以 `a` 登录时都断一次，很烦；所以做成**公共桌面一个快捷方式**，以 `a` 通过 mstsc 登录后**双击它**即可（瑀子 2026-09-28 选定）。
+**为什么是「按需触发」而不是「全自动」**：交接会让**那一次 RDP 断开**。全自动会在你每次以 `a` 登录时都断一次，很烦；
+所以做成**公共桌面一个快捷方式**，以 `a` 通过 mstsc 登录后**双击它**即可（瑀子 2026-09-28 选定）。
 
 | 落点 | 改动 |
 |------|------|
-| `scripts/session-handover.ps1`（新） | 双击时执行：`SESSIONNAME == Console` → 提示"无需切换"；否则 `tscon <本会话ID> /dest:console`。全程 fail-soft，失败时窗口停留等回车 |
-| `scripts/session-lib.ps1`（新） | `Get-RdpSessionReport`（解析 `qwinsta`，语言无关）/ `Format-RdpSessionReport` / `Install-RdpSessionHandoverShortcut`（公共桌面放「切到 UU远程」） |
-| workflow **第 0b2 步**（新） | 诊断当前控制台归属 → 写 `CONSOLE_OWNER`；装桌面快捷方式。**刻意不自动切换** |
+| `scripts/session-lib.ps1`（重写） | `Get-RdpSessionReport`（解析 `qwinsta`，**状态锚定**）/ `Format-RdpSessionReport` / `Get-RdpHandoverPlan`（纯函数，三态 `none` / `no-user` / `handover`）/ `Invoke-RdpSessionHandover`（**需 SYSTEM**，`tsdiscon`→`tscon`）/ `Install-RdpSessionHandoverTask`（装 SYSTEM 任务 + 快捷方式）/ `Install-RdpSessionHandoverShortcut` |
+| `scripts/session-handover.ps1`（重写） | 三模式：`-System`（SYSTEM 任务入口，真正交接）/ `-DryRun`（只打印计划）/ 默认 `-Apply`（用户双击：只**触发** SYSTEM 任务并轮询结果）。全程 fail-soft，失败时窗口停留等回车 |
+| workflow **第 0b2 步** | 诊断控制台归属 → 写 `CONSOLE_OWNER`；`Install-RdpSessionHandoverTask` 装 SYSTEM 任务 + 快捷方式。**刻意不自动切换** |
+| `scripts/send-connection-mail.ps1` | **老 fork 自愈钩子**：下发连接邮件时顺带 `Install-RdpSessionHandoverTask`（fail-soft）。`0p` 只同步 `scripts/` ⇒ 停在 `d67e81d` 的老 fork（没有 `0b2` 步）也能装上 |
 | workflow **第 13 步** | ENV READY 打一行 `会话控制台 : <谁>`；不是 `a` 时给出双击提示 |
 | workflow **第 14 步保活循环** | 每 10 分钟复查控制台归属，**只在归属变化时**打一行 `[session] …`（不自动切换） |
 
 **怎么用**：
 
 1. 以 `a` 通过 mstsc 登录（正常流程）；
-2. 双击桌面 **「切到 UU远程」** → 那次 RDP 断开，`a` 成为控制台会话；
+2. 双击公共桌面 **「切到 UU远程」** → 它触发 SYSTEM 任务 → 那次 RDP 断开，`a` 成为控制台会话；
 3. 打开 / 重连 UU远程 → 看到的就是 `a` 的桌面（若仍显示旧画面，断开重连一次）；
 4. 想切回 RDP：再用 mstsc 以 `a` 登录即可（Windows 会把 `a` 的会话接回 RDP）。
 
-**验证**：
+**验证**（2026-09-29 在 `100.86.253.112` 真机端到端跑通）：
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **441 PASS / 0 FAIL**（本批 T357–T365 共 9 条） |
-| `session-lib.ps1` 本机实测 | 正确解析本机中文 `qwinsta`（`services` / `console` 两行；控制台 = `aigc`、会话 1）；`Format-RdpSessionReport` 输出正确 |
-| `session-handover.ps1 -DryRun` 本机实测 | 正确识别 `SESSIONNAME=Console` → "当前会话（aigc）已经是控制台会话 —— 无需切换" |
-| AST + actionlint | 两个新脚本 + 第 0b2 / 13 / 14 步脚本全部解析通过；`actionlint rc=0` |
+| `selftest.py` | **487 PASS / 0 FAIL**（本批 T400–T411 共 12 条；含 T411「真跑 pwsh 解析」） |
+| 部署 | `session-lib.ps1` 15,891 B / `session-handover.ps1` 8,567 B 字节级一致落到 `D:\cloudrdp-sys\scripts` |
+| 任务 | `CloudRDP-UUHandover`：`state=Ready`、`user=SYSTEM`、`logon=ServiceAccount`、`runlevel=Highest` |
+| 快捷方式 | 公共桌面 `切到 UU远程.lnk` → `powershell.exe -File …session-handover.ps1 -Apply -User "a"` |
+| 端到端交接 | BEFORE `console runneradmin 2 Active` / `a 1 Disc` → `tsdiscon 2 rc=0` + `tscon 1 /dest:console rc=0` → AFTER `console a 1 Active` / `runneradmin 2 Disc` |
+| 解析回归 | 断开布局 `<空名> a 1 Disc` 下仍识别 `a`=会话 1（旧解析会误判 `no-user`） |
+| AST + actionlint | 两个脚本 + 第 0b2 / 13 / 14 步脚本全部解析通过；`actionlint rc=0` |
 
-> **诚实边界**：`tscon` 需要 `a` **先有一个会话**（即先用 mstsc 登录一次）—— 因为 job 中途无法重启去走自动登录，
+> **诚实边界**：交接需要 `a` **先有一个会话**（即先用 mstsc 登录一次）—— 因为 job 中途无法重启去走自动登录，
 > 所以「开机就自动让 `a` 占控制台」做不到。这就是做成按需触发的根本原因。
+>
+> **老 fork 注意**：Actions 用的是**触发 commit 里的 workflow**，`0p` 只 `/MIR` `scripts/`。
+> 停在 `d67e81d`（2026-09-24）的 acc-5 **没有 `0b2` 步** ⇒ 只能靠 `send-connection-mail.ps1` 里那个下沉钩子装任务；
+> 而 `send-connection-mail.ps1` 是 `0p` 覆盖得到的文件 —— 这就是「fork 无法自愈 workflow，但能自愈 scripts」的落点（详见 §17）。
 
 ### 17. 老 fork「同步了脚本却还是旧逻辑」：`0p` 只覆盖 `scripts/`、覆盖不到 `workflow`（acc-5 事故复盘）
 
