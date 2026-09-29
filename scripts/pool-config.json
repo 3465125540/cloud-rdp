@@ -35,13 +35,6 @@
       "enabled": true
     },
     {
-      "id": "acc-2",
-      "owner": "REPLACE_OWNER_2",
-      "repo": "cloud-rdp",
-      "token_secret": "POOL_TOKEN_2",
-      "enabled": false
-    },
-    {
       "id": "acc-3",
       "owner": "3465125540",
       "repo": "cloud-rdp",
