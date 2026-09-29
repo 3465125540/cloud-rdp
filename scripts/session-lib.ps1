@@ -20,21 +20,34 @@
   * 交接后 GameViewerServer / GameViewerHealthd 会自动在新控制台会话里重生
     （PID 会变），Runner.Listener / Runner.Worker 不受影响 —— **对 UU远程 与 runner 都安全**。
 
-  ── 因此本库采用「两层」设计 ──────────────────────────────────────────────
+  ── 因此本库采用「三层」设计 ──────────────────────────────────────────────
     ① SYSTEM 计划任务 CloudRDP-UUHandover（按需触发、无触发器）：真正执行
        tsdiscon + tscon（需要 SYSTEM 令牌）。
     ② 公共桌面快捷方式「切到 UU远程」：普通令牌双击，**只负责触发 ①**
        （所以不会撞 Error 5）。
-  本库仍**不自动切换** —— 切换会让那次 RDP 断开，交给用户按需触发（桌面快捷方式），
-  这是 瑀子 2026-09-28 选定的方式。
+    ③ SYSTEM 计划任务 CloudRDP-UUAuto（开机 + 每 60s 无限重复）：**无感**地把控制台
+       交给 a —— 见下。
+
+  ── ③ 为什么能「无感」，又为什么必须加闸（2026-09-29 真机事实）──────────────
+  * 触发条件（Get-RdpHandoverPlan -Auto）：控制台不是 a、**且 a 的会话处于 Disc（已断开）**。
+    Disc 意味着没有 RDP 客户端挂在 a 上 —— 这正是「用户已登录过 a、现在只想用 UU远程」的状态：
+    把 Disc 会话 tscon 到控制台，RDP 本来就没人连着，**不会踢掉任何人**，UU远程 立刻看到 a。
+  * **绝不能**在 a 的会话是 Active（rdp-tcp#N，有 mstsc 连着）时自动切：tscon 会把那次 RDP 踢断，
+    而用户若重连（Windows 会把控制台会话"接管"回 RDP），任务下一轮又会切回来 —— **来回抢控制台**。
+    所以自动闸只认 Disc；Active 的情况留给桌面快捷方式（用户自己决定何时切）。
+  * 幂等：控制台已经是 a → 直接退出（不做事、不刷日志）。
+  * a 还没有会话（全新开机、用户还没登录过 a）→ 什么都不做（日志里说明）。
+  * 关掉自动：设环境变量 `CLOUDRDP_UU_AUTO=0`（安装时跳过）；运行时删掉
+    `D:\cloudrdp-sys\_state\uu-auto-off` 同名开关文件亦可停摆（见 session-handover.ps1 -Auto）。
 
   ── 导出 ──────────────────────────────────────────────────────────────────
     Get-RdpSessionReport                 [-RdpUser a]          会话布局报告（对象）
     Format-RdpSessionReport              [-RdpUser a]          一行文字
-    Get-RdpHandoverPlan                  [-RdpUser a] [-Report] 纯函数：该不该切、怎么切
-    Invoke-RdpSessionHandover            [-RdpUser a] [-DryRun] 执行交接（**需要 SYSTEM**）
-    Install-RdpSessionHandoverTask       [-RdpUser a] [-ScriptPath] [-TaskName] 装 SYSTEM 任务 + 快捷方式
-    Install-RdpSessionHandoverShortcut   [-RdpUser a] [-ScriptPath] 只装桌面快捷方式（触发上面的任务）
+    Get-RdpHandoverPlan                  [-RdpUser a] [-Report] [-Auto] 纯函数：该不该切、怎么切
+    Invoke-RdpSessionHandover            [-RdpUser a] [-DryRun] [-Auto] 执行交接（**需要 SYSTEM**）
+    Install-RdpSessionHandoverTask       [-RdpUser a] [-ScriptPath] [-TaskName] 装 ① + ② + ③
+    Install-RdpSessionHandoverShortcut   [-RdpUser a] [-ScriptPath] 只装桌面快捷方式（触发 ①）
+    Install-RdpSessionAutoHandoverTask   [-RdpUser a] [-ScriptPath] [-TaskName] 只装 ③（无感自动交接）
 #>
 
 function Get-RdpSessionReport {
@@ -73,7 +86,7 @@ function Get-RdpSessionReport {
                     if ($before[0] -match '^(console|services|rdp-tcp(#\d+)?|[0-9a-fA-F]{16,})$') { $name = $before[0] }
                     else { $user = $before[0] }
                 }
-                $sessions += [pscustomobject]@{ name = $name; user = $user; id = $id; current = $isCur }
+                $sessions += [pscustomobject]@{ name = $name; user = $user; id = $id; state = $t[$si]; current = $isCur }
             }
         } catch { }
     }
@@ -90,7 +103,11 @@ function Get-RdpSessionReport {
         consoleOwner = $consoleOwner
         consoleId    = if ($console) { $console.id } else { $null }
         aSessionId   = if ($a) { $a.id } else { $null }
-        aState       = if ($a) { $a.name } else { '(无会话)' }
+        aState       = if ($a) { $a.state } else { '(无会话)' }
+        aSessionName = if ($a) { $a.name } else { '' }
+        # 有 RDP 客户端挂在 a 上吗？（qwinsta 里会话名 rdp-tcp#N 才代表「有人正连着」；
+        # 断开中的会话这一列是空的，所以 Disc 会话 aSessionName='' → $false）
+        aAttachedRdp = [bool]($a -and ($a.name -like 'rdp-tcp*'))
         sessions     = $sessions
     }
 }
@@ -102,15 +119,23 @@ function Format-RdpSessionReport {
     if ($r.ok) {
         return "控制台会话 = $RdpUser（UU远程 看到的就是 $RdpUser）"
     }
-    $aPart = if ($r.aSessionId) { "$RdpUser 在会话 $($r.aSessionId)（$($r.aState)）" } else { "$RdpUser 还没登录（无会话）" }
-    "控制台会话 = $($r.consoleOwner)（不是 $RdpUser）；$aPart —— 要让 UU远程 看到 $RdpUser，请在 $RdpUser 桌面双击「切到 UU远程」"
+    if (-not $r.aSessionId) {
+        return "控制台会话 = $($r.consoleOwner)（不是 $RdpUser）；$RdpUser 还没登录（无会话）—— 先用 mstsc 以 $RdpUser 登录一次，之后自动交接会把它交给控制台"
+    }
+    $aPart = "$RdpUser 在会话 $($r.aSessionId)（$($r.aState)）"
+    if ($r.aAttachedRdp) {
+        "控制台会话 = $($r.consoleOwner)（不是 $RdpUser）；$aPart —— $RdpUser 正被 RDP 连着（自动交接刻意不抢），断开 RDP 后 ≤1 分钟自动交接，或双击「切到 UU远程」立刻切"
+    } else {
+        "控制台会话 = $($r.consoleOwner)（不是 $RdpUser）；$aPart —— 自动交接会在 ≤1 分钟内把控制台交给 $RdpUser（也可双击「切到 UU远程」立刻切）"
+    }
 }
 
 function Get-RdpHandoverPlan {
     [CmdletBinding()]
     param(
         [string]$RdpUser = 'a',
-        [object]$Report
+        [object]$Report,
+        [switch]$Auto
     )
     if (-not $Report) { $Report = Get-RdpSessionReport -RdpUser $RdpUser }
     $consoleOwner = [string]$Report.consoleOwner
@@ -131,6 +156,16 @@ function Get-RdpHandoverPlan {
             reason = "$RdpUser 还没有会话 —— 先用 mstsc 以 $RdpUser 登录一次，再触发切换"
         }
     }
+    # 自动模式（③）多一道闸：只在 a 的会话「没被 RDP 客户端连着」时才切。
+    # 理由：Active（rdp-tcp#N）说明用户正用 mstsc 连着 —— 切了会踢断他，他重连又会把控制台
+    # 「接管」回 RDP，下一轮再切 → 来回抢控制台。Disc 才代表「用户已登录过 a、现在只想用 UU远程」。
+    if ($Auto -and $Report.aAttachedRdp) {
+        return [pscustomobject]@{
+            action = 'skip-active'; rdpUser = $RdpUser; consoleOwner = $consoleOwner
+            consoleId = $consoleId; userSessionId = $userSid
+            reason = "$RdpUser 的会话正被 RDP 连着（$($Report.aSessionName)）—— 自动交接刻意不抢；断开 RDP 后会自动切，或双击「切到 UU远程」立刻切"
+        }
+    }
     [pscustomobject]@{
         action = 'handover'; rdpUser = $RdpUser; consoleOwner = $consoleOwner
         consoleId = $consoleId; userSessionId = $userSid
@@ -142,10 +177,11 @@ function Invoke-RdpSessionHandover {
     [CmdletBinding()]
     param(
         [string]$RdpUser = 'a',
-        [switch]$DryRun
+        [switch]$DryRun,
+        [switch]$Auto
     )
 
-    $plan = Get-RdpHandoverPlan -RdpUser $RdpUser
+    $plan = Get-RdpHandoverPlan -RdpUser $RdpUser -Auto:$Auto
     if ($DryRun) {
         return [pscustomobject]@{ ok = $null; action = $plan.action; note = '[DryRun] ' + $plan.reason; plan = $plan; steps = @() }
     }
@@ -154,6 +190,10 @@ function Invoke-RdpSessionHandover {
     }
     if ($plan.action -eq 'no-user') {
         return [pscustomobject]@{ ok = $false; action = 'no-user'; note = $plan.reason; plan = $plan; steps = @() }
+    }
+    if ($plan.action -eq 'skip-active') {
+        # 自动模式主动放弃（不是失败）：ok=$true 让 SYSTEM 任务以 0 退出，日志里已写明原因。
+        return [pscustomobject]@{ ok = $true; action = 'skip-active'; note = $plan.reason; plan = $plan; steps = @() }
     }
 
     $tscon    = Join-Path $env:SystemRoot 'System32\tscon.exe'
@@ -281,8 +321,75 @@ function Install-RdpSessionHandoverTask {
 
         $sc = Install-RdpSessionHandoverShortcut -RdpUser $RdpUser -ScriptPath $dstScript
         $res.shortcut = $sc.path
+
+        # ③ 无感自动交接任务（失败不影响 ①②）
+        $auto = Install-RdpSessionAutoHandoverTask -RdpUser $RdpUser -ScriptPath $dstScript
+        $res.auto = $auto.task
+        $res.autoOk = $auto.ok
+        $res.autoNote = $auto.note
+
         $res.ok = $true
-        $res.note = if ($sc.ok) { '交接任务 + 桌面快捷方式已就绪' } else { '交接任务已就绪；快捷方式未创建：' + $sc.note }
+        $bits = New-Object System.Collections.Generic.List[string]
+        $bits.Add('交接任务已就绪')
+        if ($sc.ok) { $bits.Add('桌面快捷方式已就绪') } else { $bits.Add('快捷方式未创建：' + $sc.note) }
+        if ($auto.ok) { $bits.Add('无感自动交接已就绪') } else { $bits.Add('自动交接未装：' + $auto.note) }
+        $res.note = ($bits -join '；')
+    } catch { $res.note = $_.Exception.Message }
+    return $res
+}
+
+function Install-RdpSessionAutoHandoverTask {
+    [CmdletBinding()]
+    param(
+        [string]$RdpUser = 'a',
+        [string]$ScriptPath,
+        [string]$TaskName = 'CloudRDP-UUAuto',
+        [int]$IntervalMinutes = 1
+    )
+
+    $res = @{ ok = $false; task = $TaskName; script = ''; interval = $IntervalMinutes; note = '' }
+    try {
+        if ($env:CLOUDRDP_UU_AUTO -eq '0') { $res.note = 'CLOUDRDP_UU_AUTO=0，跳过自动交接任务'; return $res }
+
+        $base = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
+        if ([string]::IsNullOrWhiteSpace($ScriptPath)) { $ScriptPath = Join-Path $base 'scripts\session-handover.ps1' }
+        if (-not (Test-Path -LiteralPath $ScriptPath)) { $res.note = "找不到 $ScriptPath"; return $res }
+
+        # 脚本落到持久目录（job 结束会清 workspace，任务目标必须留在盘上）
+        $sysDir = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
+        $dstDir = Join-Path $sysDir 'scripts'
+        New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+
+        $srcDir = Split-Path -Parent $ScriptPath
+        $dstScript = Join-Path $dstDir 'session-handover.ps1'
+        Copy-Item -LiteralPath $ScriptPath -Destination $dstScript -Force
+        $libSrc = Join-Path $srcDir 'session-lib.ps1'
+        if (Test-Path -LiteralPath $libSrc) { Copy-Item -LiteralPath $libSrc -Destination (Join-Path $dstDir 'session-lib.ps1') -Force }
+        $res.script = $dstScript
+
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $dstScript + '" -Auto -User "' + $RdpUser + '"'
+        $desc = "CloudRDP: 无感把 $RdpUser 的会话交给控制台（让 UU远程 落到 $RdpUser）—— 仅在 $RdpUser 的会话未被 RDP 占用时切"
+
+        if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
+            $act = New-ScheduledTaskAction -Execute $ps -Argument $argStr
+            $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                       -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+            # -AtStartup 不支持 Repetition（PS 5.1 实测），所以拆成两个触发器：
+            #   · 开机触发（覆盖重启；此时 a 多半还没会话 → 空跑，无害）
+            #   · Once + 无限重复（RepetitionDuration 留空 ⇒ Duration 为空 ⇒ 永续，每 IntervalMinutes 一次）
+            $tBoot = New-ScheduledTaskTrigger -AtStartup
+            $tRep  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+            Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($tBoot, $tRep) -Principal $prn -Settings $set `
+                -Description $desc -Force -ErrorAction Stop | Out-Null
+        } else {
+            $tr = '"' + $ps + '" ' + $argStr
+            & schtasks /create /tn $TaskName /tr $tr /sc minute /mo $IntervalMinutes /ru SYSTEM /rl HIGHEST /f 2>&1 | Out-Null
+        }
+
+        $res.ok = $true
+        $res.note = "自动交接任务已就绪（每 ${IntervalMinutes} 分钟一次，仅切未被 RDP 占用的会话）"
     } catch { $res.note = $_.Exception.Message }
     return $res
 }

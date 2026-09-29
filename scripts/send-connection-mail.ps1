@@ -87,8 +87,9 @@ if ($rc -eq 0) {
 
 # ── 会话交接（让 UU远程 落到 a，而不是 runneradmin）────────────────────────────
 # 为什么挂在这里：老 fork（如 acc-5 / d67e81d）只同步 scripts/，内联 workflow 步骤改不动，
-# 所以「装 SYSTEM 交接任务 CloudRDP-UUHandover + 公共桌面『切到 UU远程』快捷方式」这件事
-# 必须放在 scripts/ 里、并挂到一个老 fork 本来就会调用的脚本上 —— 0e 步（本脚本）是够早的钩子。
+# 所以「装 SYSTEM 交接任务 CloudRDP-UUHandover + 公共桌面『切到 UU远程』快捷方式 +
+# 无感自动交接任务 CloudRDP-UUAuto」这件事必须放在 scripts/ 里、并挂到一个老 fork 本来就会
+# 调用的脚本上 —— 0e 步（本脚本）是够早的钩子。
 # 幂等、fail-soft：任何失败都只打印一行，绝不影响连接信息（本脚本本来就 exit 0）。
 try {
     $sessLib = Join-Path $PSScriptRoot 'session-lib.ps1'
@@ -96,7 +97,7 @@ try {
         . $sessLib
         if (Get-Command Install-RdpSessionHandoverTask -ErrorAction SilentlyContinue) {
             $tk = Install-RdpSessionHandoverTask -RdpUser $User -ScriptPath (Join-Path $PSScriptRoot 'session-handover.ps1')
-            if ($tk.ok) { Write-Host "[connmail] UU远程 交接任务已就绪：$($tk.task) / 快捷方式：$($tk.shortcut)" }
+            if ($tk.ok) { Write-Host "[connmail] UU远程 交接任务已就绪：$($tk.task) / 快捷方式：$($tk.shortcut) / 无感自动：$($tk.auto)" }
             else        { Write-Host "[connmail] UU远程 交接任务未安装（可忽略）：$($tk.note)" -ForegroundColor Yellow }
         }
     }

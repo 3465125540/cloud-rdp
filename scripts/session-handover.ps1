@@ -34,6 +34,8 @@
   ── 用法 ──────────────────────────────────────────────────────────────────
   * 用户：以 a 通过 mstsc 登录后，双击公共桌面「切到 UU远程」即可（= -Apply）。
   * 任务：session-handover.ps1 -System -User a（由 CloudRDP-UUHandover 调用）。
+  * 无感：session-handover.ps1 -Auto   -User a（由 CloudRDP-UUAuto 每分钟调用；
+          只在「控制台不是 a 且 a 的会话没被 RDP 连着」时才切 —— 见 session-lib.ps1 头注③）。
   * 诊断：-DryRun 只打印计划，不做任何改动。
 
   退出码：0=成功或无需切换；非 0=失败（窗口会停留，按回车关闭）。
@@ -43,6 +45,7 @@ param(
     [string]$User = $env:USERNAME,
     [switch]$Apply,
     [switch]$System,
+    [switch]$Auto,
     [switch]$DryRun
 )
 
@@ -56,6 +59,34 @@ if ($haveLib) { . $libPath }
 
 $taskName = 'CloudRDP-UUHandover'
 
+# ── 模式 0：自动（③）—— 由 SYSTEM 任务 CloudRDP-UUAuto 每分钟调用，无感交接 ───
+# 只在「控制台不是 a 且 a 的会话没被 RDP 连着（Disc）」时才切；否则空跑（不刷日志）。
+# 关掉：设环境变量 CLOUDRDP_UU_AUTO=0，或放一个开关文件 <sysdir>\_state\uu-auto-off。
+if ($Auto) {
+    if (-not $haveLib) { Write-Note '缺少 session-lib.ps1，无法自动交接'; exit 1 }
+
+    # -Auto -DryRun：只报「自动闸会怎么判」，绝不动手（诊断用；关掉开关时也要能看）
+    if ($DryRun) {
+        $p = Get-RdpHandoverPlan -RdpUser $User -Auto
+        Write-Note ("[Auto-DryRun] action=$($p.action) :: $($p.reason)")
+        exit 0
+    }
+
+    $sysDir = if ($env:CLOUDRDP_SYS_DIR) { $env:CLOUDRDP_SYS_DIR } elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
+    $stateDir = Join-Path $sysDir '_state'
+    if (Test-Path -LiteralPath (Join-Path $stateDir 'uu-auto-off')) { exit 0 }
+    if ($env:CLOUDRDP_UU_AUTO -eq '0') { exit 0 }
+
+    $r = Invoke-RdpSessionHandover -RdpUser $User -Auto
+    if ($r.action -eq 'handover') {
+        try {
+            New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+            $line = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + 'Z  action=' + $r.action + '  ok=' + $r.ok + '  :: ' + $r.note
+            Add-Content -LiteralPath (Join-Path $stateDir 'uu-auto.log') -Value $line -Encoding utf8
+        } catch { }
+    }
+    if ($r.ok) { exit 0 } else { exit 1 }
+}
 # ── 模式 1：SYSTEM 任务入口 —— 真正执行交接 ──────────────────────────────────
 if ($System) {
     if (-not $haveLib) { Write-Note '缺少 session-lib.ps1，无法执行 SYSTEM 交接'; exit 1 }
@@ -69,7 +100,7 @@ if ($System) {
 # ── 模式 2：DryRun —— 只打印计划 ─────────────────────────────────────────────
 if ($DryRun) {
     if ($haveLib) {
-        $p = Get-RdpHandoverPlan -RdpUser $User
+        $p = Get-RdpHandoverPlan -RdpUser $User -Auto:$Auto
         Write-Note ("[DryRun] action=$($p.action) :: $($p.reason)")
     } else {
         Write-Note '[DryRun] 缺少 session-lib.ps1，无法给出计划'

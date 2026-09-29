@@ -2229,6 +2229,82 @@ def main():
     check("T411 ★ 真跑 pwsh：断开布局仍识别 a=会话1 + 已切到 a 时 ok=True + 计划 action=handover",
           _parse_ok is not False, _parse_why)
 
+    # ---- ③ 无感自动交接（2026-09-29 追加）------------------------------------
+    # 需求：连 UU远程 时「无感」落到 a，不用双击快捷方式。
+    # 做法：SYSTEM 任务 CloudRDP-UUAuto（开机 + 每 60s）跑 session-handover.ps1 -Auto。
+    # 关键闸：只在「控制台不是 a 且 a 的会话**没被 RDP 连着**（Disc）」时才切 ——
+    #   否则 tscon 会把用户的 mstsc 踢断，用户重连又会把控制台「接管」回 RDP，来回抢。
+    print("[UU远程 无感自动交接（三层设计的第 ③ 层）]")
+    check("T412 ★ 无感自动交接任务 Install-RdpSessionAutoHandoverTask 存在，且 Install-RdpSessionHandoverTask 会一并装上",
+          "function Install-RdpSessionAutoHandoverTask" in sess_lib_txt
+          and "Install-RdpSessionAutoHandoverTask -RdpUser $RdpUser -ScriptPath $dstScript" in sess_lib_txt
+          and "CloudRDP-UUAuto" in sess_lib_txt)
+    check("T413 ★ 自动闸：报告暴露 aAttachedRdp/aSessionName，-Auto 下 a 被 RDP 连着时返回 skip-active（不抢）",
+          "aAttachedRdp" in sess_lib_txt and "aSessionName" in sess_lib_txt
+          and "'skip-active'" in sess_lib_txt and "if ($Auto -and $Report.aAttachedRdp)" in sess_lib_txt)
+    check("T414 ★ 自动任务触发器：AtStartup（覆盖重启）+ Once&RepetitionInterval（PS5.1 实测 AtStartup 不支持 Repetition）",
+          "New-ScheduledTaskTrigger -AtStartup" in sess_lib_txt
+          and "-Once -At (Get-Date).AddMinutes(1) -RepetitionInterval" in sess_lib_txt
+          and "-Trigger @($tBoot, $tRep)" in sess_lib_txt
+          and "-RepetitionDuration" not in sess_lib_txt)
+    check("T415 ★ -Auto 入口 + -Auto -DryRun 诊断 + 可关：CLOUDRDP_UU_AUTO=0 与 <sysdir>\\_state\\uu-auto-off 开关文件都能停摆",
+          "$Auto" in sess_run_txt and "Invoke-RdpSessionHandover -RdpUser $User -Auto" in sess_run_txt
+          and "CLOUDRDP_UU_AUTO" in sess_run_txt and "uu-auto-off" in sess_run_txt
+          and "CLOUDRDP_UU_AUTO" in sess_lib_txt
+          # -Auto 分支必须自己处理 -DryRun（否则真机诊断会静默空跑，什么都不打印）
+          and "[Auto-DryRun]" in sess_run_txt
+          and "Get-RdpHandoverPlan -RdpUser $User -Auto" in sess_run_txt)
+    check("T416 无感自动交接写日志（仅在真正发生交接时写一行，避免每分钟刷屏）+ 幂等（console 已是 a → 不动）",
+          "uu-auto.log" in sess_run_txt and "if ($r.action -eq 'handover')" in sess_run_txt
+          and "action = 'none'" in sess_lib_txt)
+    check("T417 工作流 0b2 报出自动任务 + 会话心跳不再写「刻意不自动切换」",
+          "$tk.auto" in wf_txt and "刻意「不自动切换」" not in wf_txt
+          and "刻意不自动切换" not in wf_txt and "无感" in wf_txt)
+
+    # ★ 行为护栏：真跑 pwsh 验「Active(RDP) 不抢 / Disc 才切」。
+    _auto_ok = None
+    _auto_why = "no-powershell"
+    if _pwsh:
+        try:
+            _af = os.path.join(tempfile.gettempdir(), "cloudrdp-sess-auto.ps1")
+            _A = [
+                "$ErrorActionPreference='Stop'",
+                ". '" + sess_lib + "'",
+                "$hdr = ' SESSIONNAME               USERNAME                 ID  STATE   TYPE        DEVICE'",
+                "# 布局 1：a 正被 RDP 连着（rdp-tcp#0 Active）→ 自动闸必须 skip-active",
+                "$r1 = Get-RdpSessionReport -RdpUser a -RawLines @($hdr,"
+                "'>services                                            0  Disc',"
+                "' rdp-tcp#0                 a                         1  Active',"
+                "' console                   runneradmin               2  Active')",
+                "if (-not $r1.aAttachedRdp) { exit 21 }",
+                "if ($r1.aState -ne 'Active') { exit 22 }",
+                "if ((Get-RdpHandoverPlan -RdpUser a -Report $r1 -Auto).action -ne 'skip-active') { exit 23 }",
+                "if ((Get-RdpHandoverPlan -RdpUser a -Report $r1).action -ne 'handover') { exit 24 }",
+                "# 布局 2：a 已断开（Disc）→ 自动闸放行 handover",
+                "$r2 = Get-RdpSessionReport -RdpUser a -RawLines @($hdr,"
+                "'>services                                            0  Disc',"
+                "'                          a                         1  Disc',"
+                "' console                   runneradmin               2  Active')",
+                "if ($r2.aAttachedRdp) { exit 25 }",
+                "if ($r2.aState -ne 'Disc') { exit 26 }",
+                "if ((Get-RdpHandoverPlan -RdpUser a -Report $r2 -Auto).action -ne 'handover') { exit 27 }",
+                "# 不存在的用户 → 确定性 no-user（不依赖本机真实会话布局）",
+                "if ((Invoke-RdpSessionHandover -RdpUser 'zz-nobody' -DryRun -Auto).action -ne 'no-user') { exit 28 }",
+                "exit 0",
+            ]
+            with open(_af, "w", encoding="utf-8-sig") as _fh:
+                _fh.write("\r\n".join(_A) + "\r\n")
+            _ps3 = subprocess.run(
+                [_pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", _af],
+                capture_output=True, timeout=60)
+            _auto_ok = (_ps3.returncode == 0)
+            _auto_why = "ok" if _auto_ok else "rc=%d" % _ps3.returncode
+        except Exception as _ex:
+            _auto_ok = None
+            _auto_why = "skip:%s" % type(_ex).__name__
+    check("T418 ★ 真跑 pwsh：a 被 RDP 连着 → 自动闸 skip-active；a 已断开 → 自动闸放行 handover",
+          _auto_ok is not False, _auto_why)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

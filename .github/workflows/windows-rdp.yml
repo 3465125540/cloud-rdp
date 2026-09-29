@@ -288,19 +288,22 @@ jobs:
             $lnk.Save()
             Write-Host "已创建桌面快捷方式: CloudData -> $dataDir"
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
-      - name: 0b2. 会话归属校正（控制台交给 a）+ 装 SYSTEM 交接任务 + 桌面「切到 UU远程」快捷方式
+      - name: 0b2. 会话归属校正（控制台交给 a）+ 装 SYSTEM 交接任务 + 桌面「切到 UU远程」快捷方式 + 无感自动交接
         shell: pwsh
         run: |
           # UU远程（网易 GameViewer）是「屏幕镜像」型工具，连的是机器的**控制台会话**；
           # 镜像把 runneradmin 放在控制台（AutoAdminLogon=runneradmin）→ 默认 UU远程 看到的
-          # 是 runneradmin 的桌面（不是 a）。这里只做两件事（都 fail-soft，绝不 logoff、不重启、
+          # 是 runneradmin 的桌面（不是 a）。这里做三件事（都 fail-soft，绝不 logoff、不重启、
           # 不动 runner）：
           #   ① 诊断：打印当前控制台会话归属（写进 ENV READY 第 13 步）；
           #   ② 装 SYSTEM 计划任务 CloudRDP-UUHandover + 公共桌面「切到 UU远程」快捷方式。
           #      为什么必须是 SYSTEM 任务：2026-09-29 真机实测，以 a 的普通令牌跑
           #      `tscon /dest:console` 会 Error 5（缺 SeTcbPrivilege）；快捷方式只负责触发那个
-          #      SYSTEM 任务，由它以 tscon 把 a 的会话交给控制台（RDP 断开、程序保留）。
-          # 刻意「不自动切换」：切换会让那次 RDP 断开，交给用户按需触发（瑀子 2026-09-28 选定）。
+          #      SYSTEM 任务，由它以 tsdiscon + tscon 把 a 的会话交给控制台。
+          #   ③ 装 SYSTEM 计划任务 CloudRDP-UUAuto（开机 + 每 60s）：**无感**交接 ——
+          #      只在「控制台不是 a 且 a 的会话没被 RDP 连着（Disc）」时才切。a 正被 mstsc
+          #      连着时不抢（否则会把用户踢断、并和 RDP 来回抢控制台）。
+          # 想彻底关掉自动：仓库里设 CLOUDRDP_UU_AUTO=0，或机器上放 <sysdir>\_state\uu-auto-off。
           try {
             $sessLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\session-lib.ps1'
             if (Test-Path -LiteralPath $sessLib) {
@@ -309,7 +312,7 @@ jobs:
               Write-Host ("[0b2] " + (Format-RdpSessionReport -RdpUser $env:RDP_USERNAME))
               "CONSOLE_OWNER=" + $rep.consoleOwner | Out-File $env:GITHUB_ENV -Append -Encoding utf8
               $tk = Install-RdpSessionHandoverTask -RdpUser $env:RDP_USERNAME
-              if ($tk.ok) { Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut) }
+              if ($tk.ok) { Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut + " / 自动: " + $tk.auto) }
               else        { Write-Host ("[0b2] 交接任务未安装（可忽略）: " + $tk.note) }
             } else {
               Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'
@@ -999,7 +1002,8 @@ jobs:
 
                   # ---------- 会话归属：控制台是不是 a（UU远程 看的就是控制台）----------
                   # 只在「归属发生变化」时打印一行，避免每 10 分钟刷屏。
-                  # 刻意不自动切换 —— 切换会让那次 RDP 断开，交给用户双击桌面「切到 UU远程」按需触发。
+                  # 无感交接由 SYSTEM 任务 CloudRDP-UUAuto 每分钟自动做（仅切「没被 RDP 连着」的 a 会话）；
+                  # 桌面「切到 UU远程」是「a 正被 RDP 连着」时的手动立刻切法。
                   if (Test-Path -LiteralPath '.\scripts\session-lib.ps1') {
                       try {
                           . .\scripts\session-lib.ps1
@@ -1009,7 +1013,7 @@ jobs:
                               if ($sr.consoleOwner -eq $env:RDP_USERNAME) {
                                   Write-Host "[session] 控制台会话 = $env:RDP_USERNAME（UU远程 看到的就是 a）" -ForegroundColor Green
                               } else {
-                                  Write-Host "[session] 控制台会话 = $($sr.consoleOwner)（不是 $env:RDP_USERNAME）；要让 UU远程 看到 $env:RDP_USERNAME，请在 a 桌面双击「切到 UU远程」" -ForegroundColor DarkGray
+                                  Write-Host "[session] 控制台会话 = $($sr.consoleOwner)（不是 $env:RDP_USERNAME）；a 的会话断开后 ≤1 分钟会自动交给控制台（无感），或双击「切到 UU远程」立刻切" -ForegroundColor DarkGray
                               }
                           }
                       } catch { Write-Host "[session] 会话复查失败（可忽略）：$($_.Exception.Message)" }

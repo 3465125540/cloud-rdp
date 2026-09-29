@@ -1067,55 +1067,73 @@ terminates the runner process, starves it for CPU/Memory, or blocks its network 
 > 关键顺序铁律：**`tsdiscon` 必须在 `tscon` 之前**。反过来先 `tscon` 会返回 `rc=0` 但控制台纹丝不动
 > （实测两次都失败）—— 因为控制台被 `runneradmin` 占着，必须先把它断开腾出控制台。
 
-**因此改成「两层」设计**（不删账户、不动 runner、绝不 `logoff`）：
+**因此改成「三层」设计**（不删账户、不动 runner、绝不 `logoff`）：
 
 ```
 ① SYSTEM 计划任务 CloudRDP-UUHandover（按需触发、无触发器）
      → 以 SYSTEM 令牌执行 tsdiscon <控制台> + tscon <a会话> /dest:console（SeTcbPrivilege 只在 SYSTEM 有）
 ② 公共桌面快捷方式「切到 UU远程」
      → 普通令牌双击，只负责「触发 ①」，自己绝不去 tscon（所以不会撞 Error 5）
+③ SYSTEM 计划任务 CloudRDP-UUAuto（开机 + 每 60s 无限重复）—— 2026-09-29 追加
+     → 无感：控制台不是 a、且 a 的会话没被 RDP 连着（Disc）时，自动执行 ①
 ```
 
 - 只**断开 / 重定向**，**绝不 `logoff`** —— 会话不注销、程序不退出；
 - 顶掉控制台上的 `runneradmin` 只是把它**断开**（detached），`Runner.Listener` / `Runner.Worker` 不受影响；
 - `GameViewerServer` / `GameViewerHealthd` 会自动在**新的**控制台会话里重生（PID 变，但服务不丢）—— 对 UU远程 与 runner 都安全。
 
-**为什么是「按需触发」而不是「全自动」**：交接会让**那一次 RDP 断开**。全自动会在你每次以 `a` 登录时都断一次，很烦；
-所以做成**公共桌面一个快捷方式**，以 `a` 通过 mstsc 登录后**双击它**即可（瑀子 2026-09-28 选定）。
+**③ 为什么能「无感」，又为什么必须加闸**（瑀子 2026-09-29 要求「连 UU远程 时无感跳到 `a`」）：
+
+| 场景 | `a` 的会话状态 | 自动交接怎么做 | 为什么 |
+|------|----------------|----------------|--------|
+| 控制台已经是 `a` | — | 直接退出（幂等，不做事、不刷日志） | 已经是目标状态 |
+| 你正用 mstsc 连着 `a` | **`Active`**（`rdp-tcp#N`） | **不切**（`skip-active`） | 切了会把你这次 RDP **踢断**；你若重连，Windows 会把控制台会话「**接管**」回 RDP，任务下一轮又切回来 → **来回抢控制台**。这种情况留给你自己决定：双击②立刻切 |
+| 你登录过 `a`、现在断开着 | **`Disc`** | **切** | 这正是「我想用 UU远程」的状态：Disc 说明**没有任何 RDP 客户端挂着**，把该会话 `tscon` 到控制台**不会踢掉任何人**，UU远程 立刻看到 `a` |
+| `a` 还没有会话（全新开机、没登录过） | 无会话 | 什么都不做 | 没有可交接的会话（日志/ENV 会说明） |
+
+- 触发节奏：**开机一次 + 每 60 秒一次**（`-AtStartup` + `-Once -RepetitionInterval`）。PS 5.1 实测
+  `-AtStartup` **不支持** `-RepetitionInterval`，所以拆成两个触发器；重复周期**不设 `RepetitionDuration`**
+  ⇒ `Duration` 为空 ⇒ 永续。
+- 想关掉自动：仓库里设 `CLOUDRDP_UU_AUTO=0`（安装时跳过），或在机器上放一个开关文件
+  `<sysdir>\_state\uu-auto-off`（运行时立刻停摆）。真正发生交接时才会往 `<sysdir>\_state\uu-auto.log` 写一行。
 
 | 落点 | 改动 |
 |------|------|
-| `scripts/session-lib.ps1`（重写） | `Get-RdpSessionReport`（解析 `qwinsta`，**状态锚定**）/ `Format-RdpSessionReport` / `Get-RdpHandoverPlan`（纯函数，三态 `none` / `no-user` / `handover`）/ `Invoke-RdpSessionHandover`（**需 SYSTEM**，`tsdiscon`→`tscon`）/ `Install-RdpSessionHandoverTask`（装 SYSTEM 任务 + 快捷方式）/ `Install-RdpSessionHandoverShortcut` |
-| `scripts/session-handover.ps1`（重写） | 三模式：`-System`（SYSTEM 任务入口，真正交接）/ `-DryRun`（只打印计划）/ 默认 `-Apply`（用户双击：只**触发** SYSTEM 任务并轮询结果）。全程 fail-soft，失败时窗口停留等回车 |
-| workflow **第 0b2 步** | 诊断控制台归属 → 写 `CONSOLE_OWNER`；`Install-RdpSessionHandoverTask` 装 SYSTEM 任务 + 快捷方式。**刻意不自动切换** |
-| `scripts/send-connection-mail.ps1` | **老 fork 自愈钩子**：下发连接邮件时顺带 `Install-RdpSessionHandoverTask`（fail-soft）。`0p` 只同步 `scripts/` ⇒ 停在 `d67e81d` 的老 fork（没有 `0b2` 步）也能装上 |
-| workflow **第 13 步** | ENV READY 打一行 `会话控制台 : <谁>`；不是 `a` 时给出双击提示 |
-| workflow **第 14 步保活循环** | 每 10 分钟复查控制台归属，**只在归属变化时**打一行 `[session] …`（不自动切换） |
+| `scripts/session-lib.ps1`（重写） | `Get-RdpSessionReport`（解析 `qwinsta`，**状态锚定**；暴露 `aState` / `aSessionName` / **`aAttachedRdp`**）/ `Format-RdpSessionReport` / `Get-RdpHandoverPlan`（纯函数，四态 `none` / `no-user` / **`skip-active`** / `handover`，`-Auto` 启用自动闸）/ `Invoke-RdpSessionHandover`（**需 SYSTEM**，`tsdiscon`→`tscon`）/ `Install-RdpSessionHandoverTask`（装 ① + ② + **③**）/ `Install-RdpSessionHandoverShortcut` / **`Install-RdpSessionAutoHandoverTask`**（只装 ③） |
+| `scripts/session-handover.ps1`（重写） | 四模式：`-System`（SYSTEM 任务入口，真正交接）/ **`-Auto`**（③ 入口：SYSTEM、静默、幂等、Disc 闸）/ `-DryRun`（只打印计划，可与 `-Auto` 合用）/ 默认 `-Apply`（用户双击：只**触发** SYSTEM 任务并轮询结果）。全程 fail-soft |
+| workflow **第 0b2 步** | 诊断控制台归属 → 写 `CONSOLE_OWNER`；`Install-RdpSessionHandoverTask` 一次装齐 ①②③ |
+| `scripts/send-connection-mail.ps1` | **老 fork 自愈钩子**：下发连接邮件时顺带 `Install-RdpSessionHandoverTask`（fail-soft）。`0p` 只同步 `scripts/` ⇒ 停在 `d67e81d` 的老 fork（没有 `0b2` 步）也能装上 ①②③ |
+| workflow **第 13 步** | ENV READY 打一行 `会话控制台 : <谁>` |
+| workflow **第 14 步保活循环** | 每 10 分钟复查控制台归属，**只在归属变化时**打一行 `[session] …` |
 
 **怎么用**：
 
-1. 以 `a` 通过 mstsc 登录（正常流程）；
-2. 双击公共桌面 **「切到 UU远程」** → 它触发 SYSTEM 任务 → 那次 RDP 断开，`a` 成为控制台会话；
+1. 以 `a` 通过 mstsc 登录（正常流程；顺带触发用户级数据还原）；
+2. **断开** mstsc（关窗口即可）→ ≤1 分钟内自动交接 → `a` 成为控制台会话；
 3. 打开 / 重连 UU远程 → 看到的就是 `a` 的桌面（若仍显示旧画面，断开重连一次）；
-4. 想切回 RDP：再用 mstsc 以 `a` 登录即可（Windows 会把 `a` 的会话接回 RDP）。
+4. 想立刻切（不想等那 1 分钟，或你正 RDP 连着）：双击公共桌面 **「切到 UU远程」**；
+5. 想切回 RDP：再用 mstsc 以 `a` 登录即可（Windows 会把 `a` 的会话接回 RDP；此时自动闸**不会**跟你抢）。
 
-**验证**（2026-09-29 在 `100.86.253.112` 真机端到端跑通）：
+**验证**（2026-09-29 在 `100.86.253.112` / `100.111.1.59` 真机跑通）：
 
 | 检查 | 结果 |
 |------|------|
-| `selftest.py` | **487 PASS / 0 FAIL**（本批 T400–T411 共 12 条；含 T411「真跑 pwsh 解析」） |
-| 部署 | `session-lib.ps1` 15,891 B / `session-handover.ps1` 8,567 B 字节级一致落到 `D:\cloudrdp-sys\scripts` |
-| 任务 | `CloudRDP-UUHandover`：`state=Ready`、`user=SYSTEM`、`logon=ServiceAccount`、`runlevel=Highest` |
+| `selftest.py` | **494 PASS / 0 FAIL**（§16 本批 T400–T418 共 19 条；含 T411/T418「真跑 pwsh」） |
+| 部署 | `session-lib.ps1` 23,395 B / `session-handover.ps1` 10,097 B 字节级一致落到 `D:\cloudrdp-sys\scripts` |
+| 任务 | `CloudRDP-UUHandover`：`state=Ready`、`user=SYSTEM`、`logon=ServiceAccount`、`runlevel=Highest`；`CloudRDP-UUAuto`：同 principal + `AtStartup` & `Once`(`PT1M`, 无 Duration) 双触发器 |
 | 快捷方式 | 公共桌面 `切到 UU远程.lnk` → `powershell.exe -File …session-handover.ps1 -Apply -User "a"` |
 | 端到端交接 | BEFORE `console runneradmin 2 Active` / `a 1 Disc` → `tsdiscon 2 rc=0` + `tscon 1 /dest:console rc=0` → AFTER `console a 1 Active` / `runneradmin 2 Disc` |
+| 自动闸 | 布局 `rdp-tcp#0 a 1 Active` → `-Auto` 判 `skip-active`（不抢）；布局 `<空> a 1 Disc` → `-Auto` 判 `handover` |
 | 解析回归 | 断开布局 `<空名> a 1 Disc` 下仍识别 `a`=会话 1（旧解析会误判 `no-user`） |
-| AST + actionlint | 两个脚本 + 第 0b2 / 13 / 14 步脚本全部解析通过；`actionlint rc=0` |
+| AST + YAML | 三个脚本 + 第 0b2 / 13 / 14 步脚本全部解析通过；YAML 解析出 26 步、`0b2` 在 |
 
-> **诚实边界**：交接需要 `a` **先有一个会话**（即先用 mstsc 登录一次）—— 因为 job 中途无法重启去走自动登录，
-> 所以「开机就自动让 `a` 占控制台」做不到。这就是做成按需触发的根本原因。
+> **诚实边界**：交接需要 `a` **先有一个会话**（即先用 mstsc 登录一次）—— 因为 GitHub 托管 runner 的
+> `HostedComputeAgent` 任务以 `runneradmin` 的 **InteractiveToken** 运行（`AutoAdminLogon=runneradmin`），
+> 改自动登录会把 runner 弄死；而 job 中途也没法重启去走「自动登录 `a`」。所以「开机就自动让 `a` 占控制台」做不到，
+> ③ 只解决「你已经登录过 `a`，只是不想再手点一次」这一步。
 >
 > **老 fork 注意**：Actions 用的是**触发 commit 里的 workflow**，`0p` 只 `/MIR` `scripts/`。
-> 停在 `d67e81d`（2026-09-24）的 acc-5 **没有 `0b2` 步** ⇒ 只能靠 `send-connection-mail.ps1` 里那个下沉钩子装任务；
+> 停在 `d67e81d`（2026-09-24）的 acc-5 **没有 `0b2` 步** ⇒ 只能靠 `send-connection-mail.ps1` 里那个下沉钩子装 ①②③；
 > 而 `send-connection-mail.ps1` 是 `0p` 覆盖得到的文件 —— 这就是「fork 无法自愈 workflow，但能自愈 scripts」的落点（详见 §17）。
 
 ### 17. 老 fork「同步了脚本却还是旧逻辑」：`0p` 只覆盖 `scripts/`、覆盖不到 `workflow`（acc-5 事故复盘）
@@ -1273,8 +1291,8 @@ cloud-rdp/
     ├── userprofile-lib.ps1             # 【新】用户配置文件预创建（显式 -LoadUserProfile + ProfileList 兜底；修「还原后用户数据全丢」）
     ├── watchdog-lib.ps1                # 【新】保命共享库：GitHub 可达性探测 / 主机体征 / Defender 排除 / 有限超时 / 网络自愈 / 连接看门狗
     ├── account-lib.ps1                 # 【新】账户守卫：隐藏非 RDP 账户（登录界面 SpecialAccounts + profile 目录 +h+s）+ 白名单断言（只留 a）
-    ├── session-lib.ps1                 # 【新】会话归属：控制台是谁（UU远程 连的就是它）+ 公共桌面「切到 UU远程」快捷方式
-    ├── session-handover.ps1            # 【新】把当前会话交给控制台（tscon /dest:console，只断开不 logoff）
+    ├── session-lib.ps1                 # 【新】会话归属：控制台是谁（UU远程 连的就是它）+ 桌面「切到 UU远程」+ 无感自动交接任务
+    ├── session-handover.ps1            # 【新】把当前会话交给控制台（tscon /dest:console，只断开不 logoff）；-Auto = 无感自动
     ├── conn-watchdog.ps1               # 【新】连接看门狗子进程：每分钟探一次，连续不可达即分级自愈 + 打印判定
     ├── pool-config.json                # 【新】账号池配置（无密钥：hub/账号/PAT-Secret 名）
     ├── pool-lib.ps1                    # 【新】账号池公共库：在跑机发现 / 决策 / 角色 / 状态
@@ -1290,7 +1308,7 @@ cloud-rdp/
 | **0p** | **跟随上游 hub 同步脚本（fork 自愈）** | 从 hub 仓库下 `scripts/` 覆盖本机脚本（`/MIR`）—— **老 fork 不必手点 Sync 也能拿到最新逻辑**。⚠️ 只覆盖 `scripts/`、**覆盖不到 `.github/workflows/`**（Actions 用的是触发 commit 里的 workflow），所以 workflow 内联的保命参数对老 fork 不生效（acc-5 事故，见 §17）。本步 fail-soft、末尾 `exit 0`，robocopy 退出码已归一化（不再误报 `exit 1`）；顺带 SHA256 比对 workflow 是否与 hub 漂移 |
 | **0a** | 记录 job 起点 + 开 RDP + **关防火墙** + **加 Defender 排除项** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算）；顺手把 `watchdog-lib.ps1` 的 `Enable-RdpAvExclusions` 调了 —— 后面第 7/8 步要落地 ≈1.8 万个小文件，**必须**在重 IO 之前把实时扫描摘掉（见 §11） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
-| **0b2** | **会话归属校正 + 装「切到 UU远程」快捷方式** | `session-lib.ps1`：诊断当前控制台会话归属 → 写 `CONSOLE_OWNER`；公共桌面放「切到 UU远程」（**刻意不自动切换**，见 §16） |
+| **0b2** | **会话归属校正 + 装「切到 UU远程」快捷方式 + 无感自动交接** | `session-lib.ps1`：诊断当前控制台会话归属 → 写 `CONSOLE_OWNER`；一次装齐 ① SYSTEM 任务 `CloudRDP-UUHandover` + ② 公共桌面「切到 UU远程」+ ③ 无感自动任务 `CloudRDP-UUAuto`（开机 + 每 60s，仅切**没被 RDP 连着**的 `a` 会话，见 §16） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」。`tailscale up` 带 **`--accept-dns=false`**，避免 VPN 接管系统 DNS 把 runner 自己的长轮询也拽进隧道（见 §11） |
 | **0c2** | **解析账号池角色** | `pool_role` 留空=单机（等同历史行为）；`primary`=唯一写 139；`standby`=只读热备、主下线自升为主。角色写入 `_state\pool-role.txt` |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
