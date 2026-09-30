@@ -170,6 +170,58 @@ function Invoke-WorkflowDispatch {
     }
 }
 
+# 让某账号 fork 的 main 跟随 hub —— fork 漂移自愈（含 .github/workflows/，0p 同步不到的那部分）。
+#
+# 为什么需要：Actions 用的是「触发那次 commit 里的 workflow」，而 0p 只能同步 scripts/，
+#   同步不了 .github/workflows/。fork 一旦落后，workflow 内联的新步骤（如 0b2 无感自动交接）
+#   永远到不了机器 —— 实测 acc-5 停在 d67e81d、acc-1 停在 530b3ab 都因此吃亏，
+#   用户「每次开机都要找人救」的根因就在这。
+# 策略：只在「严格落后」（ahead_by=0）时快进到 hub；fork 一旦有自己的提交（diverged）
+#   就只报告、绝不强推（避免把 fork 上的本地改动冲掉）。
+# 返回：@{ ok; action = 'uptodate'|'synced'|'self'|'no-token'|'diverged'|'error'; note }
+function Sync-PoolFork {
+    param(
+        $Account,
+        [string]$Token,
+        [string]$HubOwner,
+        [string]$HubRepo,
+        [string]$Branch = 'main',
+        [string]$ApiBaseUri = 'https://api.github.com'
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return @{ ok = $false; action = 'no-token'; note = "缺 token（Secret $($Account.token_secret) 未配置）" }
+    }
+    $owner = [string]$Account.owner
+    $repo  = [string]$Account.repo
+    if ($owner -ieq $HubOwner -and $repo -ieq $HubRepo) {
+        return @{ ok = $true; action = 'self'; note = '本仓库即 hub' }
+    }
+
+    # ① 跨仓比较 hub:branch 与 fork:branch（用 fork 自己的 token 查）
+    $cmpPath = "/repos/$owner/$repo/compare/${HubOwner}:$Branch...${owner}:$Branch"
+    try {
+        $cmp = Invoke-GhApi -Token $Token -Path $cmpPath -ApiBaseUri $ApiBaseUri
+    } catch {
+        return @{ ok = $false; action = 'error'; note = "compare 失败：$($_.Exception.Message)" }
+    }
+    $status = [string]$cmp.status
+    if ($status -eq 'identical') { return @{ ok = $true; action = 'uptodate'; note = '已与 hub 一致' } }
+    $ahead = [int]$cmp.ahead_by
+    if ($ahead -gt 0) {
+        return @{ ok = $false; action = 'diverged'; note = "fork 有 $ahead 个自有提交 —— 不动手（需人工处理）" }
+    }
+
+    # ② 严格落后 → merge-upstream 快进（GitHub 原生接口，无需本地 git）
+    $path = "/repos/$owner/$repo/merge-upstream"
+    try {
+        $res = Invoke-GhApi -Token $Token -Method 'POST' -Path $path -Body @{ branch = $Branch } -ApiBaseUri $ApiBaseUri
+        return @{ ok = $true; action = 'synced';
+                  note = "已快进到 hub（merge_type=$([string]$res.merge_type)，behind_by=$([int]$cmp.behind_by)）" }
+    } catch {
+        return @{ ok = $false; action = 'error'; note = "merge-upstream 失败：$($_.Exception.Message)" }
+    }
+}
+
 # 角色决策：primary = 最老的在跑机；其余 standby。
 function Resolve-PoolRoles {
     param([object[]]$Alive)

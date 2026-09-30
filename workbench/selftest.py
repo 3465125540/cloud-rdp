@@ -2347,6 +2347,19 @@ def main():
     check("T428 app.js 陈旧标记渲染为「旧标记·已忽略」",
           "stale_marker" in app_txt and "旧标记·已忽略" in app_txt)
 
+    # ---------------- fork 漂移自愈（0p 同步不到 .github/workflows/） ----------------
+    # 事故：fork 停在旧 commit → Actions 用的是「触发那次 commit 里的 workflow」，
+    #   而 0p 只能同步 scripts/，workflow 内联的新步骤（如 0b2 无感自动交接）永远到不了机器。
+    #   用户「每次开机都要找人救」的根因就在这（acc-1 停在 530b3ab、acc-5 停在 d67e81d）。
+    # 修法：协调器每轮巡检时把各 fork 的 main 快进到 hub（只在严格落后时；diverged 不动手）。
+    print("[fork 漂移自愈]")
+    check("T429 pool-lib 有 Sync-PoolFork（只在严格落后时 merge-upstream 快进；diverged 不动手）",
+          "function Sync-PoolFork" in pcl_txt and "merge-upstream" in pcl_txt
+          and "ahead_by" in pcl_txt and "'diverged'" in pcl_txt and "'uptodate'" in pcl_txt)
+    check("T430 协调器在决策前调用 fork 自愈，且不受 -DryRun 影响（自愈 ≠ 派发）",
+          "Sync-PoolFork" in pcp_txt and "fork 自愈" in pcp_txt
+          and "不受 -DryRun 影响" in pcp_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

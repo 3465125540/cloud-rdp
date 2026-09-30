@@ -114,6 +114,27 @@ foreach ($acc in $accounts) {
 }
 Say "在跑机合计 = $($alive.Count) / 目标 $($cfg.target_machines)"
 
+# ---------- 1b. fork 漂移自愈：把各 fork 的 main 快进到 hub ----------
+# 为什么放在「决策」之前、且不受 -DryRun 影响：
+#   fork 落后 → 机器跑到旧 workflow（0p 同步不到 .github/workflows/）→ 新步骤不生效。
+#   这是「用户每次开机都要找人救」的根因。自愈是幂等、只读→快进 的低危动作，
+#   与「派发机器」是两回事，所以 dry-run 也照做（-DryRun 只挡派发，不挡自愈）。
+$forkSync = @()
+foreach ($acc in $accounts) {
+    if ($acc.enabled -eq $false) { continue }
+    $s = Sync-PoolFork -Account $acc -Token (Get-PoolAccountToken -Account $acc) `
+                       -HubOwner ([string]$hub.owner) -HubRepo ([string]$hub.repo) `
+                       -Branch $ref -ApiBaseUri $ApiBaseUri
+    if ($s.action -eq 'synced') {
+        Say "fork 自愈：$($acc.id) ($($acc.owner)) —— $($s.note)"
+    } elseif ($s.action -in @('diverged', 'error')) {
+        Say "fork 自愈：$($acc.id) ($($acc.owner)) 未同步 —— $($s.note)"
+    }
+    $forkSync += [pscustomobject]@{ id = [string]$acc.id; owner = [string]$acc.owner;
+                                    action = [string]$s.action; ok = [bool]$s.ok; note = [string]$s.note }
+}
+Say "fork 自愈：$(@($forkSync | Where-Object { $_.action -eq 'synced' }).Count) 个已快进 / 共 $($forkSync.Count) 个账号（其余：已最新/本仓库/无 token）"
+
 # ---------- 2. 决策 ----------
 $plan = Get-PoolPlan -Config $cfg -Alive $alive -Now $now
 Say "决策：$($plan.reason)  primary候选=$($plan.primaryOwner)"
