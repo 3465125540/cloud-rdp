@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1349,8 +1349,11 @@ def _machine_detail_reads(ip):
     detail["backup_request"] = (res.get("backup") if isinstance(res.get("backup"), dict)
                                 else {"pending": False, "requested_at": "", "requested_by": ""})
     # 数据/快照恢复状态（acc-1 事故后新增：让「没拉取到数据」一眼可见）
-    detail["restore"] = (res.get("restore") if isinstance(res.get("restore"), dict)
-                         else {"data": {}, "snapshot": {}, "source": ""})
+    restore = (res.get("restore") if isinstance(res.get("restore"), dict)
+               else {"data": {}, "snapshot": {}, "source": ""})
+    # 标记文件来源的条目，若时间早于本机本次开机（或本就是旧格式）→ 标为陈旧，不计入异常
+    _mark_stale_marker(restore, detail.get("started_utc", ""))
+    detail["restore"] = restore
     return detail
 
 
@@ -1373,13 +1376,42 @@ def read_backup_request(ip):
     return out
 
 
+def parse_marker_time(text):
+    """解析「恢复状态标记文件」里的时间戳 → {"at_utc","legacy","raw"}。
+
+    两种格式（README 里都出现过）：
+      现行（remote-lib.ps1 的 Set-RestoreStatus 写入，UTC）：
+        `restore FAILED at 2026-09-30T05:45:19.7184162Z`
+      旧版（ce302e7 时代的 sync-down.ps1，**本地时间、无时区**）：
+        `restore FAILED at 2026-09-30 04:00:58, rclone exit code = 1`
+
+    旧版时间无法无歧义换算成 UTC，因此只标 legacy=True、不填 at_utc；
+    上层据此直接判「旧格式即陈旧」（当前脚本已不再产生该格式）。
+    """
+    t = str(text or "")
+    m = re.search(r"\bat\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)", t)
+    if not m:
+        return {"at_utc": "", "legacy": False, "raw": ""}
+    raw = m.group(1)
+    if "T" not in raw:                      # 旧版：空格分隔、本地时间，判不出 UTC
+        return {"at_utc": "", "legacy": True, "raw": raw}
+    dt = parse_iso(raw)
+    if not dt:
+        return {"at_utc": "", "legacy": False, "raw": raw}
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return {"at_utc": dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "legacy": False, "raw": raw}
+
+
 def read_restore_status(ip):
     """读机器上的 `_state/restore-status.json`（数据/快照恢复状态）。
 
     结构（由脚本侧的 remote-lib.ps1 Set-RestoreStatus 写入，按作用域合并）：
         { "data": {"status","reason","at_utc"}, "snapshot": {...} }
-    兼容旧的扁平结构 `{status,reason}`。再读不到就回退到旧标记文件
-    （`<数据目录>\\_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）。
+    兼容旧的扁平结构 `{status,reason}`。再读不到就回退到标记文件
+    （`<数据目录>\\_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）；回退条目会附带
+    `at_utc` / `marker_legacy`，供上层（`_mark_stale_marker`）判定是否为陈旧标记。
 
     返回 {"data": {...}, "snapshot": {...}, "source": "..."}；任何异常都不抛。
     """
@@ -1407,17 +1439,58 @@ def read_restore_status(ip):
     except Exception:
         pass
 
-    # 回退：旧标记文件（老机器/老脚本留下的）
+    # 回退：标记文件（老机器 / 老脚本留下的）。
+    # ⚠️ 绝不把「文件存在」直接当成本机当前的失败 —— 这些标记躺在数据目录根，会**随数据目录
+    #    同步到 139、再被还原到别的机器**（真机取证见 README §19）。所以内容也读出来，
+    #    交给上层（_mark_stale_marker）按时间判定是否陈旧。
     data_dir = str(CONFIG.get("data_dir") or r"D:\a\cloud-rdp").rstrip("\\/")
     for fname, st in (("_RESTORE_FAILED.txt", "FAILED"), ("_RESTORE_EMPTY.txt", "EMPTY")):
         try:
-            read_remote_abs(ip, data_dir + "\\" + fname)
-            out["data"] = {"status": st, "reason": "（旧标记文件 %s）" % fname, "at_utc": ""}
-            out["source"] = "标记文件"
-            break
+            raw = read_remote_abs(ip, data_dir + "\\" + fname) or ""
         except Exception:
             continue
+        mt = parse_marker_time(raw)
+        reason = ("（旧版标记文件 %s：本地时间、当前脚本已不再产生）" % fname if mt["legacy"]
+                  else "（标记文件 %s）" % fname)
+        out["data"] = {"status": st, "reason": reason, "at_utc": mt["at_utc"],
+                       "marker_legacy": mt["legacy"], "marker_at": mt["raw"]}
+        out["source"] = "标记文件"
+        break
     return out
+
+
+def _mark_stale_marker(restore, started_utc):
+    """判定「标记文件」来源的恢复状态是否已陈旧 —— 陈旧的不该计入「恢复异常」。
+
+    两种情况（真机取证见 README §19）：
+      ① 旧版格式（本地时间、无时区；当前脚本已不再产生）→ 必然是老脚本残留，
+         且已随 139 数据目录同步传播到别的机器；
+      ② 现行格式，但时间早于本机**本次开机**时刻 → 上一次开机留下的，或从 139 还原来的。
+    只处理「来源是标记文件」的条目：有权威 `restore-status.json` 的（哪怕 FAILED）一律不动，
+    免得把真实失败（acc-5）也一起吞掉。
+    """
+    if not isinstance(restore, dict):
+        return
+    if "标记文件" not in str(restore.get("source") or ""):
+        return
+    d = restore.get("data")
+    if not isinstance(d, dict) or not d:
+        return
+    if d.get("marker_legacy"):
+        d["stale_marker"] = True
+        return
+    at, boot = str(d.get("at_utc") or ""), str(started_utc or "")
+    if not (at and boot):
+        return
+    a, b = parse_iso(at), parse_iso(boot)
+    if not (a and b):
+        return
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=timezone.utc)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=timezone.utc)
+    if a < b:
+        d["stale_marker"] = True
 
 
 # 恢复状态 → 展示类别（前端与统计共用一套口径，避免两边判色不一致）
@@ -1439,12 +1512,16 @@ def restore_kind(status):
 
 
 def machine_restore_summary(m):
-    """从一台机器的 restore 字段里取最该被关注的那条状态（bad 优先于 ok）。"""
+    """从一台机器的 restore 字段里取最该被关注的那条状态（bad 优先于 ok）。
+
+    **陈旧标记（stale_marker）不参与** —— 那是经 139 传播来的假阳性，不该出现在摘要里。
+    """
     r = (m or {}).get("restore") or {}
     picks = []
     for scope in ("data", "snapshot"):
-        st = str((r.get(scope) or {}).get("status") or "")
-        if st:
+        sd = r.get(scope) or {}
+        st = str(sd.get("status") or "")
+        if st and not sd.get("stale_marker"):
             picks.append((scope, st))
     if not picks:
         return {"kind": "none", "scope": "", "status": ""}
@@ -1457,6 +1534,22 @@ def machine_restore_summary(m):
             return {"kind": "empty", "scope": scope, "status": st}
     scope, st = picks[0]
     return {"kind": "ok", "scope": scope, "status": st}
+
+
+def count_scope_bad(machines, scope):
+    """统计「恢复异常」机器数：某作用域状态为 bad 的机器数。
+
+    **陈旧标记（stale_marker）不计** —— 那是经 139 数据目录同步传播来的假阳性
+    （见 `_mark_stale_marker` / README §19）。抽成模块级函数是为了可单测。
+    """
+    n = 0
+    for m in machines or []:
+        sc = (m.get("restore") or {}).get(scope) or {}
+        if sc.get("stale_marker"):
+            continue
+        if restore_kind(str(sc.get("status") or "")) == "bad":
+            n += 1
+    return n
 
 
 def request_backup(ip, requested_by=""):
@@ -2453,14 +2546,7 @@ def build_overview():
     standby = [m for m in machines if m.get("role") == "standby"]
 
     # 数据/快照恢复：把「没拉取到数据」计入统计，让概览页一眼可见（acc-1 事故后新增）
-    def _scope_bad(scope):
-        n = 0
-        for m in machines:
-            st = str(((m.get("restore") or {}).get(scope) or {}).get("status") or "")
-            if restore_kind(st) == "bad":
-                n += 1
-        return n
-
+    # 陈旧标记（经 139 传播来的假阳性）不算 —— 见 count_scope_bad / _mark_stale_marker / README §19
     return {
         "ok": True,
         "version": VERSION,
@@ -2485,8 +2571,8 @@ def build_overview():
             "machines_total": len(machines),
             "machines_primary": len(primary),
             "machines_standby": len(standby),
-            "machines_data_bad": _scope_bad("data"),
-            "machines_snapshot_bad": _scope_bad("snapshot"),
+            "machines_data_bad": count_scope_bad(machines, "data"),
+            "machines_snapshot_bad": count_scope_bad(machines, "snapshot"),
             "accounts_total": len(accounts.get("accounts") or []),
             "accounts_enabled": len([a for a in (accounts.get("accounts") or []) if a.get("enabled")]),
             "target_machines": accounts.get("target_machines"),

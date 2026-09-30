@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.2", server.VERSION == "1.6.2", server.VERSION)
+    check("T168 server.py 版本 1.6.3", server.VERSION == "1.6.3", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2304,6 +2304,48 @@ def main():
             _auto_why = "skip:%s" % type(_ex).__name__
     check("T418 ★ 真跑 pwsh：a 被 RDP 连着 → 自动闸 skip-active；a 已断开 → 自动闸放行 handover",
           _auto_ok is not False, _auto_why)
+
+    # ---------------- 恢复状态标记：阻断 139 传播 + 陈旧判定（v1.6.3） ----------------
+    # 背景：_RESTORE_*.txt 躺在数据目录根、会随数据目录同步到 139，再被还原到别的机器，
+    #       几天后仍被读成「本机恢复失败」→ 概览「恢复异常」虚高。真机取证见 README §19。
+    print("[恢复标记：139 传播阻断 + 陈旧判定]")
+    check("T419 sync-up/sync-down 排除 _RESTORE_*.txt（阻断经 139 传播）",
+          all(x in su_txt for x in ('"/_RESTORE_FAILED.txt"', '"/_RESTORE_EMPTY.txt"'))
+          and all(x in sd_txt for x in ('"/_RESTORE_FAILED.txt"', '"/_RESTORE_EMPTY.txt"')),
+          "sync-up/sync-down 排除表缺 _RESTORE_*.txt")
+    _lg = server.parse_marker_time("restore FAILED at 2026-09-30 04:00:58, rclone exit code = 1")
+    _cu = server.parse_marker_time("restore FAILED at 2026-09-30T05:45:19.7184162Z\nreason=x")
+    _jk = server.parse_marker_time("")
+    check("T420 parse_marker_time 识别旧版格式（legacy=True、不填 at_utc）",
+          _lg["legacy"] is True and _lg["at_utc"] == "" and _lg["raw"] == "2026-09-30 04:00:58", str(_lg))
+    check("T421 parse_marker_time 现行格式归一成 UTC（去小数秒、保留 Z）",
+          _cu["legacy"] is False and _cu["at_utc"] == "2026-09-30T05:45:19Z", str(_cu))
+    check("T422 parse_marker_time 空/无时间戳 → 全空（不误判）",
+          _jk == {"at_utc": "", "legacy": False, "raw": ""}, str(_jk))
+
+    def _stale(marker_legacy, at_utc, source="标记文件", boot="2026-09-30T05:49:01Z"):
+        r = {"source": source, "data": {"status": "FAILED", "at_utc": at_utc,
+                                        "marker_legacy": marker_legacy}}
+        server._mark_stale_marker(r, boot)
+        return bool(r["data"].get("stale_marker"))
+    check("T423 旧版标记 → 陈旧（139 传播来的假阳性，不计入异常）",
+          _stale(True, "") is True)
+    check("T424 现行标记早于开机 → 陈旧；晚于开机 → 不陈旧（真失败仍计入）",
+          _stale(False, "2026-09-30T01:00:00Z") is True
+          and _stale(False, "2026-09-30T06:00:00Z") is False)
+    check("T425 权威 restore-status.json（acc-5 真失败）绝不被判陈旧",
+          _stale(False, "2026-09-30T05:45:19Z", source="_state/restore-status.json",
+                 boot="2026-09-30T00:46:42Z") is False)
+    check("T426 machine_restore_summary 跳过陈旧标记（data 陈旧 + snapshot OK → 取 OK）",
+          server.machine_restore_summary(
+              {"restore": {"data": {"status": "FAILED", "stale_marker": True},
+                           "snapshot": {"status": "OK"}}})["kind"] == "ok")
+    check("T427 count_scope_bad 跳过陈旧标记（陈旧 0、真失败 1）",
+          server.count_scope_bad([{"restore": {"data": {"status": "FAILED", "stale_marker": True}}}],
+                                 "data") == 0
+          and server.count_scope_bad([{"restore": {"data": {"status": "FAILED"}}}], "data") == 1)
+    check("T428 app.js 陈旧标记渲染为「旧标记·已忽略」",
+          "stale_marker" in app_txt and "旧标记·已忽略" in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

@@ -309,6 +309,14 @@ function restoreLine(label, obj) {
   if (!st) return "";
   var reason = String((obj && obj.reason) || "").trim();
   var when = bjTime((obj && obj.at_utc) || "");
+  // 陈旧标记：旧脚本留下的、或经 139 数据目录同步从别的机器传播来的，不代表本机本次开机结果。
+  // 用灰色徽章 + 明确说明展示，既不计入「恢复异常」，也不悄悄吞掉（后端已置 stale_marker）。
+  if (obj && obj.stale_marker) {
+    var sTip = label + "：旧标记（已忽略）　原状态：" + st +
+      (reason ? "　原因：" + reason : "") + (when ? "　记录于 " + when : "") +
+      "　说明：该标记由旧脚本写下、或随 139 数据目录同步从别的机器传播而来，不代表本机本次开机结果。";
+    return '<span data-tip="' + esc(sTip) + '">' + badge(label + " 旧标记·已忽略", "mute") + "</span>";
+  }
   var tip = label + "：" + st + (reason ? "　原因：" + reason : "") + (when ? "　记录于 " + when : "");
   return '<span data-tip="' + esc(tip) + '">' + badge(label + " " + st, restoreKind(st)) + "</span>";
 }

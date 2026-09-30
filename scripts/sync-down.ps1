@@ -82,7 +82,9 @@ if (-not (Test-Path -LiteralPath $RcloneExe)) {
 }
 
 # ---------------------------------------------------------------- 计算排除规则（与 sync-up 保持一致）
-$excludeList = @("/.git/**", "/_temp/**", "/cloud-rdp/**")
+# _RESTORE_*.txt 是「恢复状态标记文件」，躺在数据目录根，**绝不能从 139 还原下来**：
+# 某台机器写下的失败标记被推上 139 后，会被还原到别的机器，几天后仍被读成「本机恢复失败」。
+$excludeList = @("/.git/**", "/_temp/**", "/cloud-rdp/**", "/_RESTORE_FAILED.txt", "/_RESTORE_EMPTY.txt")
 $ws = $env:GITHUB_WORKSPACE
 if (-not [string]::IsNullOrWhiteSpace($ws)) {
     $wsFull    = $ws.TrimEnd('\')

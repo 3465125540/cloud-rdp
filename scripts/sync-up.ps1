@@ -49,7 +49,11 @@ else { Write-Warning "[sync-up] 未找到 remote-lib.ps1，远端可达性判定
 # 1) 固定防御：.git / _temp
 # 2) 动态：由 GITHUB_WORKSPACE 相对 $Local 求出仓库 checkout 目录名
 # 3) 兜底：仓库名恰为 cloud-rdp
-$excludeList = @("/.git/**", "/_temp/**", "/cloud-rdp/**")
+# 4) 恢复状态标记文件：**绝不随数据目录同步到 139**。
+#    它们躺在数据目录根（<数据目录>\_RESTORE_FAILED.txt / _RESTORE_EMPTY.txt），
+#    而数据目录整个就是同步范围 —— 某台机器写下的失败标记会被推上 139，
+#    再被还原到别的机器，几天后仍被工作台读成「本机恢复失败」（假阳性，实测见 README §19）。
+$excludeList = @("/.git/**", "/_temp/**", "/cloud-rdp/**", "/_RESTORE_FAILED.txt", "/_RESTORE_EMPTY.txt")
 
 $ws = $env:GITHUB_WORKSPACE
 if (-not [string]::IsNullOrWhiteSpace($ws)) {
