@@ -2360,6 +2360,23 @@ def main():
           "Sync-PoolFork" in pcp_txt and "fork 自愈" in pcp_txt
           and "不受 -DryRun 影响" in pcp_txt)
 
+    # ---------------- UU 交接 ②③ 的真实成败必须可见 + 区域无关 ----------------
+    # 事故（2026-09-30 复盘 run #62/#63/#65/#66/#67 日志）：
+    #   · ② 桌面快捷方式**从来没建出来过**：WScript.Shell.CreateShortcut 走 ANSI，
+    #     en-US 运行器（ACP=1252）存不了中文名 .lnk → "Unable to save shortcut"（zh-CN 机器正常）。
+    #   · 0b2/connmail 只打「自动: CloudRDP-UUAuto」（任务名，失败也照打）→ ③ 装没装上看不出来。
+    print("[UU 交接 ②③ 可见性 + 区域无关]")
+    check("T431 ★ 快捷方式改用「ASCII 临时名建 + Unicode File.Move 改中文名」（en-US 运行器也能建出来）",
+          "New-Object -ComObject WScript.Shell" in sess_lib_txt
+          and "[System.IO.File]::Move($tmpLnk, $lnkPath)" in sess_lib_txt
+          and "cloudrdp-uu-" in sess_lib_txt)
+    check("T432 ★ ③ 任务：Register-ScheduledTask 失败自动退回 schtasks（运行器令牌被 UAC 过滤时也能装）",
+          "$registered = $false" in sess_lib_txt and "if (-not $registered)" in sess_lib_txt
+          and "schtasks /create /tn $TaskName" in sess_lib_txt)
+    check("T433 ★ 0b2/connmail 报出 ②③ 真实成败（ok/note），不再只打任务名骗人",
+          "shortcutOk" in sess_lib_txt and "autoOk" in sess_lib_txt
+          and "③ 无感自动交接 ok=" in wf_txt and "② 桌面快捷方式 ok=" in cmsg_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

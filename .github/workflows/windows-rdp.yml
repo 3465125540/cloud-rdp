@@ -312,7 +312,13 @@ jobs:
               Write-Host ("[0b2] " + (Format-RdpSessionReport -RdpUser $env:RDP_USERNAME))
               "CONSOLE_OWNER=" + $rep.consoleOwner | Out-File $env:GITHUB_ENV -Append -Encoding utf8
               $tk = Install-RdpSessionHandoverTask -RdpUser $env:RDP_USERNAME
-              if ($tk.ok) { Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut + " / 自动: " + $tk.auto) }
+              if ($tk.ok) {
+                Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut + " / 自动: " + $tk.auto)
+                # ②③ 的真实成败单独打出来：上面那句里的「自动: CloudRDP-UUAuto」只是**任务名**，
+                # 安装失败也照打 —— 曾经因此把「③ 根本没装上」误读成「已就绪」（见 README/SKILL）。
+                Write-Host ("[0b2] ② 桌面快捷方式 ok=" + $tk.shortcutOk + " :: " + $tk.shortcutNote)
+                Write-Host ("[0b2] ③ 无感自动交接 ok=" + $tk.autoOk + " :: " + $tk.autoNote)
+              }
               else        { Write-Host ("[0b2] 交接任务未安装（可忽略）: " + $tk.note) }
             } else {
               Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'

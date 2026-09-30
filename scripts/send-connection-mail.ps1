@@ -97,7 +97,12 @@ try {
         . $sessLib
         if (Get-Command Install-RdpSessionHandoverTask -ErrorAction SilentlyContinue) {
             $tk = Install-RdpSessionHandoverTask -RdpUser $User -ScriptPath (Join-Path $PSScriptRoot 'session-handover.ps1')
-            if ($tk.ok) { Write-Host "[connmail] UU远程 交接任务已就绪：$($tk.task) / 快捷方式：$($tk.shortcut) / 无感自动：$($tk.auto)" }
+            if ($tk.ok) {
+                Write-Host "[connmail] UU远程 交接任务已就绪：$($tk.task) / 快捷方式：$($tk.shortcut) / 无感自动：$($tk.auto)"
+                # 「无感自动：CloudRDP-UUAuto」只是任务名，失败也照打 → 真实成败单独打出来
+                Write-Host "[connmail] ② 桌面快捷方式 ok=$($tk.shortcutOk) :: $($tk.shortcutNote)"
+                Write-Host "[connmail] ③ 无感自动交接 ok=$($tk.autoOk) :: $($tk.autoNote)"
+            }
             else        { Write-Host "[connmail] UU远程 交接任务未安装（可忽略）：$($tk.note)" -ForegroundColor Yellow }
         }
     }

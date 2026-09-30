@@ -259,9 +259,15 @@ function Install-RdpSessionHandoverShortcut {
         if (-not (Test-Path -LiteralPath $desktop)) { $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory') }
         New-Item -ItemType Directory -Force -Path $desktop | Out-Null
 
-        $lnkPath = Join-Path $desktop '切到 UU远程.lnk'
+        $lnkName = '切到 UU远程.lnk'
+        $lnkPath = Join-Path $desktop $lnkName
+        # ⚠️ WScript.Shell.CreateShortcut 内部走 ANSI 代码页：在 en-US 运行器（ACP=1252）上，
+        #    中文文件名会被吞成 "?" → COM 报 "Unable to save shortcut"（实测 #62/#63/#65/#66 全挂，
+        #    快捷方式从来没建出来过）。zh-CN 机器（ACP=936）则正常。
+        #    对策：先用纯 ASCII 名把 .lnk 建好，再用 Unicode 的 File.Move 改成中文名 —— 与运行器区域无关。
+        $tmpLnk = Join-Path $desktop ('cloudrdp-uu-' + [guid]::NewGuid().ToString('N') + '.lnk')
         $ws = New-Object -ComObject WScript.Shell
-        $lnk = $ws.CreateShortcut($lnkPath)
+        $lnk = $ws.CreateShortcut($tmpLnk)
         $lnk.TargetPath       = $ps
         # 双击走 -Apply：普通令牌只触发 SYSTEM 任务（不直接 tscon，避免 Error 5）
         $lnk.Arguments        = '-NoProfile -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -Apply -User "' + $RdpUser + '"'
@@ -269,6 +275,9 @@ function Install-RdpSessionHandoverShortcut {
         $lnk.Description      = "把 $RdpUser 的会话交给控制台，让 UU远程 落到 $RdpUser（RDP 会断开，程序保留）"
         $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,137"
         $lnk.Save()
+
+        if (Test-Path -LiteralPath $lnkPath) { Remove-Item -LiteralPath $lnkPath -Force -ErrorAction SilentlyContinue }
+        [System.IO.File]::Move($tmpLnk, $lnkPath)
 
         $res.ok = $true
         $res.path = $lnkPath
@@ -284,7 +293,7 @@ function Install-RdpSessionHandoverTask {
         [string]$TaskName = 'CloudRDP-UUHandover'
     )
 
-    $res = @{ ok = $false; task = $TaskName; script = ''; shortcut = ''; note = '' }
+    $res = @{ ok = $false; task = $TaskName; script = ''; shortcut = ''; shortcutOk = $false; shortcutNote = ''; note = '' }
     try {
         if ($env:CLOUDRDP_UU_HANDOVER_SKIP -eq '1') { $res.note = 'CLOUDRDP_UU_HANDOVER_SKIP=1，跳过安装'; return $res }
 
@@ -321,6 +330,8 @@ function Install-RdpSessionHandoverTask {
 
         $sc = Install-RdpSessionHandoverShortcut -RdpUser $RdpUser -ScriptPath $dstScript
         $res.shortcut = $sc.path
+        $res.shortcutOk = $sc.ok
+        $res.shortcutNote = $sc.note
 
         # ③ 无感自动交接任务（失败不影响 ①②）
         $auto = Install-RdpSessionAutoHandoverTask -RdpUser $RdpUser -ScriptPath $dstScript
@@ -371,21 +382,30 @@ function Install-RdpSessionAutoHandoverTask {
         $argStr = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $dstScript + '" -Auto -User "' + $RdpUser + '"'
         $desc = "CloudRDP: 无感把 $RdpUser 的会话交给控制台（让 UU远程 落到 $RdpUser）—— 仅在 $RdpUser 的会话未被 RDP 占用时切"
 
+        $tr = '"' + $ps + '" ' + $argStr
+        $registered = $false
         if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
-            $act = New-ScheduledTaskAction -Execute $ps -Argument $argStr
-            $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                       -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
-            # -AtStartup 不支持 Repetition（PS 5.1 实测），所以拆成两个触发器：
-            #   · 开机触发（覆盖重启；此时 a 多半还没会话 → 空跑，无害）
-            #   · Once + 无限重复（RepetitionDuration 留空 ⇒ Duration 为空 ⇒ 永续，每 IntervalMinutes 一次）
-            $tBoot = New-ScheduledTaskTrigger -AtStartup
-            $tRep  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
-            Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($tBoot, $tRep) -Principal $prn -Settings $set `
-                -Description $desc -Force -ErrorAction Stop | Out-Null
-        } else {
-            $tr = '"' + $ps + '" ' + $argStr
+            try {
+                $act = New-ScheduledTaskAction -Execute $ps -Argument $argStr
+                $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+                $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                           -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+                # -AtStartup 不支持 Repetition（PS 5.1 实测），所以拆成两个触发器：
+                #   · 开机触发（覆盖重启；此时 a 多半还没会话 → 空跑，无害）
+                #   · Once + 无限重复（RepetitionDuration 留空 ⇒ Duration 为空 ⇒ 永续，每 IntervalMinutes 一次）
+                $tBoot = New-ScheduledTaskTrigger -AtStartup
+                $tRep  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+                Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($tBoot, $tRep) -Principal $prn -Settings $set `
+                    -Description $desc -Force -ErrorAction Stop | Out-Null
+                $registered = $true
+            } catch {
+                # cmdlet 路线失败（运行器令牌可能被 UAC 过滤）→ 退回 schtasks（受限上下文更稳）
+                $res.note = "Register-ScheduledTask 失败，改走 schtasks：$($_.Exception.Message)"
+            }
+        }
+        if (-not $registered) {
             & schtasks /create /tn $TaskName /tr $tr /sc minute /mo $IntervalMinutes /ru SYSTEM /rl HIGHEST /f 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "schtasks 创建 $TaskName 失败（exit $LASTEXITCODE）" }
         }
 
         $res.ok = $true
