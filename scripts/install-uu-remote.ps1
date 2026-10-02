@@ -317,8 +317,10 @@ function Get-UUMachineIdentity {
                 if ($o.Self) {
                     $id.name = [string]$o.Self.HostName
                     if (-not $id.name -and $o.Self.DNSName) { $id.name = ([string]$o.Self.DNSName).Split('.')[0] }
+                    # 优先 IPv4（100.x）—— 用户拿它 RDP；Tailscale 有时把 IPv6 排前面
                     $ips = @($o.Self.TailscaleIPs)
-                    if ($ips.Count -gt 0) { $id.ip = [string]$ips[0] }
+                    $v4 = $ips | Where-Object { [string]$_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -First 1
+                    if ($v4) { $id.ip = [string]$v4 } elseif ($ips.Count -gt 0) { $id.ip = [string]$ips[0] }
                 }
             }
         }
