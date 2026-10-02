@@ -17,20 +17,26 @@
     ③ 官方安装包直链下载 + NSIS /S 静默安装
   装完拉起一次（让它写设备身份），再读连接信息。
 
-  连接信息从哪来（UU远程 免登录也能被「远程协助」，靠的就是设备码 + 验证码）：
-    机器级  C:\ProgramData\Netease\GameViewer\user_info.ini            → deviceId（设备码）
-            C:\ProgramData\Netease\GameViewer\remote_assist_code.ini    → 协助码 / 验证码
-            C:\ProgramData\Netease\GameViewer\config.ini                → uuid
-    协助方拿到「设备码 + 验证码」即可发起远控，无需登录 UU 账号。
+  连接信息从哪来（★ 优先走官方 CLI —— 它给的是「设备 ID + 验证码」这一对能直接输入的凭据）：
+    官方命令行  <安装目录>\bin\uuyc-cli.exe      （运维版文档里叫 uuycmgr.exe；两个名字都认）
+      -d                 取「设备 ID」—— 纯数字，就是远程协助页面那个 ID（需主程序在跑）
+      -c <code>          设置自定义验证码，并把验证方式切成「仅使用自定义验证码」
+                         （客户端日志：setCustomVerifyCode: verify_type is TEMPORARY, switching to CUSTOMIZE）
+    取不到 CLI 时退回读 ini —— 注意那里的协助码是 DPAPI 密文，跨机解不开，只能当排查信息：
+      C:\ProgramData\Netease\GameViewer\user_info.ini          → deviceId（16 位内部设备码）
+      C:\ProgramData\Netease\GameViewer\remote_assist_code.ini → code / customize_code（DPAPI）/ id（8 位）
+      C:\ProgramData\Netease\GameViewer\config.ini             → uuid
+    协助方拿到「设备 ID + 验证码」即可发起远控，无需登录 UU 账号。
 
 .NOTES
   环境变量：
     CLOUDRDP_DATA_DIR  数据目录（找 D 盘便携副本用），默认 D:\a\cloud-rdp
+    CLOUDRDP_UU_CODE   自定义验证码（默认 a1234567；等价于 -CustomCode）
     RDP_USERNAME       被控账户（默认 a），只用于正文提示
     MAIL_*             与 0e 步同一套 SMTP 配置（缺失则自动跳过发信）
   退出码：**始终 0**（安装/发信失败都不该让开机流程变红）。
           状态写 <sysdir>\_state\uu-remote.json，并透出 UU_REMOTE=OK|PARTIAL|FAIL 到 GITHUB_ENV。
-  开关：CLOUDRDP_UU_INSTALL=0 → 只读现有信息、不装；-SkipInstall / -NoMail / -DryRun。
+  开关：CLOUDRDP_UU_INSTALL=0 → 只读现有信息、不装；-SkipInstall / -NoSetCode / -NoMail / -DryRun。
   诊断日志：默认 <sysdir>\_state\uu-remote.log（用 -LogPath 覆盖）。
 #>
 [CmdletBinding()]
@@ -39,7 +45,15 @@ param(
     [string]$DataDir    = $(if ($env:CLOUDRDP_DATA_DIR) { [string]$env:CLOUDRDP_DATA_DIR } else { 'D:\a\cloud-rdp' }),
     [string]$LogPath    = '',
     [string]$MailTo     = '',
+    # ★ 自定义验证码 —— 用官方 CLI `uuyc-cli.exe -c` 写进 UU远程。
+    #   为什么要有它：ini 里的协助码是 DPAPI 密文，且从 139 还原来的那份是在**别的机器**上加密的，
+    #   跨机解不开 —— 打印出来等于没打印。设一个我们自己的固定码之后，「验证码」就是一串
+    #   已知的明文，主控端拿来就能连。
+    #   格式（客户端硬校验）：8~16 位，字母 + 数字**都要有**，否则 CLI 直接报
+    #   `Error: Invalid verification code format (must be 8-16 letters/digits, containing both)`。
+    [string]$CustomCode = $(if ($env:CLOUDRDP_UU_CODE) { [string]$env:CLOUDRDP_UU_CODE } else { 'a1234567' }),
     [switch]$SkipInstall,
+    [switch]$NoSetCode,
     [switch]$NoMail,
     [switch]$DryRun
 )
@@ -143,6 +157,85 @@ function Install-UUViaDownload {
         } catch { Warn "下载失败：$($_.Exception.Message)" }
     }
     return @{ ok = $false; note = '官方安装包下载/安装均失败' }
+}
+
+# ---------------------------------------------------------------- ★ 官方 CLI：设备 ID + 自定义验证码
+# UU远程 自带命令行工具 <安装目录>\bin\uuyc-cli.exe（运维版文档里叫 uuycmgr.exe，两个名字都认）。
+# 为什么用它，而不是自己去改 remote_assist_code.ini：
+#   ini 里的 code / customize_code 是 DPAPI 密文，只有「本机 + 写它的那个账户」解得开。
+#   从 139 云盘还原过来的那份是在**别的机器**上加密的 → 本机 Unprotect 直接报「数据无效」。
+#   CLI 走的是官方通道：-d 读设备 ID，-c 让主程序自己把自定义码写进去（它自己加解密，稳）。
+# 前提：主程序 GameViewer.exe 必须在跑（同一个会话里，走 IPC）。
+function Find-UUCli {
+    $names = @('uuyc-cli.exe', 'uuycmgr.exe')
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($exe in (Get-UUCandidateExes)) {
+        $d = Split-Path -Parent $exe
+        if ($d) {
+            $dirs.Add($d)                                   # …\GameViewer\bin
+            $dirs.Add((Split-Path -Parent $d))              # …\GameViewer
+            $dirs.Add((Join-Path (Split-Path -Parent $d) 'bin'))
+        }
+    }
+    foreach ($d in @($InstallDir, (Join-Path $InstallDir 'bin'),
+                     (Join-Path $env:LOCALAPPDATA 'Programs\GameViewer'),
+                     (Join-Path $env:LOCALAPPDATA 'Programs\GameViewer\bin'))) {
+        if ($d) { $dirs.Add([string]$d) }
+    }
+    foreach ($d in $dirs) {
+        foreach ($n in $names) {
+            try {
+                $p = Join-Path $d $n
+                if (Test-Path -LiteralPath $p) { return $p }
+            } catch { }
+        }
+    }
+    return ''
+}
+
+# 直接 & 调用（不要 Start-Process：那会换会话，IPC 就断了）。
+function Invoke-UUCli([string[]]$CliArgs) {
+    if (-not $CliPath) { return @{ ok = $false; out = '未找到 CLI'; code = -1 } }
+    try {
+        $out = (& $CliPath @CliArgs 2>&1 | Out-String).Trim()
+        return @{ ok = ($LASTEXITCODE -eq 0); out = $out; code = $LASTEXITCODE }
+    } catch {
+        return @{ ok = $false; out = [string]$_.Exception.Message; code = -1 }
+    }
+}
+
+# 设备 ID：主控端要输入的就是它（纯数字）。主程序刚起时要等一会儿 IPC 才通，所以重试几轮。
+function Get-UUDeviceIdViaCli([int]$Tries = 6, [int]$SleepSec = 5) {
+    if (-not $CliPath) { return '' }
+    for ($i = 0; $i -lt $Tries; $i++) {
+        $r = Invoke-UUCli -CliArgs @('-d')
+        if ($r.out -match '(\d{6,12})') { return $Matches[1] }
+        if ($i -lt $Tries - 1) { Start-Sleep -Seconds $SleepSec }
+    }
+    return ''
+}
+
+# 设置自定义验证码 = 把验证方式切成「仅使用自定义验证码」（客户端会自动做这个切换）。
+# 成功：exit 0 + "Verification code reset successfully"
+# 失败：exit 4 + "Error: Invalid verification code format (must be 8-16 letters/digits, containing both)"
+function Set-UUCustomCode([string]$Code) {
+    if (-not $CliPath) { return @{ ok = $false; note = '未找到 uuyc-cli.exe / uuycmgr.exe' } }
+    if ([string]::IsNullOrWhiteSpace($Code)) { return @{ ok = $false; note = '自定义验证码为空' } }
+    $last = ''
+    for ($i = 0; $i -lt 3; $i++) {
+        $r = Invoke-UUCli -CliArgs @('-c', $Code)
+        $last = $r.out
+        if ($r.ok -and ($r.out -notmatch '(?i)^\s*error')) {
+            return @{ ok = $true; note = "已设置（uuyc-cli -c，exit=$($r.code)）" }
+        }
+        # 个别版本把 code 当交互输入读 stdin → 再试一次管道方式
+        try {
+            $Code | & $CliPath -c 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { return @{ ok = $true; note = '已设置（stdin 方式）' } }
+        } catch { }
+        if ($i -lt 2) { Start-Sleep -Seconds 5 }
+    }
+    return @{ ok = $false; note = "设置失败：$last" }
 }
 
 # ---------------------------------------------------------------- 设备身份解析
@@ -289,10 +382,36 @@ if ($install.ok -and $install.exe -and -not $DryRun) {
     } catch { Warn "拉起 UU远程 失败（可忽略）：$($_.Exception.Message)" }
 }
 
-# 读连接信息（拉起后再读一次；谁的协助码可用就用谁）
+# ---------------------------------------------------------------- ★ 官方 CLI 就位
+$CliPath = ''
+$devNum  = ''
+$codeSet = @{ ok = $false; note = '未执行' }
+if ($install.ok -and $install.exe) {
+    $CliPath = Find-UUCli
+    if ($CliPath) { Say "官方 CLI：$CliPath" }
+    else { Warn "未找到 uuyc-cli.exe / uuycmgr.exe（老版本可能没有）—— 退回只读 ini" }
+}
+
+# ★ 用官方 CLI 取「设备 ID」+ 设「自定义验证码」（都要主程序在跑；-d 只读，DryRun 也允许试）
+if ($CliPath) {
+    $devNum = Get-UUDeviceIdViaCli
+    if ($devNum) { Say "设备 ID（CLI -d）= $devNum" }
+    else { Warn "CLI -d 未取到设备 ID（主程序可能还没起好）" }
+
+    if ($NoSetCode -or $DryRun) {
+        $codeSet = @{ ok = $false; note = '已跳过（NoSetCode/DryRun）' }
+        Say "已跳过设置自定义验证码（NoSetCode/DryRun）"
+    } else {
+        $codeSet = Set-UUCustomCode $CustomCode
+        if ($codeSet.ok) { Say "自定义验证码已设为「$CustomCode」→ 验证方式 = 仅使用自定义验证码" }
+        else { Warn "设置自定义验证码失败：$($codeSet.note)" }
+    }
+}
+
+# 读连接信息（CLI 没设成自定义码，才需要退回 ini 的协助码 —— 那份多半是跨机 DPAPI 密文）
 $info = Get-UUConnectionInfo
-if (-not (Test-AssistUsable $info.assistCode) -and $install.ok -and -not $DryRun) {
-    Say "协助码仍是 DPAPI 密文（多半是从别的机器还原来的）—— 再等 20s 让 UU远程 在本机重生成 ..."
+if (-not $codeSet.ok -and -not (Test-AssistUsable $info.assistCode) -and $install.ok -and -not $DryRun) {
+    Say "CLI 未设成自定义码，且 ini 里的协助码是 DPAPI 密文（多半从别的机器还原来的）—— 再等 20s 让 UU远程 在本机重生成 ..."
     Start-Sleep -Seconds 20
     $again = Get-UUConnectionInfo
     if (Test-AssistUsable $again.assistCode) { $info = $again; Say "已拿到本机可用的协助码" }
@@ -300,62 +419,107 @@ if (-not (Test-AssistUsable $info.assistCode) -and $install.ok -and -not $DryRun
 if ($install.exe) { $info.version = Get-UUVersion $install.exe }
 $info.installPath = [string]$install.exe
 
-# 判定：设备码 + **可用**的验证码才算 OK；只有一个算 PARTIAL
-$assistUsable = Test-AssistUsable $info.assistCode
-$state = 'FAIL'
-if ($install.ok -and $info.deviceId -and $assistUsable) { $state = 'OK' }
-elseif ($install.ok -or $info.deviceId) { $state = 'PARTIAL' }
+# 验证码取值优先级：① 我们自己设的自定义码（已知明文，最可靠）→ ② ini 里能解开的协助码
+$assistCode = ''
+$codeSource = ''
+if ($codeSet.ok)                              { $assistCode = $CustomCode;          $codeSource = 'custom(CLI 已设置)' }
+elseif (Test-AssistUsable $info.assistCode)   { $assistCode = [string]$info.assistCode; $codeSource = 'ini(本机可解密)' }
+$assistUsable = [bool]$assistCode
 
-$assistDisplay = if (-not $info.assistCode) { '(未取到)' }
-                 elseif ($assistUsable) { $info.assistCode }
-                 else { '(DPAPI 密文·跨机解不开 —— 需在机器上打开 UU远程 查看验证码，或登录 UU 账号走设备列表)' }
+# 设备 ID 取值：CLI 的数字 ID 优先（主控端就输它）；否则退回 ini 的 16 位内部设备码
+$deviceDisplay = if ($devNum) { $devNum } elseif ($info.deviceId) { [string]$info.deviceId } else { '' }
+$deviceIsNumeric = [bool]($deviceDisplay -match '^\d+$')
+
+# 判定：装了 + 有设备 ID + 有可用验证码 = OK；缺一档 = PARTIAL
+$state = 'FAIL'
+if ($install.ok -and $deviceDisplay -and $assistUsable) { $state = 'OK' }
+elseif ($install.ok -or $deviceDisplay) { $state = 'PARTIAL' }
+
+$assistDisplay = if ($assistCode) { $assistCode }
+                 elseif ($NoSetCode -or $DryRun) { '(已跳过设置)' }
+                 else { '(未取到：官方 CLI 不可用，且 ini 里的码是 DPAPI 密文·跨机解不开 —— 需在机器上打开 UU远程 查看)' }
 
 # ---------------------------------------------------------------- 打印
+$devLine = if (-not $deviceDisplay) { '(未取到)' }
+           elseif ($deviceIsNumeric) { $deviceDisplay }
+           else { "$deviceDisplay  (CLI 不可用，退回内部 deviceId)" }
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  UU远程（备用远程通道）连接信息" -ForegroundColor Cyan
-Write-Host "  设备名   : $($info.deviceName)"
-Write-Host "  设备码   : $(if ($info.deviceId) { $info.deviceId } else { '(未取到)' })" -ForegroundColor Yellow
-Write-Host "  协助 id  : $(if ($info.assistId) { $info.assistId } else { '(无)' })" -ForegroundColor Yellow
-Write-Host "  验证码   : $assistDisplay" -ForegroundColor Yellow
-if ($info.uuid)    { Write-Host "  uuid     : $($info.uuid)" -ForegroundColor DarkGray }
-if ($info.version) { Write-Host "  版本     : $($info.version)" -ForegroundColor DarkGray }
-Write-Host "  安装     : $($install.note)"
-Write-Host "  安装路径 : $(if ($info.installPath) { $info.installPath } else { '(无)' })" -ForegroundColor DarkGray
-Write-Host "  状态     : $state" -ForegroundColor $(if ($state -eq 'OK') { 'Green' } elseif ($state -eq 'PARTIAL') { 'Yellow' } else { 'Red' })
-Write-Host "  >> 协助方：装「网易UU远程」→ 远程协助 → 输入上面的「设备码 + 验证码」" -ForegroundColor Magenta
+Write-Host "  设备名     : $($info.deviceName)"
+Write-Host "  设备 ID    : $devLine" -ForegroundColor Yellow
+Write-Host "  验证码     : $assistDisplay" -ForegroundColor Yellow
+Write-Host "  >> 主控端只输上面两项：设备 ID + 验证码" -ForegroundColor Magenta
+if ($info.deviceId -and $info.deviceId -ne $deviceDisplay) { Write-Host "  设备码(内部): $($info.deviceId)" -ForegroundColor DarkGray }
+if ($info.assistId) { Write-Host "  协助 id    : $($info.assistId)" -ForegroundColor DarkGray }
+if ($info.uuid)     { Write-Host "  uuid       : $($info.uuid)" -ForegroundColor DarkGray }
+if ($info.version)  { Write-Host "  版本       : $($info.version)" -ForegroundColor DarkGray }
+Write-Host "  安装       : $($install.note)"
+Write-Host "  安装路径   : $(if ($info.installPath) { $info.installPath } else { '(无)' })" -ForegroundColor DarkGray
+Write-Host "  自定义码   : $($codeSet.note)" -ForegroundColor DarkGray
+Write-Host "  状态       : $state" -ForegroundColor $(if ($state -eq 'OK') { 'Green' } elseif ($state -eq 'PARTIAL') { 'Yellow' } else { 'Red' })
+Write-Host "  >> 协助方：装「网易UU远程」→ 远程协助 → 输入「设备 ID + 验证码」" -ForegroundColor Magenta
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host ""
 
-Log ("state=$state deviceId=$($info.deviceId) assistUsable=$assistUsable version=$($info.version) install=$($install.note)")
+Log ("state=$state deviceId=$deviceDisplay devNum=$devNum assistUsable=$assistUsable codeSource=$codeSource cli=$CliPath version=$($info.version) install=$($install.note)")
 Write-Status ([ordered]@{
-    state = $state; deviceName = $info.deviceName; deviceId = $info.deviceId; assistId = $info.assistId
-    assistCode = $info.assistCode; assistUsable = $assistUsable; uuid = $info.uuid; version = $info.version
+    state = $state; deviceName = $info.deviceName
+    deviceId = $deviceDisplay; deviceIdNumeric = $devNum; deviceIdInternal = $info.deviceId
+    assistId = $info.assistId; assistCode = $assistCode; codeSource = $codeSource
+    customCode = $(if ($codeSet.ok) { $CustomCode } else { '' }); customCodeNote = $codeSet.note
+    assistUsable = $assistUsable; uuid = $info.uuid; version = $info.version
+    cliPath = $CliPath
     installPath = $info.installPath; installOk = [bool]$install.ok; installNote = $install.note
     source = $install.source; updatedUtc = (Get-Date).ToUniversalTime().ToString('o')
 })
 Set-GhEnv "UU_REMOTE=$state"
-if ($info.deviceId)   { Set-GhEnv "UU_REMOTE_DEVICE=$($info.deviceId)" }
-if ($assistUsable)    { Set-GhEnv "UU_REMOTE_ASSIST=$($info.assistCode)" }
+if ($deviceDisplay) { Set-GhEnv "UU_REMOTE_DEVICE=$deviceDisplay" }
+if ($devNum)        { Set-GhEnv "UU_REMOTE_DEVICE_ID=$devNum" }
+if ($info.deviceId) { Set-GhEnv "UU_REMOTE_DEVICE_LONG=$($info.deviceId)" }
+if ($assistUsable)  { Set-GhEnv "UU_REMOTE_ASSIST=$assistCode" }
+if ($codeSet.ok)    { Set-GhEnv "UU_REMOTE_CODE=$CustomCode" }
 
-# 公共桌面留一份（人在 RDP 里看不到 Actions 日志）
+# 桌面 / 状态目录各留一份（人在 RDP 里看不到 Actions 日志）。
+# ⚠️ 非管理员时 C:\Users\Public\Desktop 是**拒绝写**的（实测 Access denied）——
+#    所以逐个候选目录试，首个成功即止，并把落点写进日志（别再静默吞掉）。
 try {
-    $pub = if ($env:PUBLIC) { $env:PUBLIC } else { 'C:\Users\Public' }
-    $txt = Join-Path $pub 'Desktop\_CloudRDP_UU远程连接信息.txt'
-    @(
+    $infoLines = @(
         "UU远程（备用远程通道）连接信息"
         ""
-        "  设备名 : $($info.deviceName)"
-        "  设备码 : $($info.deviceId)"
-        "  协助 id: $($info.assistId)"
-        "  验证码 : $assistDisplay"
+        "  设备 ID : $devLine"
+        "  验证码  : $assistDisplay"
         ""
-        "怎么连：装「网易UU远程」→ 远程协助 → 输入「设备码 + 验证码」。"
+        "主控端只输上面两项：设备 ID + 验证码。"
+        ""
+        "  ── 以下为排查信息，连接不需要 ──"
+        "  设备名    : $($info.deviceName)"
+        "  内部设备码: $($info.deviceId)"
+        "  协助 id   : $($info.assistId)"
+        "  自定义码  : $($codeSet.note)"
+        "  状态      : $state"
+        ""
+        "怎么连：装「网易UU远程」→ 远程协助 → 输入「设备 ID + 验证码」。"
         "注意：UU远程 连的是控制台会话；若控制台不是 $uuUser，请在 $uuUser 桌面双击「切到 UU远程」。"
         ""
         "（本文件由开机流程 0c1 步自动生成）"
-    ) | Out-File -LiteralPath $txt -Encoding UTF8
-} catch { }
+    )
+    $cands = New-Object System.Collections.Generic.List[string]
+    if ($env:PUBLIC)      { $cands.Add((Join-Path $env:PUBLIC      'Desktop\_CloudRDP_UU远程连接信息.txt')) }
+    if ($env:USERPROFILE) { $cands.Add((Join-Path $env:USERPROFILE 'Desktop\_CloudRDP_UU远程连接信息.txt')) }
+    $cands.Add((Join-Path $stateDir 'uu-remote-info.txt'))
+    $wrote = ''
+    foreach ($t in $cands) {
+        try {
+            $dir = Split-Path -Parent $t
+            if ($dir -and -not (Test-Path -LiteralPath $dir)) { continue }
+            $infoLines | Out-File -LiteralPath $t -Encoding UTF8
+            $wrote = $t; break
+        } catch { }
+    }
+    if ($wrote) { Say "连接信息已写到：$wrote"; Log "info file: $wrote" }
+    else { Warn "连接信息文件写不进去（Public 桌面 / 用户桌面 / 状态目录都不行）" }
+} catch { Warn "写连接信息文件异常：$($_.Exception.Message)" }
 
 # ---------------------------------------------------------------- 发信
 if ($NoMail -or $DryRun) { Say "已跳过发信（NoMail/DryRun）" }
@@ -363,19 +527,26 @@ else {
     $bodyLines = @(
         'CloudRDP 备用远程通道：UU远程（网易 GameViewer）'
         ''
-        "  设备名   : $($info.deviceName)"
-        "  设备码   : $(if ($info.deviceId) { $info.deviceId } else { '(未取到)' })"
-        "  协助 id  : $(if ($info.assistId) { $info.assistId } else { '(无)' })"
-        "  验证码   : $assistDisplay"
-        "  版本     : $($info.version)"
-        "  安装     : $($install.note)"
-        "  状态     : $state"
+        "  设备 ID : $devLine"
+        "  验证码  : $assistDisplay"
+        ''
+        '主控端只输上面两项：设备 ID + 验证码。'
+        ''
+        '  ── 以下为排查信息，连接不需要 ──'
+        "  设备名    : $($info.deviceName)"
+        "  内部设备码: $($info.deviceId)"
+        "  协助 id   : $($info.assistId)"
+        "  版本      : $($info.version)"
+        "  安装      : $($install.note)"
+        "  自定义码  : $($codeSet.note)"
+        "  状态      : $state"
         ''
         '怎么连（备用通道）：'
         '  1. 在手机 / 电脑装「网易UU远程」( https://uuyc.163.com/ )'
-        '  2. 打开 → 远程协助 → 输入「设备码 + 验证码」（验证码解不开时用「协助 id」）'
+        '  2. 打开 → 远程协助 → 输入「设备 ID + 验证码」'
         '  3. 即可看到本机桌面（控制台会话）'
         ''
+        '说明：验证码已由官方 CLI（uuyc-cli -c）固定为「仅使用自定义验证码」，不随刷新变化，可直接收藏设备。'
         "注意：UU远程 连的是机器的控制台会话；若控制台不是 $uuUser，请在 $uuUser 桌面双击「切到 UU远程」。"
         '（Tailscale 主通道见 0e 步那封邮件。）'
         ''
@@ -386,7 +557,7 @@ else {
     if (Test-Path -LiteralPath $mailScript) {
         Say "发送 UU远程 连接信息到邮箱（日志：$LogPath）"
         try {
-            & $mailScript -Subject "CloudRDP 备用通道 · UU远程（$($info.deviceName)）" -BodyText $body -MailTo $MailTo -LogPath $LogPath
+            & $mailScript -Subject "CloudRDP 备用通道 · UU远程（$($info.deviceName)）设备ID $devLine · 验证码 $assistDisplay" -BodyText $body -MailTo $MailTo -LogPath $LogPath
             if ($LASTEXITCODE -eq 0) { Say "邮件已发送" }
             else { Warn "邮件发送失败（返回码 $LASTEXITCODE）—— 连接信息已明文打印在上方" }
         } catch { Warn "邮件发送异常：$($_.Exception.Message)" }

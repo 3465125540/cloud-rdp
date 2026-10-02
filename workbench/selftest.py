@@ -2404,6 +2404,39 @@ def main():
     check("T439 ★ 修掉「PowerShell 单元素数组被解包成标量」的坑（$exe[0] 会变成首字符 'C'）",
           "return ,@($list)" in uu_txt)
 
+    # ---------------- UU远程「连接信息」改造：官方 CLI 取设备ID + 固定自定义验证码 ----------------
+    # 背景：ini 里的协助码是 DPAPI 密文，且从 139 还原的那份是在**别的机器**上加密的 → 跨机解不开，
+    #       于是「验证码」那一行等于没打印（旧版只能写「(DPAPI 密文…)」）。
+    # 改走 UU远程 官方 CLI（<安装目录>\bin\uuyc-cli.exe；运维版文档里叫 uuycmgr.exe）：
+    #   -d         取「设备 ID」—— 纯数字，就是远程协助页面那个 ID
+    #   -c <code>  设自定义验证码，并把验证方式切成「仅使用自定义验证码」
+    #     （客户端日志：setCustomVerifyCode: verify_type is TEMPORARY, switching to CUSTOMIZE）
+    # 于是邮件里的「设备 ID + 验证码」是一对**能直接输入**的凭据，不再受 DPAPI 跨机限制。
+    print("[UU远程 连接信息：设备 ID + 固定自定义验证码]")
+    check("T440 ★ 优先走官方 CLI（uuyc-cli.exe / uuycmgr.exe），不再靠硬改 ini 里的 DPAPI 密文",
+          "function Find-UUCli" in uu_txt and "'uuyc-cli.exe'" in uu_txt and "'uuycmgr.exe'" in uu_txt
+          and "function Invoke-UUCli" in uu_txt)
+    check("T441 ★ 用 CLI `-d` 取「设备 ID」（纯数字；主控端要输入的就是它）",
+          "function Get-UUDeviceIdViaCli" in uu_txt and "-CliArgs @('-d')" in uu_txt
+          and r"\d{6,12}" in uu_txt)
+    check("T442 ★ 用 CLI `-c` 设自定义验证码 = 把验证方式切成「仅使用自定义验证码」",
+          "function Set-UUCustomCode" in uu_txt and "-CliArgs @('-c', $Code)" in uu_txt
+          and "仅使用自定义验证码" in uu_txt)
+    check("T443 自定义验证码默认 a1234567（8 位、字母+数字），可由 -CustomCode / CLOUDRDP_UU_CODE 覆盖",
+          "'a1234567'" in uu_txt and "CLOUDRDP_UU_CODE" in uu_txt and "$CustomCode" in uu_txt)
+    check("T444 ★ 连接信息主推「设备 ID + 验证码」两项（控制台 / 桌面文件 / 邮件三处都对齐）",
+          "设备 ID    : $devLine" in uu_txt and "验证码     : $assistDisplay" in uu_txt
+          and "设备 ID : $devLine" in uu_txt and "验证码  : $assistDisplay" in uu_txt
+          and "主控端只输上面两项" in uu_txt)
+    check("T445 ★ 桌面连接信息文件多目录回落（非管理员时 Public 桌面会被拒写 → 用户桌面 → 状态目录）",
+          "uu-remote-info.txt" in uu_txt and "$env:USERPROFILE" in uu_txt
+          and "连接信息已写到" in uu_txt)
+    check("T446 工作流把仓库变量 CLOUDRDP_UU_CODE 透传给 0c1（不设则用脚本默认码）",
+          "CLOUDRDP_UU_CODE: ${{ vars.CLOUDRDP_UU_CODE }}" in wf_txt)
+    check("T447 仍然 fail-soft：找不到 CLI / 设码失败都不阻断开机（脚本永远 exit 0）",
+          "未找到 uuyc-cli.exe / uuycmgr.exe" in uu_txt
+          and uu_txt.rstrip().endswith("exit 0"))
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

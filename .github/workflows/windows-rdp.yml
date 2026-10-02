@@ -391,8 +391,12 @@ jobs:
           MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_CC: ${{ secrets.MAIL_CC }}
+          # 自定义验证码（8~16 位、字母+数字都要有）。仓库变量没设就用脚本默认 a1234567。
+          CLOUDRDP_UU_CODE: ${{ vars.CLOUDRDP_UU_CODE }}
         run: |
           # 开关：仓库里设 CLOUDRDP_UU_INSTALL=0 可只读现有信息、不装（排查用）。
+          # 脚本会用官方 CLI（bin\uuyc-cli.exe）取「设备 ID」并设「仅使用自定义验证码」，
+          # 于是邮件里的「设备 ID + 验证码」是一对**能直接输入**的凭据（不再受 DPAPI 跨机限制）。
           .\scripts\install-uu-remote.ps1 -LogPath "$env:CLOUDRDP_SYS_DIR\_state\uu-remote.log"
       - name: 0c2. 解析账号池角色（primary / standby / 单机）
         shell: pwsh
