@@ -368,6 +368,32 @@ jobs:
 
           # 「可连」时刻：供 0d 打印拿到 IP 的耗时、13 打印就绪总耗时
           (Get-Date).ToUniversalTime().ToString('o') | Out-File (Join-Path $env:CLOUDRDP_SYS_DIR '_state\rdp-ready-at.txt') -Encoding ascii
+      # ---------------------------------------------------------------- 备用远程通道：UU远程
+      # 为什么要这一步（Tailscale 之后的「备用方案」）：
+      #   Tailscale 是主通道，但它有单点 —— authkey 会过期、tailnet 会受限、MagicDNS 会抖。
+      #   UU远程（网易 GameViewer）走网易自研中继，机器只要能上网就能被连上，是主通道之外的兜底。
+      # 为什么必须放在这里「早装」：
+      #   第 10 步的「后台重装软件」要等 30~60 分钟才轮到它；等那时候，「备用通道」在用户最需要的
+      #   前半小时里根本不存在。所以这里先装 + 拉起 + 打印连接信息（设备码 / 验证码），并直接发到邮箱。
+      # 装不上 / 发信失败都不阻断开机：脚本永远 exit 0（continue-on-error 再兜一层）。
+      # 复用 0e 步同一套 MAIL_*（未配置则自动跳过发信，连接信息仍在日志明文打印）。
+      - name: 0c1. 安装 UU远程（备用远程通道）+ 打印/邮件连接信息
+        continue-on-error: true
+        timeout-minutes: 8            # 保险：正常 1~2 分钟（装 + 拉起 + 读身份）；这里只防卡死
+        shell: pwsh
+        env:
+          MAIL_SMTP_HOST: ${{ secrets.MAIL_SMTP_HOST }}
+          MAIL_SMTP_PORT: ${{ secrets.MAIL_SMTP_PORT }}
+          MAIL_SECURITY: ${{ secrets.MAIL_SECURITY }}
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_PASS: ${{ secrets.MAIL_PASS }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_CC: ${{ secrets.MAIL_CC }}
+        run: |
+          # 开关：仓库里设 CLOUDRDP_UU_INSTALL=0 可只读现有信息、不装（排查用）。
+          .\scripts\install-uu-remote.ps1 -LogPath "$env:CLOUDRDP_SYS_DIR\_state\uu-remote.log"
       - name: 0c2. 解析账号池角色（primary / standby / 单机）
         shell: pwsh
         run: |

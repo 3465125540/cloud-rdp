@@ -2377,6 +2377,33 @@ def main():
           "shortcutOk" in sess_lib_txt and "autoOk" in sess_lib_txt
           and "③ 无感自动交接 ok=" in wf_txt and "② 桌面快捷方式 ok=" in cmsg_txt)
 
+    # ---------------- UU远程「备用远程通道」（0c1 步：早装 + 打印/邮件连接信息） ----------------
+    # 背景：Tailscale 是主通道，但有单点（authkey 过期 / tailnet 受限）。UU远程 走网易中继兜底。
+    #   必须「早装」——第 10 步重装软件要等 30~60 分钟，那时「备用」早就不备用了。
+    #   连接信息 = 设备码(deviceId) + 验证码(协助码)；协助码是 DPAPI 密文，跨机解不开要**如实报**。
+    uu_txt = open(os.path.join(repo_dir, "scripts", "install-uu-remote.ps1"),
+                  encoding="utf-8-sig").read()
+    print("[UU远程 备用远程通道 0c1]")
+    check("T434 ★ 工作流在 0c 之后、0c2 之前插入了 0c1 步（安装 UU远程 + 打印/邮件连接信息）",
+          "0c1. 安装 UU远程" in wf_txt
+          and wf_txt.index("0c. 安装并连接 Tailscale")
+              < wf_txt.index("0c1. 安装 UU远程")
+              < wf_txt.index("0c2. 解析账号池角色"))
+    check("T435 ★ 0c1 调 install-uu-remote.ps1，且 continue-on-error（装不上不阻断开机）",
+          "install-uu-remote.ps1" in wf_txt
+          and "0c1. 安装 UU远程" in wf_txt)
+    check("T436 安装分层：已装 → winget(NetEase.UURemote) → 官方安装包 /S（全 fail-soft）",
+          "NetEase.UURemote" in uu_txt and "Install-UUViaWinget" in uu_txt
+          and "Install-UUViaDownload" in uu_txt and "'/S'" in uu_txt)
+    check("T437 连接信息：读 deviceId / uuid / 协助码，DPAPI 密文跨机解不开要如实标注",
+          "user_info.ini" in uu_txt and "remote_assist_code.ini" in uu_txt
+          and "Try-Unprotect" in uu_txt and "DataProtectionScope" in uu_txt
+          and "assistUsable" in uu_txt)
+    check("T438 发信复用 send-mail.ps1，且脚本永远 exit 0（不阻断开机）",
+          "send-mail.ps1" in uu_txt and uu_txt.rstrip().endswith("exit 0"))
+    check("T439 ★ 修掉「PowerShell 单元素数组被解包成标量」的坑（$exe[0] 会变成首字符 'C'）",
+          "return ,@($list)" in uu_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()
