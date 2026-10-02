@@ -1,0 +1,95 @@
+# 邮件自测：单跑 0c1「UU远程 连接信息 + 发信」，**不开云机**。
+#
+# 为什么要这个：
+#   0c1 的邮件只有开机流程才会发 —— 想验证「邮件能不能到 / 内容对不对」就得开一台云机，
+#   代价太大（几分钟到几十分钟，还占账号池）。这个 workflow 把 0c1 那一步单独拉出来，
+#   在 GitHub 托管的 windows runner 上跑一遍（几分钟、不占云机），真的把邮件发出去。
+#
+# 用法：Actions → 「Mail Test (0c1 连接信息)」→ Run workflow
+#   install_uu = true   真装 UU远程 再发（约 3 分钟，邮件内容完整：设备 ID + 验证码）
+#   install_uu = false  跳过安装，只测发信链路（约 30 秒；连接信息会显示「未取到」）
+#   dry_run    = true   只渲染邮件内容、不真发（排查 SMTP 配置用）
+#
+# 复用与 0e / 0c1 完全相同的 MAIL_* Secrets —— 这里通，开机那封就通。
+name: Mail Test (0c1 连接信息)
+
+on:
+  workflow_dispatch:
+    inputs:
+      install_uu:
+        description: 'true = 真装 UU远程 再发（~3 分钟，内容完整）；false = 跳过安装只测发信（~30 秒）'
+        required: false
+        default: 'true'
+      dry_run:
+        description: 'true = 只渲染邮件内容不真发（排查 SMTP 用）'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mail-test
+  cancel-in-progress: true
+
+jobs:
+  mail:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      MAIL_SMTP_HOST: ${{ secrets.MAIL_SMTP_HOST }}
+      MAIL_SMTP_PORT: ${{ secrets.MAIL_SMTP_PORT }}
+      MAIL_SECURITY: ${{ secrets.MAIL_SECURITY }}
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_PASS: ${{ secrets.MAIL_PASS }}
+      MAIL_FROM: ${{ secrets.MAIL_FROM }}
+      MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+      MAIL_CC: ${{ secrets.MAIL_CC }}
+      # 自定义验证码（8~16 位、字母+数字都要有）。仓库变量没设就用脚本默认 a1234567。
+      CLOUDRDP_UU_CODE: ${{ vars.CLOUDRDP_UU_CODE }}
+      RDP_USERNAME: a
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 0c1 连接信息 + 发信（单跑）
+        shell: pwsh
+        run: |
+          $sys = 'D:\cloudrdp-sys'
+          New-Item -ItemType Directory -Force -Path "$sys\_state" | Out-Null
+          $env:CLOUDRDP_SYS_DIR = $sys
+          $a = @('-LogPath', "$sys\_state\uu-remote.log")
+          if ('${{ inputs.install_uu }}' -ne 'true') { $a += '-SkipInstall' }
+          if ('${{ inputs.dry_run }}' -eq 'true')    { $a += '-DryRun' }
+          .\scripts\install-uu-remote.ps1 @a
+
+      - name: 回显状态与 SMTP 对话（Actions 日志里直接看）
+        if: always()
+        shell: pwsh
+        run: |
+          $sys = 'D:\cloudrdp-sys'
+          foreach ($f in @("$sys\_state\uu-remote.log", "$sys\_state\uu-remote.json")) {
+            if (Test-Path -LiteralPath $f) { "===== $f ====="; Get-Content -LiteralPath $f -Raw }
+          }
+
+      - name: 断言「邮件到底发出去没有」（发信失败就把这一步弄红）
+        if: always()
+        shell: pwsh
+        run: |
+          $sys = 'D:\cloudrdp-sys'
+          $log = if (Test-Path "$sys\_state\uu-remote.log") { Get-Content "$sys\_state\uu-remote.log" -Raw } else { '' }
+          if ('${{ inputs.dry_run }}' -eq 'true') { Write-Host 'DRY RUN —— 只渲染，不判定发信结果'; exit 0 }
+          if ($log -match '已发送：')      { Write-Host '✅ 邮件已发送（见日志「已发送：<收件人>」）'; exit 0 }
+          if ($log -match '未配置 ')       { Write-Host '⚠️ 仓库没配 MAIL_* Secrets —— 视为「未启用邮箱」，不是失败'; exit 0 }
+          if ($log -match 'FAILED 阶段=')  { Write-Host '❌ 发信失败，失败阶段见上面日志'; exit 1 }
+          Write-Host '❌ 日志里既没有「已发送」也没有失败记录 —— 大概率脚本没跑到发信那步'; exit 1
+
+      - name: 上传状态/日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uu-0c1-state
+          path: D:\cloudrdp-sys\_state\
+          if-no-files-found: warn
+          retention-days: 7
