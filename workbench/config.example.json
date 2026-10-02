@@ -51,5 +51,19 @@
   "rdp_store_cred": true,
   "rdp_launch_mode": "mstsc",
   "_rdp_launch_target_说明": "一键登录由谁唤起客户端：auto=Windows 服务端→服务端弹 mstsc、其它→交给本机（浏览器下载 .rdp / 复制命令）；local=一律交给本机；server=强制服务端唤起。",
-  "rdp_launch_target": "auto"
+  "rdp_launch_target": "auto",
+
+  "_auto_start_说明": "自动接力：在「机器运行实况」列表里，任一台在跑机器运行时长 ≥ uptime_hours 小时，就自动派发 1 台新机器（windows-rdp.yml）。默认关闭（会自动消耗 Actions 分钟数）。去重三重护栏：同一台机器只触发一次（按「归属+开机时刻」闩锁）+ cooldown_minutes 冷却 + max_per_hour 每小时上限。状态落盘 workbench/_auto-start-state.json。改完重启服务生效。",
+  "auto_start": {
+    "enabled": false,
+    "uptime_hours": 4,
+    "cooldown_minutes": 30,
+    "max_per_hour": 4,
+    "max_running": 0,
+    "duration_minutes": "350",
+    "install_apps": true,
+    "migrate_139": false,
+    "check_seconds": 60,
+    "state_file": ""
+  }
 }

@@ -79,6 +79,7 @@ python workbench\selftest.py
 | `rdp_store_cred` | `true` | 是否 `cmdkey` 预存凭据（免手输密码） |
 | `rdp_launch_mode` | `mstsc` | 唤起方式：`mstsc`=`mstsc /v:<ip>` 命令行（零弹窗，推荐）；`file`=`os.startfile(.rdp)`（老行为，会被 KB5083769 安全警告挡住） |
 | `snapshot_stale_minutes` | `90` | 快照超过这么久没更新 → 标黄 |
+| `auto_start` | `{enabled:false, uptime_hours:4, …}` | **自动接力**（v1.6.4）：任一台在跑机器运行时长 ≥ `uptime_hours` 小时 → 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数）。详见下方「自动接力」小节 |
 
 ### Token 自动发现顺序
 
@@ -353,6 +354,32 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 > 口径：权威来源永远是 `_state\restore-status.json`；它存在时标记一概不看 —— 真失败（如 acc-5 的 `data=FAILED`）照常计入。
 > 陈旧标记**不计数、但也不静默吞掉**（界面上能看到「旧标记·已忽略」）。详见主 README 第四节 §19。
 
+### 自动接力：运行时长 ≥ 4 小时 → 自动派发 1 台新机器（v1.6.4）
+
+**需求**：在「机器运行实况」列表里，只要有**任意一台在跑机器**运行时长达到 4 小时，就自动启动 1 台新机器。
+
+**为什么 4 小时**：单 job 硬上限 6 小时。跑到第 4 小时就把「下一台」排上队，等这台到点结束时新机器已就绪，
+不出现空窗。这条规则由后台守护线程 `auto_start_loop()` 承担，**面板关着也照跑**。
+
+**规则四要素**（完整版见主 README 第四节 §20）：
+
+| 要素 | 一句话 |
+|------|--------|
+| 触发条件 | 每 `check_seconds`（默认 60s）巡检一次；「达标机器」非空且过三道去重护栏 → 派发 |
+| 判断范围 | **所有在跑机器**（不限主/备/账号），`online 且 uptime ≥ 4h` 任意一台即命中；离线 / 池内占位行 / 时长未知都不算 |
+| 执行动作 | 派发 **1 台**保活机（`windows-rdp.yml`），即「操作台 → 派发保活机」那一下 |
+| 去重 | ① 一次性闩锁（按「归属@开机时刻」，同机只触发一次）② 冷却期 30 分钟 ③ 每小时配额 4 台 ④ 可选在跑上限。**派发成功才落闩锁**，失败不闩、下个 tick 重试 |
+
+**实现**：`server.py` 的 `machine_uptime_key()` / `auto_start_hot()` / `auto_start_decide()`（纯函数，可单测）/
+`auto_start_run_once(dry_run=)` / `auto_start_loop()`；闩锁与历史落盘 `workbench/_auto-start-state.json`（gitignore）。
+「机器运行实况」标题行显示「自动接力：任一台运行 ≥ 4 小时 → 自动派发 1 台（已派发 N 台，上次 …）」。
+
+> **默认关闭**：自动派发耗 Actions 分钟数，属「要花资源的自动化」。开启 = `config.json` 写
+> `{"auto_start":{"enabled":true}}` 并重启（`auto_start` 走子键合并，只写 `enabled` 不丢其余阈值）。
+> 只想看会不会触发：`GET /api/auto-start?dry=1`（干跑，不派发）。
+> 诚实边界：只看 Tailscale 在线的机器；派发是**入队**（同仓库 `concurrency` 会让它排到前一台结束）；派发落在
+> `config.repo`（hub）上，不保证与到期那台同账号。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -551,6 +578,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 | GET | `/api/pool-state` | hub 发布的权威角色状态 |
 | GET | `/api/export?what=&format=` | **数据导出**（v1.5.9）：`what` ∈ `all`(默认)/`overview`/`runs`/`machines`/`accounts`/`pool`，`format` ∈ `json`(默认)/`csv`。`all`+`csv` 返回一个 zip（4 份 CSV + `overview.json`）；其余返回单个文件。CSV 带 UTF-8 BOM；响应带 `Content-Disposition: attachment`（文件名带时间戳）。取数复用面板快照（秒回） |
 | POST | `/api/dispatch` | `{target:"coordinator"\|"keepalive", inputs:{...}}` 触发 workflow |
+| GET | `/api/auto-start` | **自动接力规则状态**（v1.6.4，只读）：`enabled / uptime_hours / cooldown_minutes / max_per_hour / max_running / last_dispatch_at / triggered_count / dispatches`。加 `?dry=1` 干跑一次判定（`dry_run.fire/reason`）——**只判定、不派发、不落状态** |
 | POST | `/api/backup` | `{ip}` **一键备份**：经 SMB 把请求文件写到机器，保活循环取走后执行「增量同步到 139（`rclone copy --update`，不重复上传）+ 快速快照推送」 |
 | POST | `/api/rdp` | `{ip, hostname, launch?, store_cred?}` 一键登录。本机部署：落盘 + 预存凭据 + 唤起 `mstsc`；**远端部署**（v1.6.0）：不弹窗，返回 `local_target: true` + `download_url`，由前端下载 `.rdp` |
 | GET | `/api/rdp/preview?ip=...` | 预览生成的 `.rdp` 文本（不落盘） |
@@ -564,7 +592,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（412 项）
+├── selftest.py           # 离线自测（547 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

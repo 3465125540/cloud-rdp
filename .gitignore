@@ -16,6 +16,9 @@ rclone.conf
 
 # 智能体工作台：本地配置（含本机路径/凭据指向），不入库
 workbench/config.json
+# 智能体工作台：自动接力规则的运行状态（去重闩锁/历史，本机运行产物），不入库
+workbench/_auto-start-state.json
+workbench/_auto-start-state.json.tmp
 
 # Python 缓存
 __pycache__/

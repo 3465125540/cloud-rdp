@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -164,6 +164,24 @@ DEFAULT_CONFIG = {
     #   "local"  = 一律交给本机（工作台部署在远端、你要在自己电脑上连）。
     #   "server" = 强制服务端唤起（工作台就跑在你本机、且本机有图形界面时才合理）。
     "rdp_launch_target": "auto",
+
+    # ---- 自动接力：机器运行时长 ≥ N 小时 → 自动派发 1 台新机器 ----
+    # 需求：在「机器运行实况」列表里，只要有**任意一台**在跑的机器运行时长达到阈值，
+    # 就自动派发 1 台新的保活机（windows-rdp.yml），提前接力，避免单 job 6 小时到点后断档。
+    # 默认 **关闭**：自动派发会消耗 GitHub Actions 分钟数，属于「要花资源的自动化」，应当显式开启。
+    # 开启方式：本机 workbench/config.json 里写 {"auto_start": {"enabled": true}}（改完重启服务生效）。
+    "auto_start": {
+        "enabled": False,          # 总开关；False = 只读状态、绝不派发
+        "uptime_hours": 4,         # 阈值（小时）：任一台在跑机器运行时长 ≥ 它 → 命中
+        "cooldown_minutes": 30,    # 冷却期（分钟）：两次派发之间至少间隔这么久，防「一次性全起」
+        "max_per_hour": 4,         # 滚动配额：一小时内最多派发几台（0 = 不限）
+        "max_running": 0,          # 在跑机器数达到它就不再派发（0 = 不限）
+        "duration_minutes": "350", # 新机器的保活时长（透传 workflow 的 duration_minutes）
+        "install_apps": True,      # 新机器还原后是否后台重装软件
+        "migrate_139": False,      # 新机器是否把 139 老路径迁移到 AI文件库
+        "check_seconds": 60,       # 后台巡检间隔（秒）
+        "state_file": "",          # 去重闩锁/历史落盘位置；留空 = workbench/_auto-start-state.json
+    },
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -175,8 +193,13 @@ def _expand(p):
 
 
 def load_config(path=None):
-    """默认值 ← config.json ← 环境变量（后者覆盖前者）。"""
-    cfg = dict(DEFAULT_CONFIG)
+    """默认值 ← config.json ← 环境变量（后者覆盖前者）。
+
+    注意：`DEFAULT_CONFIG` 里的 `workflows` / `auto_start` 是**嵌套 dict**，
+    所以这里对它们做一层浅拷贝 —— 否则下面的 `.update(v)` 会就地改到 DEFAULT_CONFIG 本身，
+    既污染「默认值」这个唯一真源，又让多次 load_config 之间互相串味。
+    """
+    cfg = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_CONFIG.items()}
     path = path or os.environ.get("WORKBENCH_CONFIG") or os.path.join(HERE, "config.json")
     if path and os.path.isfile(path):
         try:
@@ -186,6 +209,9 @@ def load_config(path=None):
                 for k, v in user.items():
                     if k == "workflows" and isinstance(v, dict):
                         cfg["workflows"].update(v)
+                    elif k == "auto_start" and isinstance(v, dict):
+                        # 子键合并（不是整块替换）：用户只想改 enabled 时，其余阈值仍走默认值。
+                        cfg["auto_start"].update(v)
                     else:
                         cfg[k] = v
         except Exception as e:  # 配置坏了也不能让服务起不来
@@ -2100,6 +2126,275 @@ def dispatch_workflow(workflow_key, inputs=None, ref=None):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+# ============================ 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器
+# 需求（瑀子 2026-10-02）：在「机器运行实况」列表里，只要有**任意一台在跑的机器**
+# 运行时长达到阈值（默认 4 小时），就自动启动 1 台新机器（派发 windows-rdp.yml 保活机）。
+#
+# 为什么是 4 小时：单 job 硬上限 6 小时（见 windows-rdp.yml 的 relay_minutes 说明）。
+# 机器跑到 4 小时就该把「下一台」排上队 —— 等这台到点结束时，新机器已就绪，不出现断档空窗。
+#
+# 去重（关键）：运行时长只增不减，若不加约束，规则会在每个巡检 tick 重复触发、把机器池刷爆。
+# 这里三重护栏：
+#   ① 一次性闩锁（per-machine latch）：某台机器触发过一次就记进 state，永不二次触发；
+#   ② 冷却期（cooldown_minutes）：两次派发之间至少间隔 N 分钟，防「多台同时到点 → 一次性全起」；
+#   ③ 滚动配额（max_per_hour）：一小时内最多派发 N 次，兜底防失控。
+# 只有 dispatch 成功才落闩锁 —— 派发失败不闩，下个 tick 还会重试（仍受冷却约束）。
+_AUTO_START_LOCK = threading.Lock()
+
+
+def auto_start_cfg():
+    """归一化 auto_start 配置（补齐默认值 / 归一类型），避免各处再写 `or` 兜底。"""
+    c = CONFIG.get("auto_start") or {}
+    state_file = str(c.get("state_file") or "").strip() or os.path.join(HERE, "_auto-start-state.json")
+    try:
+        up_h = float(c.get("uptime_hours") or 4)
+    except (TypeError, ValueError):
+        up_h = 4.0
+    return {
+        "enabled": bool(c.get("enabled")),
+        "uptime_hours": up_h,
+        "cooldown_minutes": float(c.get("cooldown_minutes") or 30),
+        "max_per_hour": int(c.get("max_per_hour") or 0),
+        "max_running": int(c.get("max_running") or 0),
+        "duration_minutes": str(c.get("duration_minutes") or "350"),
+        "install_apps": bool(c.get("install_apps", True)),
+        "migrate_139": bool(c.get("migrate_139", False)),
+        "check_seconds": int(c.get("check_seconds") or 60),
+        "state_file": state_file,
+    }
+
+
+def machine_uptime_key(m):
+    """一台「机器实例」的稳定标识：归属 + 开机时刻（`_state\\job-start.txt`）。
+
+    去重必须认「同一台机器的一生」，而不是「某一帧的 IP」—— 一次性 runner 的 Tailscale
+    节点可能重连换 IP，但一次 run 的开机时刻唯一且不变。读不到开机时刻返回 ""（不参与去重）。
+    """
+    m = m or {}
+    who = str(m.get("pool_owner") or m.get("account_id") or m.get("ip") or "").strip()
+    at = str(m.get("started_utc") or "").strip()
+    if not at:
+        return ""
+    return "%s@%s" % (who or "?", at)
+
+
+def auto_start_hot(machines, threshold_secs):
+    """从「机器运行实况」列表里挑出「在跑且运行时长 ≥ 阈值」的机器（最老的排前面）。
+
+    判断范围 = **所有在跑的机器**：不限主/备、不限账号，任意一台达标即算命中。
+    排除：
+      · 离线机器（Tailscale 不在线 = 没在跑）
+      · 池内占位行（pool_only：账号池说在跑、但本机看不到节点，没有运行时长）
+      · 读不到 `job-start.txt` 的机器（运行时长未知 → 无法判定，宁可不触发）
+    """
+    hot = []
+    for m in machines or []:
+        if not isinstance(m, dict) or m.get("pool_only"):
+            continue
+        if not m.get("online"):
+            continue
+        up = m.get("uptime_seconds")
+        if up is None:
+            continue
+        try:
+            up = float(up)
+        except (TypeError, ValueError):
+            continue
+        if up >= float(threshold_secs):
+            hot.append(m)
+    hot.sort(key=lambda x: -(float(x.get("uptime_seconds") or 0)))
+    return hot
+
+
+def auto_start_decide(machines, state, cfg, now=None):
+    """纯函数：机器列表 + 持久状态 + 配置 → 该不该派发。返回 {fire, reason, machine, hot}。
+
+    只判定、不改状态、不派发 —— 便于单测。调用方拿到 fire=True 后自行 dispatch + 落闩锁。
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    out = {"fire": False, "reason": "", "machine": "", "hot": []}
+    if not cfg.get("enabled"):
+        out["reason"] = "未启用"
+        return out
+
+    hot = auto_start_hot(machines, float(cfg.get("uptime_hours") or 4) * 3600)
+    out["hot"] = [machine_uptime_key(m) for m in hot]
+    if not hot:
+        out["reason"] = "无运行时长 ≥ %.0f 小时的机器" % float(cfg.get("uptime_hours") or 4)
+        return out
+
+    # ③ 滚动配额：一小时内派发次数上限
+    cap = int(cfg.get("max_per_hour") or 0)
+    if cap > 0:
+        hour_ago = now - timedelta(hours=1)
+        recent = 0
+        for h in (state.get("history") or []):
+            if not isinstance(h, dict):
+                continue
+            dt = parse_iso(h.get("at_utc") or "")
+            if dt and (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)) >= hour_ago:
+                recent += 1
+        if recent >= cap:
+            out["reason"] = "已达每小时派发上限 %d 台" % cap
+            return out
+
+    # ① 一次性闩锁：只看「还没触发过」的机器
+    done = state.get("triggered") or {}
+    fresh = [m for m in hot if machine_uptime_key(m) and machine_uptime_key(m) not in done]
+    if not fresh:
+        out["reason"] = "已达标机器都已触发过（去重闩锁）"
+        return out
+
+    # ② 冷却期：距上次「尝试」不足 cooldown 分钟 → 先不动（含失败重试也受此约束）
+    last = parse_iso(state.get("last_attempt_at") or "")
+    cd = float(cfg.get("cooldown_minutes") or 0)
+    if last and cd > 0:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (now - last).total_seconds() / 60.0
+        if elapsed < cd:
+            out["reason"] = "冷却中（距上次尝试 %.0f 分钟 < %.0f 分钟）" % (elapsed, cd)
+            return out
+
+    # 可选：在跑机器数上限
+    cap_run = int(cfg.get("max_running") or 0)
+    if cap_run > 0:
+        running_n = len([m for m in (machines or [])
+                         if isinstance(m, dict) and m.get("online") and not m.get("pool_only")])
+        if running_n >= cap_run:
+            out["reason"] = "在跑机器数 %d 已达上限 %d" % (running_n, cap_run)
+            return out
+
+    m = fresh[0]      # 最老的那台先接力
+    out["fire"] = True
+    out["machine"] = machine_uptime_key(m)
+    out["reason"] = "%s 已运行 %s（≥ %.0f 小时）" % (
+        m.get("ip") or m.get("pool_owner") or "机器",
+        m.get("uptime_human") or human_duration(m.get("uptime_seconds")),
+        float(cfg.get("uptime_hours") or 4))
+    return out
+
+
+def load_auto_start_state(path=None):
+    """读去重闩锁/历史（容错：文件缺失/损坏都返回空状态，绝不让巡检线程崩）。"""
+    p = path or auto_start_cfg()["state_file"]
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            d.setdefault("triggered", {})
+            d.setdefault("history", [])
+            d.setdefault("last_attempt_at", "")
+            d.setdefault("last_dispatch_at", "")
+            return d
+    except Exception:
+        pass
+    return {"triggered": {}, "history": [], "last_attempt_at": "", "last_dispatch_at": ""}
+
+
+def save_auto_start_state(state, path=None):
+    """原子写状态文件（先写 .tmp 再 replace），避免半截 JSON 让下轮读崩。"""
+    p = path or auto_start_cfg()["state_file"]
+    try:
+        d = os.path.dirname(p)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+        return True
+    except Exception:
+        return False
+
+
+def auto_start_status():
+    """只读摘要：给前端 / `/api/auto-start` 看「规则开着没、上次何时派发、已闩几台」。"""
+    cfg = auto_start_cfg()
+    st = load_auto_start_state(cfg["state_file"])
+    return {
+        "enabled": cfg["enabled"],
+        "uptime_hours": cfg["uptime_hours"],
+        "cooldown_minutes": cfg["cooldown_minutes"],
+        "max_per_hour": cfg["max_per_hour"],
+        "max_running": cfg["max_running"],
+        "duration_minutes": cfg["duration_minutes"],
+        "check_seconds": cfg["check_seconds"],
+        "last_dispatch_at": st.get("last_dispatch_at") or "",
+        "last_attempt_at": st.get("last_attempt_at") or "",
+        "triggered_count": len(st.get("triggered") or {}),
+        "dispatches": len(st.get("history") or []),
+    }
+
+
+def auto_start_run_once(dry_run=False):
+    """跑一轮自动接力判断；命中就派发 1 台新机器。返回决策 dict（含 fire / dispatched）。
+
+    `dry_run=True` 只判定、不派发、不落状态 —— 用来「先看看会不会触发」。
+    """
+    cfg = auto_start_cfg()
+    with _AUTO_START_LOCK:
+        state = load_auto_start_state(cfg["state_file"])
+        try:
+            ts = tailscale_status()
+            machines = collect_machines(ts.get("peers") or [],
+                                        (get_accounts().get("accounts") or []))
+        except Exception as e:
+            return {"fire": False, "reason": "取机器列表失败：%s" % e, "dispatched": False,
+                    "machine": "", "hot": []}
+        dec = auto_start_decide(machines, state, cfg)
+        dec["dispatched"] = False
+        if not dec.get("fire"):
+            return dec
+        if dry_run:
+            dec["reason"] = "[dry-run] " + dec["reason"]
+            return dec
+        res = dispatch_workflow("keepalive", {
+            "duration_minutes": cfg["duration_minutes"],
+            "install_apps": "true" if cfg["install_apps"] else "false",
+            "migrate_139": "true" if cfg["migrate_139"] else "false",
+        })
+        now = now_iso()
+        state["last_attempt_at"] = now      # 失败也记 —— 冷却期据此避免失败时狂重试
+        if res.get("ok"):
+            state["last_dispatch_at"] = now
+            trig = state.get("triggered") or {}
+            trig[dec["machine"]] = now
+            state["triggered"] = trig
+            hist = (state.get("history") or [])[-49:]
+            hist.append({"at_utc": now, "machine": dec["machine"], "reason": dec["reason"]})
+            state["history"] = hist
+            dec["dispatched"] = True
+        else:
+            dec["error"] = res.get("error") or ""
+        save_auto_start_state(state, cfg["state_file"])
+        return dec
+
+
+def auto_start_loop():
+    """后台守护：每隔 check_seconds 跑一轮自动接力判断（独立于浏览器是否打开）。
+
+    服务启动后先歇 15 秒再开工 —— 让 overview 预热、SMB 会话先建起来，
+    免得启动瞬间又叠一轮远端读。
+    """
+    time.sleep(15)
+    while True:
+        wait = 60
+        try:
+            cfg = auto_start_cfg()
+            wait = max(15, int(cfg["check_seconds"]))
+            if cfg["enabled"]:
+                r = auto_start_run_once()
+                if r.get("fire"):
+                    print("[auto-start] %s → dispatched=%s %s"
+                          % (r.get("reason"), r.get("dispatched"), r.get("error") or ""), flush=True)
+        except Exception as e:
+            print("[auto-start] 巡检异常：%s: %s" % (type(e).__name__, e), flush=True)
+        time.sleep(wait)
+
+
 # ==================================================================== 一键登录
 def default_rdp_dir():
     """一键登录 .rdp 的默认落地目录：~/Documents/CloudRDP（不再写桌面）。"""
@@ -2582,6 +2877,7 @@ def build_overview():
         "pool_machines": pool_machines,
         "pool_state": pool_state,
         "runs": runs,
+        "auto_start": auto_start_status(),
         "errors": errors,
     }
 
@@ -2685,6 +2981,7 @@ def _overview_skeleton():
         "pool_machines": [],
         "pool_state": {"ok": True, "state": {}, "error": ""},
         "runs": {"ok": True, "keepalive": [], "coordinator": [], "accounts": [], "error": ""},
+        "auto_start": auto_start_status(),
         "errors": [],
     }
 
@@ -3562,6 +3859,24 @@ def api_dispatch(h, params):
     return h._json(200 if res["ok"] else 502, res)
 
 
+def api_auto_start(h, params):
+    """GET /api/auto-start —— 自动接力规则的状态（只读）。
+
+    `?dry=1` 顺带做一次「如果现在跑，会不会触发」的干跑：只判定、不派发、不落状态。
+    离线模式下机器列表为空 → 必然「无达标机器」，正好当自测断言用。
+    """
+    out = {"ok": True, "error": ""}
+    out.update(auto_start_status())
+    dry = str((params.get("dry") or [""])[0]).strip().lower()
+    if dry in ("1", "true", "yes"):
+        try:
+            out["dry_run"] = auto_start_run_once(dry_run=True)
+        except Exception as e:
+            out["dry_run"] = {"fire": False, "reason": "%s: %s" % (type(e).__name__, e),
+                              "dispatched": False}
+    h._json(200, out)
+
+
 def api_rdp(h, params):
     body = h._read_body()
     res = make_rdp(body.get("ip") or "", body.get("hostname") or "",
@@ -3879,6 +4194,7 @@ ROUTES = {
     ("GET", "/api/pool-state"): api_pool_state,
     ("GET", "/api/export"): api_export,
     ("POST", "/api/dispatch"): api_dispatch,
+    ("GET", "/api/auto-start"): api_auto_start,
     ("POST", "/api/backup"): api_backup,
     ("POST", "/api/rdp"): api_rdp,
     ("GET", "/api/rdp/preview"): api_rdp_preview,
@@ -3924,6 +4240,11 @@ def main(argv=None):
     print("  代理    : %s" % (_proxy_url() or "直连"))
     print("  模式    : %s" % ("离线（自测）" if OFFLINE else "在线"))
     print("  账号池  : %s" % pool_config_path())
+    _as = auto_start_cfg()
+    print("  自动接力: %s" % (("开 · 任一台在跑机器运行 ≥ %.0f 小时 → 派发 1 台新机器（冷却 %.0f 分钟）"
+                            % (_as["uptime_hours"], _as["cooldown_minutes"]))
+                           if _as["enabled"] else
+                           "关（要开就在 workbench/config.json 写 {\"auto_start\":{\"enabled\":true}}）"))
     print("  Ctrl+C 停止")
     print("=" * 62)
 
@@ -3940,6 +4261,10 @@ def main(argv=None):
     # 启动即预热一份 /api/overview 快照（后台线程，不挡 serve_forever）——
     # 浏览器打开时首个请求基本秒回，而不是干等一整轮冷构建（13~49s）。
     threading.Thread(target=overview_warmup, name="overview-warmup", daemon=True).start()
+
+    # 自动接力守护线程：后台巡检「机器运行实况」，任一台运行时长 ≥ 阈值就派发 1 台新机器。
+    # 独立于浏览器是否打开 —— 面板没开也照样接力。默认关闭（config.auto_start.enabled）。
+    threading.Thread(target=auto_start_loop, name="auto-start", daemon=True).start()
 
     try:
         srv.serve_forever()

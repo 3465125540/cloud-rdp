@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.3", server.VERSION == "1.6.3", server.VERSION)
+    check("T168 server.py 版本 1.6.4", server.VERSION == "1.6.4", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2465,6 +2465,109 @@ def main():
           and "Find-GameViewerExe" in uu_txt)
     check("T454 装完仍找不到 exe → 记「候选目录」取证（Get-UUInstallHints / install hints），便于下次定位",
           "function Get-UUInstallHints" in uu_txt and "install hints:" in uu_txt)
+
+    # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
+    # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，
+    #   就自动起 1 台新机器。判断范围 = 所有在跑机器（不限主/备/账号）。
+    #   去重三重护栏：① 一次性闩锁（同机只触发一次）② 冷却期 ③ 每小时配额。
+    print("[自动接力 v1.6.4]")
+
+    def _mk(ip, up_h, online=True, owner="", started="", pool_only=False):
+        return {"ip": ip, "online": online, "pool_owner": owner, "pool_only": pool_only,
+                "started_utc": started or ("2026-10-02T00:00:00Z" if up_h is not None else ""),
+                "uptime_seconds": None if up_h is None else int(up_h * 3600),
+                "uptime_human": server.human_duration(up_h * 3600) if up_h is not None else ""}
+
+    _asc = {"enabled": True, "uptime_hours": 4, "cooldown_minutes": 30, "max_per_hour": 4,
+            "max_running": 0}
+    _now = server.parse_iso("2026-10-02T12:00:00Z")
+
+    # ① 判断范围：只认「在跑 + 时长 ≥ 阈值」；离线 / 时长未知 / 池内占位行都不算
+    _ms = [_mk("10.0.0.1", 3.9),                  # 未达标
+           _mk("10.0.0.2", 4.0),                  # 刚好达标（边界）
+           _mk("10.0.0.3", 6.0, online=False),    # 离线 → 没在跑 → 不算
+           _mk("10.0.0.4", None),                 # 时长未知 → 不算
+           _mk("10.0.0.5", 5.0, pool_only=True)]  # 池内占位行（无运行时长）→ 不算
+    check("T455 ★ 自动接力「达标机器」只认在跑且时长 ≥ 阈值（离线/未知/池内占位都不算）",
+          [m["ip"] for m in server.auto_start_hot(_ms, 4 * 3600)] == ["10.0.0.2"])
+    check("T456 边界：运行时长 == 阈值（4h）即算命中（用 >=，不是 >）",
+          any(m["ip"] == "10.0.0.2" for m in server.auto_start_hot(_ms, 4 * 3600)))
+    check("T457 判断范围 = 所有在跑机器（不限主/备/账号）：多台达标全入选，最老的排最前",
+          [m["ip"] for m in server.auto_start_hot(
+              [_mk("a", 4.5), _mk("b", 9.0), _mk("c", 5.0)], 4 * 3600)] == ["b", "c", "a"])
+
+    # ② 未启用 → 绝不触发（默认就是关的）
+    check("T458 ★ 未启用时一律不触发（auto_start 默认关闭）",
+          server.auto_start_decide(_ms, {}, dict(_asc, enabled=False), _now)["fire"] is False)
+
+    # ③ 命中 → fire=True，machine = 去重闩锁键「归属@开机时刻」
+    _d = server.auto_start_decide([_mk("10.0.0.2", 5.0, owner="acc-5",
+                                      started="2026-10-02T00:45:56Z")], {}, _asc, _now)
+    check("T459 ★ 命中时 fire=True，machine = 归属@开机时刻（去重闩锁键）",
+          _d["fire"] is True and _d["machine"] == "acc-5@2026-10-02T00:45:56Z", _d.get("reason"))
+
+    # ④ 去重闩锁：同一台机器触发过就不再触发（运行时长只增不减，不闩就会每 tick 重刷）
+    _st1 = {"triggered": {"acc-5@2026-10-02T00:45:56Z": "2026-10-02T11:00:00Z"}, "history": []}
+    _d1 = server.auto_start_decide([_mk("10.0.0.2", 5.0, owner="acc-5",
+                                        started="2026-10-02T00:45:56Z")], _st1, _asc, _now)
+    check("T460 ★ 去重：同一台机器（同归属+同开机时刻）触发过就不再触发",
+          _d1["fire"] is False and "闩锁" in _d1["reason"], _d1.get("reason"))
+
+    # ⑤ 冷却期：距上次尝试不足 cooldown → 不触发（换一台没闩过的机器也不行）
+    _st2 = {"triggered": {}, "history": [], "last_attempt_at": "2026-10-02T11:50:00Z"}
+    _d2 = server.auto_start_decide([_mk("10.0.0.9", 5.0, owner="acc-9",
+                                        started="2026-10-02T01:00:00Z")], _st2, _asc, _now)
+    check("T461 ★ 冷却期：距上次派发 10 分钟 < 30 分钟 → 不触发（防「一次性全起」）",
+          _d2["fire"] is False and "冷却" in _d2["reason"], _d2.get("reason"))
+    _st3 = {"triggered": {}, "history": [], "last_attempt_at": "2026-10-02T11:00:00Z"}
+    check("T462 冷却期满（60 分钟 ≥ 30）→ 恢复触发",
+          server.auto_start_decide([_mk("10.0.0.9", 5.0, owner="acc-9",
+                                        started="2026-10-02T01:00:00Z")], _st3, _asc, _now)["fire"] is True)
+
+    # ⑥ 每小时配额（滚动 1 小时窗口）
+    _st4 = {"triggered": {}, "history": [{"at_utc": "2026-10-02T11:30:00Z"}] * 4,
+            "last_attempt_at": "2026-10-02T11:00:00Z"}
+    _d4 = server.auto_start_decide([_mk("10.0.0.9", 5.0, owner="acc-9",
+                                        started="2026-10-02T01:00:00Z")], _st4, _asc, _now)
+    check("T463 ★ 每小时配额：1 小时内已派 4 台（=上限）→ 不再触发",
+          _d4["fire"] is False and "上限" in _d4["reason"], _d4.get("reason"))
+
+    # ⑦ 可选护栏：在跑机器数上限
+    _d5 = server.auto_start_decide([_mk("a", 5.0), _mk("b", 5.0)], {}, dict(_asc, max_running=2), _now)
+    check("T464 在跑机器数达上限（max_running）→ 不触发",
+          _d5["fire"] is False and "上限" in _d5["reason"], _d5.get("reason"))
+
+    # ⑧ 只读接口 / 干跑 / 概览透出
+    code, body, _ = req(base, "/api/auto-start")
+    _j = json.loads(body)
+    check("T465 ★ GET /api/auto-start → 200，返回规则状态（enabled / uptime_hours / cooldown…）",
+          code == 200 and _j.get("ok") and "enabled" in _j and "uptime_hours" in _j
+          and "cooldown_minutes" in _j, "code=%s" % code)
+    code, body, _ = req(base, "/api/auto-start?dry=1")
+    _j = json.loads(body)
+    check("T466 ★ /api/auto-start?dry=1 干跑：离线无机器 → fire=False 且不派发（dispatched=False）",
+          code == 200 and _j.get("dry_run", {}).get("fire") is False
+          and _j.get("dry_run", {}).get("dispatched") is False, body[:200])
+    code, body, _ = req(base, "/api/overview")
+    check("T467 概览载荷带 auto_start 状态（前端「机器运行实况」据此显示规则开关）",
+          code == 200 and "auto_start" in json.loads(body), "code=%s" % code)
+
+    # ⑨ 默认关闭 + 配置子键合并（不能把 DEFAULT_CONFIG 污染掉）
+    check("T468 ★ 内置默认 auto_start.enabled = False（自动派发耗 Actions 分钟数，须显式开启）",
+          server.DEFAULT_CONFIG["auto_start"]["enabled"] is False)
+    _cfg_path = os.path.join(tmpdir, "wb-cfg-autostart.json")
+    with open(_cfg_path, "w", encoding="utf-8") as f:
+        json.dump({"auto_start": {"enabled": True}}, f)
+    _loaded = server.load_config(_cfg_path)
+    check("T469 ★ config.json 只写 enabled 时其余阈值仍走默认（auto_start 子键合并，不整块替换）",
+          _loaded["auto_start"]["enabled"] is True
+          and _loaded["auto_start"]["uptime_hours"] == server.DEFAULT_CONFIG["auto_start"]["uptime_hours"])
+    check("T470 ★ load_config 不污染 DEFAULT_CONFIG（嵌套 dict 已拷贝，默认值仍是唯一真源）",
+          server.DEFAULT_CONFIG["auto_start"]["enabled"] is False
+          and server.DEFAULT_CONFIG["workflows"].get("keepalive") == "windows-rdp.yml")
+    check("T471 ★ 自动接力守护线程在 main() 里被拉起（面板没开也照样巡检接力）",
+          "auto_start_loop" in open(os.path.join(repo_dir, "workbench", "server.py"),
+                                    encoding="utf-8").read())
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

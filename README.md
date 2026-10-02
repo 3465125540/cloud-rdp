@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（504 项）
+python workbench\selftest.py   :: 离线自测（547 项）
 ```
 
 | 面板 | 内容 |
@@ -1302,6 +1302,63 @@ step 8 正常跑完、整场 **6h04m**；acc-5（缺这个参数）跑到 **4h16
 
 > **诚实边界**：① 修法**不隐藏真失败** —— acc-5 的 `data=FAILED`（权威 JSON）在修复前后都计入，用例 T425 专门钉住这一点。② 已还原到机器上的旧标记**不会自动消失**，但会在该机下一次 `sync-down`（`Set-RestoreStatus` 每次先删两个标记）时清掉；清掉之前界面显示「旧标记·已忽略」而非静默。③ 139 上已存在的历史标记文件不会被本次改动删除（工作台不直接读写 139），只是**不再被拉回机器**。
 
+### 20. 自动接力：机器运行时长 ≥ 4 小时 → 自动派发 1 台新机器（v1.6.4）
+
+**背景**：单 job 硬上限 6 小时（见 `windows-rdp.yml` 的 `relay_minutes` 说明）。机器跑到第 4 小时就该把
+「下一台」排上队 —— 否则等它到点结束，中间会出现一段没有机器的空窗。这条规则把「看表接力」交给工作台的
+后台守护线程，**面板关着也照跑**。
+
+**规则四要素**：
+
+| 要素 | 说明 |
+|------|------|
+| **触发条件** | 后台守护线程每 `check_seconds`（默认 60 秒）巡检一次；只要「命中集合」非空、且通过下面三道去重护栏，就触发一次派发 |
+| **判断范围** | **所有在跑的机器**（不限主/备、不限账号）：`auto_start_hot()` 从「机器运行实况」列表里挑出 `online 且 uptime_seconds ≥ 4h` 的机器，**任意一台达标即命中**。排除：离线机器、池内占位行（`pool_only`，无运行时长）、读不到 `_state\job-start.txt` 的机器（时长未知） |
+| **执行动作** | 派发 **1 台**保活机：`POST /repos/<repo>/actions/workflows/windows-rdp.yml/dispatches`（等价于「操作台 → 派发保活机」那一下），入参 `duration_minutes / install_apps / migrate_139` 由配置给 |
+| **去重/重复触发** | ① **一次性闩锁**：按「归属@开机时刻」（`machine_uptime_key`）记进 `workbench/_auto-start-state.json`，同一台机器触发过永不再触发；② **冷却期** `cooldown_minutes`（默认 30）：两次派发至少间隔这么久，防多台同时到点时「一次性全起」；③ **滚动配额** `max_per_hour`（默认 4）：一小时内最多派发几台；④ 可选 `max_running`：在跑机器数达上限就不再派发。**只有派发成功才落闩锁**，失败不闩、下个 tick 重试（仍受冷却约束） |
+
+**关键设计取舍**：
+
+* **为什么按「归属@开机时刻」而不是 IP 去重**：一次性 runner 的 Tailscale 节点可能重连换 IP，但一次 run 的
+  开机时刻唯一且不变 —— 认「同一台机器的一生」，才不会漏闩（该闩没闩）或误闩（把新机器当成旧的）。
+* **为什么运行时长单调递增也不怕重复**：正因为只增不减，才必须靠闩锁 + 冷却压住；否则每个 tick 都会命中。
+* **默认关闭**：自动派发会消耗 GitHub Actions 分钟数，属于「要花资源的自动化」，默认 `enabled: false`。
+  开启：本机 `workbench/config.json` 写 `{"auto_start":{"enabled":true}}` 并重启服务。`auto_start` 走**子键合并**，
+  只写 `enabled` 不会丢掉其余阈值（`load_config` 对嵌套 dict 做了一层拷贝，不会污染内置默认值）。
+
+**配置**（`workbench/config.json`；全量见 `workbench/config.example.json`）：
+
+```json
+"auto_start": {
+  "enabled": true,          // 总开关（默认 false）
+  "uptime_hours": 4,        // 阈值（小时）
+  "cooldown_minutes": 30,   // 冷却期（分钟）
+  "max_per_hour": 4,        // 每小时配额（0 = 不限）
+  "max_running": 0,         // 在跑机器数上限（0 = 不限）
+  "duration_minutes": "350",
+  "install_apps": true,
+  "migrate_139": false,
+  "check_seconds": 60
+}
+```
+
+**可观测**：`GET /api/auto-start`（只读；加 `?dry=1` 干跑一次判定、但不派发不落状态）；概览载荷新增
+`auto_start` 字段；「机器运行实况」标题行显示「自动接力：任一台运行 ≥ 4 小时 → 自动派发 1 台（已派发 N 台，上次 …）」。
+去重闩锁/历史落盘 `workbench/_auto-start-state.json`（已 gitignore）。
+
+**验证**：
+
+| 检查 | 结果 |
+|------|------|
+| `selftest.py` | **547 PASS / 0 FAIL**（本批 T455–T471 共 17 条：范围/边界、未启用不触发、闩锁去重、冷却、每小时配额、在跑上限、只读接口与干跑、默认关闭、配置子键合并不污染默认值） |
+| 真机干跑（`auto_start_run_once(dry_run=True)`） | 3 台在跑机器（5h41m / 5h26m / 4h34m）全部 ≥ 4h → `fire=true`，取最老的 `100.110.211.37`，`dispatched=false`（干跑不派发、不落状态） |
+
+> **诚实边界**：① 规则**只看 Tailscale 在线的机器** —— 机器若「Actions job 在跑但 Tailscale 掉线」，
+> 它的运行时长读不到，本规则不会因它触发（这类机器在「机器运行实况」里是池内占位行）。② 派发是**入队**、
+> 不是「立刻多一台」：同仓库 `windows-rdp.yml` 配了 `concurrency`，若该仓库已有 job 在跑，新 run 会排队到
+> 前一台结束 —— 这正是「接力」想要的行为。③ 规则**不做跨账号编排**：派发落在 `config.repo`（hub）上，
+> 具体哪台机器起来由 workflow / 账号池决定，不保证与「到期的那台」同账号。
+
 ## 五、目录结构
 
 ```
@@ -1309,7 +1366,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（504 项）
+│   ├── selftest.py                     #   离线自测（547 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1405,6 +1462,7 @@ cloud-rdp/
 | **点「刷新」后时间戳不动 / 一直「后台刷新中」** | `overview_seconds=20` 秒小于快照**实测构建耗时**（13~49 秒）→ 快照一建出来就已过期，每个请求都触发重建；且 `stale` 被误写成「比 TTL 老」而非「真在重建」。另：请求在途时点刷新会被 `if (BUSY) return` **静默丢掉** | **已修**：TTL 取 `max(配置, 构建耗时 + 5 秒)`；`stale` 只表示「有重建在途」；按钮加**禁用 + 「刷新中…」**进度，时间戳显示「更新于 …（N 秒前）」，在途点击会**排队补发**。详见第四节 §18 |
 | **概览「恢复异常」显示 N 数据，但机器其实没失败** | 恢复失败标记文件（`_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）躺在数据目录根，会**随数据目录同步到 139、再被还原到别的机器** → 一台机器的失败标记被所有机器继承；且工作台回退读标记时只测存在、不看时间，几天前的老标记也照算 | **已修**：数据目录同步**排除** `_RESTORE_*.txt`（断源头）；回退读标记时解析时间，**旧格式 / 早于本机本次开机的**标为陈旧，不计入异常，机器表显示灰色「旧标记·已忽略」。详见第四节 §19 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
+| **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
 | 定时场不跑额度检测 | 按需求跳过（`if: workflow_dispatch`） | 正常。手动 Run workflow 才显示额度 |
 | C 盘增量显示 `OVER` | 有大文件写进了 C 盘，或新程序装到了 C 盘 | 大文件放 `D:\a\cloud-rdp`；新装程序选 D 盘；或调大 `disk.maxIncrementalPercent` |

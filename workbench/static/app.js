@@ -553,6 +553,14 @@ function renderMachines() {
   if (unknownOwner) {
     metaParts.push(unknownOwner + " 台在线机器读不到归属（机器上 D$ 共享未就绪，SMB 读不到）");
   }
+  // 自动接力规则状态：任一台在跑机器运行时长 ≥ 阈值 → 自动派发 1 台新机器（后端 auto_start_loop）。
+  // 这里只做「可见性」——让用户一眼知道规则开着没、上次何时派发，规则判定全在 server.py。
+  var as = DATA.auto_start || {};
+  metaParts.push(as.enabled
+    ? ("自动接力：任一台运行 ≥ " + (as.uptime_hours || 4) + " 小时 → 自动派发 1 台（已派发 " +
+       (as.dispatches || 0) + " 台" +
+       (as.last_dispatch_at ? "，上次 " + bjTime(as.last_dispatch_at) : "") + "）")
+    : "自动接力：未启用");
   metaEl.textContent = metaParts.join(" · ");
   // 离线节点基本都是一次性 Actions runner 跑完没从 tailnet 摘掉的残留（不是故障）。
   metaEl.title = nodes.length
@@ -562,6 +570,15 @@ function renderMachines() {
        + "另：「池内机器」行来自账号池状态 —— 机器是否在跑以它的 Actions job 为准"
        + "（job in_progress 就是「运行中」）；本机 tailnet 看不到它的节点不代表机器没在跑。")
     : "";
+  var asTip = as.enabled
+    ? ("自动接力已启用：任一台在跑机器运行时长 ≥ " + (as.uptime_hours || 4) +
+       " 小时 → 自动派发 1 台新机器（windows-rdp.yml 保活机）。" +
+       "去重：同一台机器只触发一次（按「归属+开机时刻」闩锁）；冷却 " + (as.cooldown_minutes || 30) +
+       " 分钟；每小时最多 " + (as.max_per_hour || 0) + " 台。" +
+       "已派发 " + (as.dispatches || 0) + " 台、已闩 " + (as.triggered_count || 0) + " 台。" +
+       (as.last_dispatch_at ? "上次派发 " + bjTime(as.last_dispatch_at) + "。" : ""))
+    : "自动接力未启用：在 workbench/config.json 写 {\"auto_start\":{\"enabled\":true}} 并重启工作台后生效。";
+  metaEl.title = (metaEl.title ? metaEl.title + "　" : "") + asTip;
 
   tb.innerHTML = rows.map(function (m) {
     if (m.pool_only) return poolOnlyRow(m);
