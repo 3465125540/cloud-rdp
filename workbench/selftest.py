@@ -2460,6 +2460,11 @@ def main():
     check("T452 ★ CLOUDRDP_UU_MACHINE 可覆盖机器标识；mail-test 用它标明「非账户 a 的云机」",
           "CLOUDRDP_UU_MACHINE" in uu_txt
           and "CLOUDRDP_UU_MACHINE: '单跑测试（GitHub 托管运行器，非账户 a 的云机）'" in mt_txt)
+    check("T453 ★ winget 报「成功」却找不到 GameViewer.exe → 兜底有界扫描（Find-GameViewerExe，-Recurse -Depth）",
+          "function Find-GameViewerExe" in uu_txt and "-Recurse -Depth" in uu_txt
+          and "Find-GameViewerExe" in uu_txt)
+    check("T454 装完仍找不到 exe → 记「候选目录」取证（Get-UUInstallHints / install hints），便于下次定位",
+          "function Get-UUInstallHints" in uu_txt and "install hints:" in uu_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

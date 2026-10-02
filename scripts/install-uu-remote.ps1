@@ -91,6 +91,24 @@ $uuUser = if ($env:RDP_USERNAME) { [string]$env:RDP_USERNAME } else { 'a' }
 $programDataGV = 'C:\ProgramData\Netease\GameViewer'
 
 # ---------------------------------------------------------------- ① 定位已装
+# ★ 兜底：winget 装到哪**不一定**（实测 windows-latest 上 winget 报 Successfully installed，
+#    已知路径却找不到 GameViewer.exe —— 新版可能换了目录名）。在常见安装根里**有界扫描**兜住。
+function Find-GameViewerExe([int]$Depth = 3) {
+    $roots = @(
+        'C:\Program Files', 'C:\Program Files (x86)',
+        (Join-Path $env:LOCALAPPDATA 'Programs'),
+        $env:LOCALAPPDATA
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+    foreach ($r in $roots) {
+        try {
+            $hit = Get-ChildItem -LiteralPath $r -Filter 'GameViewer.exe' -Recurse -Depth $Depth `
+                       -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        } catch { }
+    }
+    return ''
+}
+
 function Get-UUCandidateExes {
     $list = New-Object System.Collections.Generic.List[string]
     foreach ($p in @(
@@ -106,9 +124,32 @@ function Get-UUCandidateExes {
             (Join-Path $DataDir '_portable\C\Program Files\Netease\GameViewer\GameViewer.exe')
         )) { if (Test-Path -LiteralPath $p) { $list.Add($p) } }
     }
+    # 已知路径全没命中 → 有界扫描兜底（只在这时才扫，平时零开销）
+    if ($list.Count -eq 0) {
+        $hit = Find-GameViewerExe
+        if ($hit) { $list.Add($hit) }
+    }
     # ⚠️ 必须 `,@(...)`：PowerShell 返回单元素数组会被**解包成标量**，
     #    于是 `$exe[0]` 变成字符串的首字符 'C'（实测踩过：安装路径显示成 "C"）。
     return ,@($list)
+}
+
+# 装完找不到 exe 时的**取证**：列出候选根目录里像 UU远程 的目录（下次好定位它到底装哪了）。
+function Get-UUInstallHints {
+    $hits = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @(
+        'C:\Program Files', 'C:\Program Files (x86)',
+        (Join-Path $env:LOCALAPPDATA 'Programs'),
+        $env:LOCALAPPDATA
+    )) {
+        if (-not $r -or -not (Test-Path -LiteralPath $r)) { continue }
+        try {
+            Get-ChildItem -LiteralPath $r -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)netease|uu|gameviewer|game viewer|网易|远程' } |
+                ForEach-Object { $hits.Add($_.FullName) }
+        } catch { }
+    }
+    return ,@($hits)
 }
 
 function Get-UUVersion([string]$Exe) {
@@ -412,10 +453,22 @@ if (-not $install.ok -and $doInstall) {
         if ($r2.ok) { $r = $r2 }
     }
     if ($r.ok) {
-        Start-Sleep -Seconds 3
-        $existing = Get-UUCandidateExes
+        # 给安装器落盘留时间；已知路径找不到就再等一轮（新版换目录 / 落盘慢都可能）。
+        # 三轮 × 5s 后仍找不到 → 记「取证」（候选目录），下次好定位它到底装哪了。
+        $existing = @()
+        for ($i = 0; $i -lt 3; $i++) {
+            Start-Sleep -Seconds 5
+            $existing = Get-UUCandidateExes
+            if ($existing.Count -gt 0) { break }
+        }
         if ($existing.Count -gt 0) { $install = @{ ok = $true; note = $r.note; exe = $existing[0]; source = 'installed' } }
-        else { $install = @{ ok = $false; note = "安装命令返回成功但找不到 GameViewer.exe（$($r.note)）"; exe = ''; source = '' } }
+        else {
+            $hints = Get-UUInstallHints
+            $hintTxt = if ($hints.Count -gt 0) { $hints -join ' | ' } else { '(无)' }
+            Log "install hints: $hintTxt"
+            Warn "装完找不到 GameViewer.exe；候选目录：$hintTxt"
+            $install = @{ ok = $false; note = "安装命令返回成功但找不到 GameViewer.exe（$($r.note)）"; exe = ''; source = '' }
+        }
     } else {
         $install = @{ ok = $false; note = $r.note; exe = ''; source = '' }
     }
