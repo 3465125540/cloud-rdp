@@ -11,6 +11,10 @@
 #   dry_run    = true   只渲染邮件内容、不真发（排查 SMTP 配置用）
 #
 # 复用与 0e / 0c1 完全相同的 MAIL_* Secrets —— 这里通，开机那封就通。
+#
+# ⚠️ 这里只验证「发信链路」。这台是 GitHub 托管运行器，**不是账户 a 的云机** ——
+#    邮件里的「机器」会显示「单跑测试（GitHub 托管运行器，非账户 a 的云机）」。
+#    账户 a 的真机连接信息由 windows-rdp.yml 的 0c1 发出（机器 = github-rdp-server-N + 100.x）。
 name: Mail Test (0c1 连接信息)
 
 on:
@@ -48,6 +52,10 @@ jobs:
       MAIL_CC: ${{ secrets.MAIL_CC }}
       # 自定义验证码（8~16 位、字母+数字都要有）。仓库变量没设就用脚本默认 a1234567。
       CLOUDRDP_UU_CODE: ${{ vars.CLOUDRDP_UU_CODE }}
+      # ★ 机器标识：这台是 GitHub 托管运行器，**不是账户 a 的云机**（没接 Tailscale、没建账户 a）。
+      #   直接写明，免得又把随机运行器名（runnervmXXXX）误当成「账户 a 的连接信息」。
+      #   真机的连接信息（账户 a · github-rdp-server-N (100.x)）由开机流程 windows-rdp.yml 的 0c1 发出。
+      CLOUDRDP_UU_MACHINE: '单跑测试（GitHub 托管运行器，非账户 a 的云机）'
       RDP_USERNAME: a
     steps:
       - name: 拉取仓库

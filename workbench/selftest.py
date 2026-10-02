@@ -2383,6 +2383,8 @@ def main():
     #   连接信息 = 设备码(deviceId) + 验证码(协助码)；协助码是 DPAPI 密文，跨机解不开要**如实报**。
     uu_txt = open(os.path.join(repo_dir, "scripts", "install-uu-remote.ps1"),
                   encoding="utf-8-sig").read()
+    mt_path = os.path.join(repo_dir, ".github", "workflows", "mail-test.yml")
+    mt_txt = open(mt_path, encoding="utf-8").read() if os.path.exists(mt_path) else ""
     print("[UU远程 备用远程通道 0c1]")
     check("T434 ★ 工作流在 0c 之后、0c2 之前插入了 0c1 步（安装 UU远程 + 打印/邮件连接信息）",
           "0c1. 安装 UU远程" in wf_txt
@@ -2436,6 +2438,28 @@ def main():
     check("T447 仍然 fail-soft：找不到 CLI / 设码失败都不阻断开机（脚本永远 exit 0）",
           "未找到 uuyc-cli.exe / uuycmgr.exe" in uu_txt
           and uu_txt.rstrip().endswith("exit 0"))
+
+    # ---------------- 机器标识：账户 a + Tailscale 身份（不是随机 runnervmXXXX） ----------------
+    # 背景（2026-10-02 用户反馈原话：「我要的是账户a的连接信息，不要runnervmfi6oq」）：
+    #   云机本身就是 GitHub 托管运行器 —— $env:COMPUTERNAME 每次开机都是随机的 runnervmXXXX，
+    #   打印它等于没打印。用户认机器靠：账户（默认 a）+ Tailscale 身份（github-rdp-server-N + 100.x）。
+    print("[UU远程 连接信息：账户 a + Tailscale 机器标识]")
+    check("T448 ★ 机器标识用「账户 + Tailscale 身份」，绝不把随机 COMPUTERNAME（runnervmXXXX）当机器名",
+          "function Get-UUMachineIdentity" in uu_txt and "function Find-Tailscale" in uu_txt
+          and "status --json" in uu_txt and "HostName" in uu_txt and "TailscaleIPs" in uu_txt
+          and "$env:TS_IP" in uu_txt)
+    check("T449 ★ 打印 / 桌面文件 / 邮件三处都改成「账户 + 机器」两行；COMPUTERNAME 降级成灰色「运行器名（仅排查）」",
+          "账户       : $uuUser" in uu_txt and "机器       : $machineLabel" in uu_txt
+          and "账户    : $uuUser" in uu_txt and "机器    : $machineLabel" in uu_txt
+          and "运行器名" in uu_txt and "仅排查" in uu_txt)
+    check("T450 ★ 邮件主题带「账户 … · 机器 …」，不再只有随机 deviceName",
+          "UU远程（账户 $uuUser · $machineLabel）" in uu_txt)
+    check("T451 状态 JSON / GITHUB_ENV 透出 account + machine（工作台/后续步骤可用）",
+          "machine = $machineLabel" in uu_txt and "UU_REMOTE_ACCOUNT=$uuUser" in uu_txt
+          and "UU_REMOTE_MACHINE=$machineLabel" in uu_txt)
+    check("T452 ★ CLOUDRDP_UU_MACHINE 可覆盖机器标识；mail-test 用它标明「非账户 a 的云机」",
+          "CLOUDRDP_UU_MACHINE" in uu_txt
+          and "CLOUDRDP_UU_MACHINE: '单跑测试（GitHub 托管运行器，非账户 a 的云机）'" in mt_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

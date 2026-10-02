@@ -28,11 +28,20 @@
       C:\ProgramData\Netease\GameViewer\config.ini             → uuid
     协助方拿到「设备 ID + 验证码」即可发起远控，无需登录 UU 账号。
 
+  机器怎么标识（★ 别用 $env:COMPUTERNAME）：
+    云机本身就是 GitHub 托管运行器 —— COMPUTERNAME 每次开机都是随机的 runnervmXXXX，打印它没意义
+    （2026-10-02 用户反馈：「我要的是账户a的连接信息，不要runnervmfi6oq」）。
+    用户认机器靠两样：账户（默认 a —— UU远程 连的就是它的控制台会话）+ Tailscale 身份
+    （github-rdp-server-N + 100.x，登录界面/README 里用的就是它）。
+    所以「机器」一行优先用 Tailscale 身份；COMPUTERNAME 降级成灰色「运行器名（仅排查）」。
+    可用 CLOUDRDP_UU_MACHINE 覆盖机器标识（mail-test 单跑时用它标明「非账户 a 的云机」）。
+
 .NOTES
   环境变量：
     CLOUDRDP_DATA_DIR  数据目录（找 D 盘便携副本用），默认 D:\a\cloud-rdp
     CLOUDRDP_UU_CODE   自定义验证码（默认 a1234567；等价于 -CustomCode）
-    RDP_USERNAME       被控账户（默认 a），只用于正文提示
+    CLOUDRDP_UU_MACHINE 机器标识覆盖（默认自动取 Tailscale 身份；mail-test 用）
+    RDP_USERNAME       被控账户（默认 a），用于「账户」一行 + 正文提示
     MAIL_*             与 0e 步同一套 SMTP 配置（缺失则自动跳过发信）
   退出码：**始终 0**（安装/发信失败都不该让开机流程变红）。
           状态写 <sysdir>\_state\uu-remote.json，并透出 UU_REMOTE=OK|PARTIAL|FAIL 到 GITHUB_ENV。
@@ -238,6 +247,50 @@ function Set-UUCustomCode([string]$Code) {
     return @{ ok = $false; note = "设置失败：$last" }
 }
 
+# ---------------------------------------------------------------- ★ 机器标识（用户视角）
+# ⚠️ 云机本身就是 GitHub 托管运行器 —— $env:COMPUTERNAME 每次开机都是随机的 runnervmXXXX。
+#    打印它等于没打印：用户收到邮件只看到一串乱码名（2026-10-02 用户反馈原话：
+#    「我要的是账户a的连接信息，不要runnervmfi6oq」）。用户认机器靠的是两样 ——
+#      * Tailscale 名（github-rdp-server-N）+ 100.x IP（登录界面/README 里都是它）
+#      * 被控账户（默认 a）—— UU远程 连的就是它的控制台会话
+#    所以「机器」一行优先用 Tailscale 身份 + 账户；COMPUTERNAME 只留作灰色排查信息。
+function Find-Tailscale {
+    foreach ($p in @(
+        'C:\Program Files\Tailscale\tailscale.exe',
+        'C:\Program Files (x86)\Tailscale\tailscale.exe'
+    )) { if (Test-Path -LiteralPath $p) { return $p } }
+    $c = Get-Command tailscale -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    return ''
+}
+
+function Get-UUMachineIdentity {
+    $id = [ordered]@{ name = ''; ip = ''; account = $uuUser; label = ''; source = '' }
+    # ① Tailscale 自身身份（hostname + 100.x）
+    try {
+        $ts = Find-Tailscale
+        if ($ts) {
+            $json = (& $ts status --json 2>$null | Out-String)
+            if ($json) {
+                $o = $json | ConvertFrom-Json
+                if ($o.Self) {
+                    $id.name = [string]$o.Self.HostName
+                    if (-not $id.name -and $o.Self.DNSName) { $id.name = ([string]$o.Self.DNSName).Split('.')[0] }
+                    $ips = @($o.Self.TailscaleIPs)
+                    if ($ips.Count -gt 0) { $id.ip = [string]$ips[0] }
+                }
+            }
+        }
+    } catch { }
+    # ② 兜底：0c 步已把 TS_IP 写进 GITHUB_ENV
+    if (-not $id.ip -and $env:TS_IP) { $id.ip = ([string]$env:TS_IP).Trim() }
+    # ③ 组装标签
+    if ($id.name -and $id.ip) { $id.label = "$($id.name) ($($id.ip))"; $id.source = 'tailscale' }
+    elseif ($id.ip)           { $id.label = "($($id.ip))";               $id.source = 'tailscale-ip' }
+    else                      { $id.label = '(本机 · 未接入 Tailscale)';  $id.source = 'none' }
+    return $id
+}
+
 # ---------------------------------------------------------------- 设备身份解析
 function Get-IniKV([string]$Path) {
     $h = @{}
@@ -331,6 +384,12 @@ function Write-Status($obj) {
 # ================================================================ 主流程
 Say "UU远程（备用远程通道）—— 安装 + 连接信息"
 Log "start; DataDir=$DataDir InstallDir=$InstallDir SkipInstall=$SkipInstall DryRun=$DryRun"
+
+# 机器标识（账户 + Tailscale）—— 用于打印 / 邮件 / 桌面文件。
+# ★ 绝不再出现随机 runnervmXXXX：云机 = GitHub 托管运行器，COMPUTERNAME 每次开机都变。
+$mi = Get-UUMachineIdentity
+$machineLabel = if ($env:CLOUDRDP_UU_MACHINE) { [string]$env:CLOUDRDP_UU_MACHINE } else { $mi.label }
+Say "机器标识：账户 $uuUser · $machineLabel（来源 $($mi.source)）"
 
 $install = @{ ok = $false; note = ''; exe = ''; source = '' }
 
@@ -446,10 +505,12 @@ $devLine = if (-not $deviceDisplay) { '(未取到)' }
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  UU远程（备用远程通道）连接信息" -ForegroundColor Cyan
-Write-Host "  设备名     : $($info.deviceName)"
+Write-Host "  账户       : $uuUser（UU远程 连的就是它的控制台会话）" -ForegroundColor Cyan
+Write-Host "  机器       : $machineLabel" -ForegroundColor Cyan
 Write-Host "  设备 ID    : $devLine" -ForegroundColor Yellow
 Write-Host "  验证码     : $assistDisplay" -ForegroundColor Yellow
 Write-Host "  >> 主控端只输上面两项：设备 ID + 验证码" -ForegroundColor Magenta
+Write-Host "  运行器名   : $($info.deviceName)  ← 仅排查（云机 = GitHub 托管运行器，每次开机都变）" -ForegroundColor DarkGray
 if ($info.deviceId -and $info.deviceId -ne $deviceDisplay) { Write-Host "  设备码(内部): $($info.deviceId)" -ForegroundColor DarkGray }
 if ($info.assistId) { Write-Host "  协助 id    : $($info.assistId)" -ForegroundColor DarkGray }
 if ($info.uuid)     { Write-Host "  uuid       : $($info.uuid)" -ForegroundColor DarkGray }
@@ -462,9 +523,11 @@ Write-Host "  >> 协助方：装「网易UU远程」→ 远程协助 → 输入�
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host ""
 
-Log ("state=$state deviceId=$deviceDisplay devNum=$devNum assistUsable=$assistUsable codeSource=$codeSource cli=$CliPath version=$($info.version) install=$($install.note)")
+Log ("state=$state account=$uuUser machine=$machineLabel machineSrc=$($mi.source) deviceId=$deviceDisplay devNum=$devNum assistUsable=$assistUsable codeSource=$codeSource cli=$CliPath version=$($info.version) install=$($install.note) runner=$($info.deviceName)")
 Write-Status ([ordered]@{
-    state = $state; deviceName = $info.deviceName
+    state = $state; account = $uuUser
+    machine = $machineLabel; machineName = $mi.name; machineIp = $mi.ip; machineSource = $mi.source
+    runnerName = $info.deviceName; deviceName = $info.deviceName
     deviceId = $deviceDisplay; deviceIdNumeric = $devNum; deviceIdInternal = $info.deviceId
     assistId = $info.assistId; assistCode = $assistCode; codeSource = $codeSource
     customCode = $(if ($codeSet.ok) { $CustomCode } else { '' }); customCodeNote = $codeSet.note
@@ -474,6 +537,8 @@ Write-Status ([ordered]@{
     source = $install.source; updatedUtc = (Get-Date).ToUniversalTime().ToString('o')
 })
 Set-GhEnv "UU_REMOTE=$state"
+Set-GhEnv "UU_REMOTE_ACCOUNT=$uuUser"
+if ($machineLabel)  { Set-GhEnv "UU_REMOTE_MACHINE=$machineLabel" }
 if ($deviceDisplay) { Set-GhEnv "UU_REMOTE_DEVICE=$deviceDisplay" }
 if ($devNum)        { Set-GhEnv "UU_REMOTE_DEVICE_ID=$devNum" }
 if ($info.deviceId) { Set-GhEnv "UU_REMOTE_DEVICE_LONG=$($info.deviceId)" }
@@ -487,13 +552,15 @@ try {
     $infoLines = @(
         "UU远程（备用远程通道）连接信息"
         ""
+        "  账户    : $uuUser（UU远程 连的就是它的控制台会话）"
+        "  机器    : $machineLabel"
         "  设备 ID : $devLine"
         "  验证码  : $assistDisplay"
         ""
         "主控端只输上面两项：设备 ID + 验证码。"
         ""
         "  ── 以下为排查信息，连接不需要 ──"
-        "  设备名    : $($info.deviceName)"
+        "  运行器名  : $($info.deviceName)（云机 = GitHub 托管运行器，每次开机都变，别记它）"
         "  内部设备码: $($info.deviceId)"
         "  协助 id   : $($info.assistId)"
         "  自定义码  : $($codeSet.note)"
@@ -527,13 +594,15 @@ else {
     $bodyLines = @(
         'CloudRDP 备用远程通道：UU远程（网易 GameViewer）'
         ''
+        "  账户    : $uuUser（UU远程 连的就是它的控制台会话）"
+        "  机器    : $machineLabel"
         "  设备 ID : $devLine"
         "  验证码  : $assistDisplay"
         ''
         '主控端只输上面两项：设备 ID + 验证码。'
         ''
         '  ── 以下为排查信息，连接不需要 ──'
-        "  设备名    : $($info.deviceName)"
+        "  运行器名  : $($info.deviceName)（云机 = GitHub 托管运行器，每次开机都变，别记它）"
         "  内部设备码: $($info.deviceId)"
         "  协助 id   : $($info.assistId)"
         "  版本      : $($info.version)"
@@ -557,7 +626,7 @@ else {
     if (Test-Path -LiteralPath $mailScript) {
         Say "发送 UU远程 连接信息到邮箱（日志：$LogPath）"
         try {
-            & $mailScript -Subject "CloudRDP 备用通道 · UU远程（$($info.deviceName)）设备ID $devLine · 验证码 $assistDisplay" -BodyText $body -MailTo $MailTo -LogPath $LogPath
+            & $mailScript -Subject "CloudRDP 备用通道 · UU远程（账户 $uuUser · $machineLabel）设备ID $devLine · 验证码 $assistDisplay" -BodyText $body -MailTo $MailTo -LogPath $LogPath
             if ($LASTEXITCODE -eq 0) { Say "邮件已发送" }
             else { Warn "邮件发送失败（返回码 $LASTEXITCODE）—— 连接信息已明文打印在上方" }
         } catch { Warn "邮件发送异常：$($_.Exception.Message)" }
