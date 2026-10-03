@@ -68,6 +68,8 @@ permissions:
 env:
   RDP_USERNAME: a
   RDP_PASSWORD: "a"
+  # 自动登录 a（④ RDP 回环造会话）：设仓库变量 = 0 可关掉（默认开）。
+  CLOUDRDP_UU_AUTOLOGIN: ${{ vars.CLOUDRDP_UU_AUTOLOGIN }}
   # ---------- 路径常量（唯一事实源，脚本以 $env: 读取并各有内置兜底）----------
   # 数据目录：⚠️ 它是 Actions 工作区的父目录，仓库 checkout 就在它下面（D:\a\cloud-rdp\cloud-rdp），
   #           sync-up/sync-down 会自动排除该子目录，避免把仓库传上云盘。
@@ -320,6 +322,25 @@ jobs:
                 Write-Host ("[0b2] ③ 无感自动交接 ok=" + $tk.autoOk + " :: " + $tk.autoNote)
               }
               else        { Write-Host ("[0b2] 交接任务未安装（可忽略）: " + $tk.note) }
+
+              # ④ 直接登录 a：a 还没有会话时，用 RDP 回环（mstsc → 127.0.0.1）自动给它造一个，
+              #    再交给 ③ 自动交接 —— 用户不必再手动「先用 mstsc 以 a 登录一次」。
+              #    为什么要这样：Windows 没有「编程创建会话」的公开 API（会话只能由登录产生），
+              #    而改 AutoAdminLogon=a 会把 runner 弄死（HostedComputeAgent 依赖 runneradmin 的交互令牌）。
+              #    关掉：仓库里设 CLOUDRDP_UU_AUTOLOGIN=0。
+              if ($env:CLOUDRDP_UU_AUTOLOGIN -eq '0') {
+                Write-Host '[0b2] ④ CLOUDRDP_UU_AUTOLOGIN=0 → 跳过自动登录 a'
+              } else {
+                $ls = New-RdpUserSession -RdpUser $env:RDP_USERNAME -Password $env:RDP_PASSWORD
+                Write-Host ("[0b2] ④ 自动登录 " + $env:RDP_USERNAME + " ok=" + $ls.ok + " action=" + $ls.action + " :: " + $ls.note)
+                foreach ($s in $ls.steps) { Write-Host ('[0b2]    ' + $s) }
+                ("UU_AUTOLOGIN=" + $(if ($ls.ok) { $ls.action } else { 'FAILED' })) | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+                # 会话刚造好就顺手触发一次交接（不必等 ③ 那 ≤60s）；失败无所谓，③ 会兜底
+                if ($ls.ok -and $ls.action -eq 'created') {
+                  Start-Sleep -Seconds 5
+                  try { Start-ScheduledTask -TaskName 'CloudRDP-UUHandover' -ErrorAction SilentlyContinue } catch { }
+                }
+              }
             } else {
               Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'
             }

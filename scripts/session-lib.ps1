@@ -40,6 +40,15 @@
   * 关掉自动：设环境变量 `CLOUDRDP_UU_AUTO=0`（安装时跳过）；运行时删掉
     `D:\cloudrdp-sys\_state\uu-auto-off` 同名开关文件亦可停摆（见 session-handover.ps1 -Auto）。
 
+  ── ④ 为什么要「自动给 a 造会话」（2026-10-03 瑀子：「直接登录账号 a」）──────────
+  * 事实：Windows **没有**「以编程方式创建会话」的公开 API —— 会话由 smss 在**登录**时创建
+    （RDP / 控制台登录都算）。所以 a 必须先被「登录」一次，③ 才有东西可交接。
+  * 不能改 `AutoAdminLogon=a`：runner 依赖 runneradmin 的交互式控制台会话
+    （`HostedComputeAgent`: `LogonType=InteractiveToken`）—— 改了会打死 runner（README §16 已记）。
+  * 能走的路：**RDP 回环** —— 用 mstsc 以 a 连本机 `127.0.0.1`，让系统为 a 建一个会话，
+    再断开 mstsc（会话转 Disc），交给 ③ 自动交接。`New-RdpUserSession` 就是干这个的。
+  * 关掉：仓库里设 `CLOUDRDP_UU_AUTOLOGIN=0`。
+
   ── 导出 ──────────────────────────────────────────────────────────────────
     Get-RdpSessionReport                 [-RdpUser a]          会话布局报告（对象）
     Format-RdpSessionReport              [-RdpUser a]          一行文字
@@ -48,6 +57,7 @@
     Install-RdpSessionHandoverTask       [-RdpUser a] [-ScriptPath] [-TaskName] 装 ① + ② + ③
     Install-RdpSessionHandoverShortcut   [-RdpUser a] [-ScriptPath] 只装桌面快捷方式（触发 ①）
     Install-RdpSessionAutoHandoverTask   [-RdpUser a] [-ScriptPath] [-TaskName] 只装 ③（无感自动交接）
+    New-RdpUserSession                   [-RdpUser a] [-Password] [-WaitSeconds] [-DryRun] ④ 自动给 a 造会话（RDP 回环）
 #>
 
 function Get-RdpSessionReport {
@@ -412,4 +422,113 @@ function Install-RdpSessionAutoHandoverTask {
         $res.note = "自动交接任务已就绪（每 ${IntervalMinutes} 分钟一次，仅切未被 RDP 占用的会话）"
     } catch { $res.note = $_.Exception.Message }
     return $res
+}
+
+# ── ④ 自动给 a 造会话（RDP 回环）──────────────────────────────────────────────
+# 为什么要它：Windows 没有「以编程方式创建会话」的公开 API —— 会话只能由**登录**产生。
+# 所以 a 必须先被登录一次，③（自动交接）才有会话可交给控制台。
+# 不能改 AutoAdminLogon=a（会打死 runner）—— 所以这里用 **RDP 回环**：
+#   cmdkey 存凭据 → 写 .rdp（关认证提示）→ 起 mstsc 连 127.0.0.1 → 等 a 的会话出现 → 断开 mstsc。
+# 断开后 a 的会话变 Disc → ③ CloudRDP-UUAuto（≤1 分钟）把它交给控制台 → UU远程 看到 a。
+# 全程 fail-soft：任何一步失败都返回 ok=$false，绝不抛（造不出来就退回「手动 mstsc 登录一次」）。
+function New-RdpUserSession {
+    [CmdletBinding()]
+    param(
+        [string]$RdpUser = 'a',
+        [string]$Password,
+        [int]$WaitSeconds = 45,
+        [switch]$DryRun
+    )
+    $steps = New-Object System.Collections.Generic.List[string]
+    $out = [ordered]@{ ok = $false; action = ''; sessionId = $null; note = ''; steps = @() }
+
+    # 已经有会话 → 不用造
+    $rep = Get-RdpSessionReport -RdpUser $RdpUser
+    if ($rep.aSessionId) {
+        $out.ok = $true; $out.action = 'exists'; $out.sessionId = $rep.aSessionId
+        $out.note = "$RdpUser 已有会话 $($rep.aSessionId)（$($rep.aState)）—— 无需造"
+        $out.steps = $steps
+        return [pscustomobject]$out
+    }
+    if ($DryRun) {
+        $out.action = 'dryrun'
+        $out.note = "[DryRun] 会给 $RdpUser 造一个 RDP 回环会话（127.0.0.1）"
+        $out.steps = $steps
+        return [pscustomobject]$out
+    }
+    if ([string]::IsNullOrWhiteSpace($Password)) {
+        $out.note = '缺少密码，无法造会话'; $out.steps = $steps; return [pscustomobject]$out
+    }
+    $mstsc = Join-Path $env:SystemRoot 'System32\mstsc.exe'
+    if (-not (Test-Path -LiteralPath $mstsc)) {
+        $out.note = '找不到 mstsc.exe'; $out.steps = $steps; return [pscustomobject]$out
+    }
+
+    $domUser = if ($RdpUser -match '\\') { $RdpUser } else { "$env:COMPUTERNAME\$RdpUser" }
+
+    # ① 预存凭据（mstsc 免弹密码框）
+    try {
+        & cmdkey /generic:TERMSRV/127.0.0.1 /user:$domUser /pass:$Password 2>&1 | Out-Null
+        $steps.Add("cmdkey TERMSRV/127.0.0.1 -> $domUser (exit=$LASTEXITCODE)")
+    } catch { $steps.Add("cmdkey 异常：$($_.Exception.Message)") }
+
+    # ② 写 .rdp（本机回环 + 关认证提示）
+    $rdp = Join-Path $env:TEMP 'cloudrdp-loopback.rdp'
+    try {
+        @(
+            'full address:s:127.0.0.1'
+            "username:s:$domUser"
+            'prompt for credentials:i:0'
+            'promptcredentialonce:i:0'
+            'authentication level:i:0'
+            'enablecredsspsupport:i:1'
+            'screen mode id:i:1'
+            'desktopwidth:i:1024'
+            'desktopheight:i:768'
+            'session bpp:i:16'
+            'disable wallpaper:i:1'
+            'disable full window drag:i:1'
+        ) | Set-Content -LiteralPath $rdp -Encoding ascii
+        $steps.Add("已写 $rdp")
+    } catch {
+        $out.note = "写 .rdp 失败：$($_.Exception.Message)"; $out.steps = $steps; return [pscustomobject]$out
+    }
+
+    # ③ 起 mstsc —— 必须在**交互会话**里才有桌面（workflow 步就跑在 runneradmin 的交互会话）
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $mstsc -ArgumentList ('"' + $rdp + '"') -PassThru -ErrorAction Stop
+        $steps.Add("已起 mstsc pid=$($proc.Id)")
+    } catch {
+        $out.note = "起 mstsc 失败：$($_.Exception.Message)"; $out.steps = $steps; return [pscustomobject]$out
+    }
+
+    # ④ 等 $RdpUser 的会话出现
+    $sid = $null
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        $r2 = Get-RdpSessionReport -RdpUser $RdpUser
+        if ($r2.aSessionId) {
+            $sid = $r2.aSessionId
+            $steps.Add("$RdpUser 会话出现：sid=$sid state=$($r2.aState) name=$($r2.aSessionName)")
+            break
+        }
+    }
+
+    # ⑤ 断开 mstsc（会话转 Disc → 交给 ③ 自动交接）
+    try {
+        Get-Process -Name mstsc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        $steps.Add('已断开 mstsc（会话转 Disc）')
+    } catch { }
+
+    if (-not $sid) {
+        $out.note = "等 $WaitSeconds 秒仍没看到 $RdpUser 的会话 —— RDP 回环可能被拒（见 steps）"
+        $out.steps = $steps
+        return [pscustomobject]$out
+    }
+    $out.ok = $true; $out.action = 'created'; $out.sessionId = $sid
+    $out.note = "已给 $RdpUser 造出会话 $sid（mstsc 回环）；已断开 → CloudRDP-UUAuto ≤1 分钟把它交给控制台"
+    $out.steps = $steps
+    return [pscustomobject]$out
 }

@@ -2466,6 +2466,27 @@ def main():
     check("T454 装完仍找不到 exe → 记「候选目录」取证（Get-UUInstallHints / install hints），便于下次定位",
           "function Get-UUInstallHints" in uu_txt and "install hints:" in uu_txt)
 
+    # ---------------- ④ 直接登录 a：RDP 回环自动造会话（2026-10-03 瑀子）----------------
+    # 需求：「我的需求是直接登录账号 a」—— 不再要求用户手动「先用 mstsc 以 a 登录一次」。
+    # 事实：Windows 没有「编程创建会话」的公开 API（会话只能由登录产生，RDP/控制台都算）；
+    #       改 AutoAdminLogon=a 会打死 runner（HostedComputeAgent 依赖 runneradmin 的交互令牌）。
+    # 所以：用 mstsc 以 a 连本机 127.0.0.1 造会话 → 断开（转 Disc）→ 交给 ③ 自动交接。
+    print("[UU远程 直接登录 a：RDP 回环自动造会话]")
+    check("T455 ★ 新增 New-RdpUserSession：用 RDP 回环（mstsc → 127.0.0.1 + cmdkey 存凭据）给 a 造会话",
+          "function New-RdpUserSession" in sess_lib_txt and "mstsc.exe" in sess_lib_txt
+          and "127.0.0.1" in sess_lib_txt and "cmdkey" in sess_lib_txt
+          and "TERMSRV/127.0.0.1" in sess_lib_txt)
+    check("T456 ★ 造完会话就断开 mstsc（转 Disc）交给 ③；已有会话则跳过；缺密码 / DryRun 都有明确分支",
+          "Get-Process -Name mstsc" in sess_lib_txt and "Stop-Process -Force" in sess_lib_txt
+          and "action = 'exists'" in sess_lib_txt and "action = 'dryrun'" in sess_lib_txt
+          and "缺少密码，无法造会话" in sess_lib_txt)
+    check("T457 ★ 工作流 0b2 调 New-RdpUserSession（带 RDP_PASSWORD），并可用 CLOUDRDP_UU_AUTOLOGIN=0 关掉",
+          "New-RdpUserSession -RdpUser" in wf_txt and "$env:RDP_PASSWORD" in wf_txt
+          and "CLOUDRDP_UU_AUTOLOGIN" in wf_txt and "UU_AUTOLOGIN" in wf_txt)
+    check("T458 ★ 仍然不碰 AutoAdminLogon（改了会打死 runner）—— 只在注释里说明原因，无写入代码",
+          "AutoAdminLogon" in sess_lib_txt and "HostedComputeAgent" in sess_lib_txt
+          and "Set-ItemProperty" not in sess_lib_txt)
+
     # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
     # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，
     #   就自动起 1 台新机器。判断范围 = 所有在跑机器（不限主/备/账号）。
