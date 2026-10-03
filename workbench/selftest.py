@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.4", server.VERSION == "1.6.4", server.VERSION)
+    check("T168 server.py 版本 1.6.5", server.VERSION == "1.6.5", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2568,6 +2568,30 @@ def main():
     check("T471 ★ 自动接力守护线程在 main() 里被拉起（面板没开也照样巡检接力）",
           "auto_start_loop" in open(os.path.join(repo_dir, "workbench", "server.py"),
                                     encoding="utf-8").read())
+
+    # ---------------- 账号显示名：acc-N → 真实账号名（owner）+ 名称缺失兜底（v1.6.5） ----------------
+    # 需求（瑀子 2026-10-03，附截图）：「定时计划运行日志」的账号筛选 tab 显示 acc-1/acc-3/acc-4/acc-5，
+    #   看不懂。→ 界面上一律显示真实账号名（owner，如 code19698fgh）；名称缺失时兜底。
+    #   兜底链：owner →（只有代号时去账号池反查 owner）→ 代号 acc-N → 「未命名账号」。
+    print("[账号显示名 v1.6.5]")
+    check("T472 ★ app.js 有全站统一的账号显示名口径 accLabel / accTip / accountById",
+          "function accLabel(" in app_txt and "function accTip(" in app_txt
+          and "function accountById(" in app_txt)
+    check("T473 ★ 兜底链：owner 优先 → 反查 → 代号 acc-N → 「未命名账号」",
+          "if (owner) return owner;" in app_txt and "if (id) return id;" in app_txt
+          and 'return "未命名账号"' in app_txt)
+    check("T474 ★ 运行日志账号筛选 tab 改用 accLabel（旧的 `a.id || a.owner` 已清除）",
+          "var nm = accLabel(a.id, a.owner)" in app_txt
+          and "var nm = a.id || a.owner" not in app_txt)
+    check("T475 ★ 运行日志分组表头 / 单账号 meta 也走 accLabel（不再漏 acc-N）",
+          "accLabel(g.id, g.owner)" in app_txt)
+    check("T476 ★ 机器表（主机列 + 池内机器行）账号名走 accLabel，不再拼 `acc-N · owner`",
+          app_txt.count("accLabel(m.account_id, m.pool_owner)") >= 2
+          and "[m.account_id, m.pool_owner].filter" not in app_txt)
+    check("T477 ★ 账号管理表：主显示真实名（owner），代号降级成「代号 acc-N」小字",
+          "esc(accLabel(a.id, a.owner))" in app_txt and 'mono">代号 ' in app_txt)
+    check("T478 代号仍留在 tooltip（accTip）里，便于与 pool-config 的 acc-N 对照",
+          '"代号 " + code' in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

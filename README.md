@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（547 项）
+python workbench\selftest.py   :: 离线自测（554 项）
 ```
 
 | 面板 | 内容 |
@@ -1359,6 +1359,32 @@ step 8 正常跑完、整场 **6h04m**；acc-5（缺这个参数）跑到 **4h16
 > 前一台结束 —— 这正是「接力」想要的行为。③ 规则**不做跨账号编排**：派发落在 `config.repo`（hub）上，
 > 具体哪台机器起来由 workflow / 账号池决定，不保证与「到期的那台」同账号。
 
+### 21. 界面账号显示：代号 `acc-N` → 真实账号名（v1.6.5）
+
+**问题**：「定时计划运行日志」的账号筛选 tab 显示 `acc-1 / acc-3 / acc-4 / acc-5` —— 代号看不出是谁，
+机器表的「主机」列、账号管理表也都在混用代号。
+
+**修法**：前端统一一个口径 `accLabel(id, owner)`，**所有**显示账号的地方都走它：
+
+| 兜底顺序 | 取值 | 例 |
+|---|---|---|
+| ① 有真实账号名 | `owner` | `code19698fgh` |
+| ② 只有代号 | 去 `/api/accounts` 反查 `owner`；查到就用真实名 | `acc-5` → `code19698fgh` |
+| ③ 反查不到 | 退回代号本身 | `acc-99` |
+| ④ 连代号都没有 | 「未命名账号」 | — |
+
+**改动点**（`workbench/static/app.js`）：
+
+* `renderRunAccTabs()` —— 账号筛选 tab（截图那一行）→ 真实名；tooltip 保留「代号 acc-N」。
+* `runGroupHead()` / `renderRuns()` —— 分组表头与「N 条记录」meta → 真实名。
+* `renderMachines()` / `poolOnlyRow()` —— 机器表「主机」列第二行的账号名 → 真实名（tooltip 里带代号 + 来源）。
+* `renderAccounts()` —— 账号管理表主显示仍是真实名；代号降级成第二行「代号 acc-N」小字。
+* 代号**没有删除**，只是从「主显示」降级到 tooltip / 小字 —— 仍能与 `scripts/pool-config.json` 的 `acc-N` 对上。
+
+**验证**：`selftest.py` **554 PASS / 0 FAIL**（本批 T472–T478）；另用**真实** `/api/accounts` + `/api/runs?accounts=1`
+数据在 Node 里跑真实渲染函数，账号 tab 实际产出 = `全部账号 | yc1966asgf | 3465125540 | code1969sda | code19698fgh`，
+分组表头 rg-id 同名；兜底链 16 项断言全过。
+
 ## 五、目录结构
 
 ```
@@ -1366,7 +1392,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（547 项）
+│   ├── selftest.py                     #   离线自测（554 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1461,6 +1487,7 @@ cloud-rdp/
 | **机器实况主机列显示「账号未知」，但机器明明在线** | 归属要读机器上的 `_state\pool-info.txt` 或 runner 工作区 `D:\a\<repo>\<repo>\.git\config`，**两条都走 SMB**；机器侧 SMB 栈还没起来（`net use` 报**系统错误 67「找不到网络名」**、`net view` 报 1702）就都读不到。旧代码还有两个坑：SMB 预鉴权失败也把 IP **永久拉黑**、`job_tailscale_ip` 把**空结果缓存 1 小时** → 机器后来就绪了也补不上 | **已修**：SMB 预鉴权**成功才**拉黑、失败 60 秒后自动重试（点「刷新」立刻重试一次）；空 IP 结果只缓存 60 秒；再加**来源③**「账号池反查 IP → 账号」兜底（只认 `in_progress` 的 run）。tooltip 会说清原因。详见第四节 §18 |
 | **点「刷新」后时间戳不动 / 一直「后台刷新中」** | `overview_seconds=20` 秒小于快照**实测构建耗时**（13~49 秒）→ 快照一建出来就已过期，每个请求都触发重建；且 `stale` 被误写成「比 TTL 老」而非「真在重建」。另：请求在途时点刷新会被 `if (BUSY) return` **静默丢掉** | **已修**：TTL 取 `max(配置, 构建耗时 + 5 秒)`；`stale` 只表示「有重建在途」；按钮加**禁用 + 「刷新中…」**进度，时间戳显示「更新于 …（N 秒前）」，在途点击会**排队补发**。详见第四节 §18 |
 | **概览「恢复异常」显示 N 数据，但机器其实没失败** | 恢复失败标记文件（`_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）躺在数据目录根，会**随数据目录同步到 139、再被还原到别的机器** → 一台机器的失败标记被所有机器继承；且工作台回退读标记时只测存在、不看时间，几天前的老标记也照算 | **已修**：数据目录同步**排除** `_RESTORE_*.txt`（断源头）；回退读标记时解析时间，**旧格式 / 早于本机本次开机的**标为陈旧，不计入异常，机器表显示灰色「旧标记·已忽略」。详见第四节 §19 |
+| **界面上账号显示成 `acc-1 / acc-3`，看不出是谁** | 前端多处直接渲染了账号池的内部代号 `id`（`acc-N`），而不是 GitHub 账号名 | **v1.6.5 起**：全站统一 `accLabel()` —— 显示真实账号名（`owner`），名称缺失时依次兜底到「代号 acc-N」→「未命名账号」；代号降级到 tooltip / 小字，仍可与 `pool-config.json` 对照。详见第四节 §21 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

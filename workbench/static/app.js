@@ -41,6 +41,40 @@ function bjTime(iso) {
   return d.getUTCFullYear() + "/" + (d.getUTCMonth() + 1) + "/" + d.getUTCDate() +
     "-" + pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes());
 }
+
+/* ------------------------------------------------------------ 账号显示名（全站唯一口径）
+   界面上一律显示**真实账号名**（owner，如 code19698fgh），不再显示代号 acc-N。
+   兜底链：owner → （只有代号时去账号池反查 owner）→ 代号 acc-N → 「未命名账号」。
+   任何要显示账号的地方都调 accLabel()，别再自己写 `a.id || a.owner`（那样就会漏出 acc-N）。 */
+function accountById(id) {
+  var list = (DATA && DATA.accounts && DATA.accounts.accounts) || [];
+  id = String(id || "").trim();
+  if (!id) return null;
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i].id || "").trim() === id) return list[i];
+  }
+  return null;
+}
+function accLabel(id, owner) {
+  id = String(id || "").trim();
+  owner = String(owner || "").trim();
+  if (!owner && id) {                     // 只拿到代号 → 反查真实名，能查到就用真实名
+    var a = accountById(id);
+    if (a && a.owner) owner = String(a.owner).trim();
+  }
+  if (owner) return owner;
+  if (id) return id;                      // 名称缺失的兜底：退回代号
+  return "未命名账号";                     // 连代号都没有
+}
+/* tooltip 细节：真实名 · 代号 acc-N · 补充说明（代号保留在 tooltip 里，仍能与 pool-config 对上）。 */
+function accTip(id, owner, extra) {
+  var nm = accLabel(id, owner);
+  var code = String(id || "").trim();
+  var bits = [nm];
+  if (code && code !== nm) bits.push("代号 " + code);
+  if (extra) bits.push(extra);
+  return bits.join(" · ");
+}
 // 后端返回的不是 JSON（多半是 HTML）时的统一提示。
 // 常见于「当前页面不是由工作台后端提供的」——比如用静态预览面板打开、或直接双击 index.html：
 // 此时 /api/... 会落到那个静态服务器上，返回它的 HTML，而不是工作台的 JSON。
@@ -434,7 +468,7 @@ function rdpBtn(ip, hostLabel, rCls, rTip) {
 // 徽标由 machine_state 决定：job in_progress 就是「运行中」，绝不写死「Tailscale 未上线」
 // —— 否则会出现「GitHub 说 job 在跑、面板说没在跑」的自相矛盾（Tailscale 看不到 ≠ 机器没在跑）。
 function poolOnlyRow(m) {
-  var label = [m.account_id, m.pool_owner].filter(function (x) { return !!x; }).join(" · ") || "未命名账号";
+  var label = accLabel(m.account_id, m.pool_owner);   // 真实账号名优先（兜底见 accLabel）
   var stMap = { in_progress: "Actions job 运行中", queued: "排队中", pending: "等待启动",
                 waiting: "等待中", requested: "已请求", action_required: "待处理",
                 completed: "已结束", cancelled: "已取消", skipped: "已跳过",
@@ -490,7 +524,7 @@ function poolOnlyRow(m) {
   // 操作列：一键登录 + 查看信息（有 IP 才有）+ 运行日志。
   // 可达性是后端现探的（TCP 3389，60 秒缓存）—— 不可达时按钮转黄并说明原因，
   // 而不是假装能连（机器已销毁时点了必然失败，说清楚比让用户白等强）。
-  var hostLabel = m.account_id || m.pool_owner || ip;
+  var hostLabel = (m.account_id || m.pool_owner) ? accLabel(m.account_id, m.pool_owner) : ip;
   var ops = [];
   if (ip) {
     var rTip = m.reachable === true
@@ -510,7 +544,7 @@ function poolOnlyRow(m) {
   }
   var opsHtml = ops.length ? ops.join(" ") : '<span class="none">—</span>';
   return "<tr>" +
-    '<td class="strong"><span data-tip="' + esc(tip) + '">' + esc(label) + "</span>" +
+    '<td class="strong"><span data-tip="' + esc(tip + "　账号：" + accTip(m.account_id, m.pool_owner)) + '">' + esc(label) + "</span>" +
     '<div class="acct muted">池内机器 · ' + esc(m.role || "?") + "</div></td>" +
     '<td class="mono">' + ipCell + "</td>" +
     "<td>" + st + "</td>" +
@@ -651,9 +685,10 @@ function renderMachines() {
     //   来源③ 账号池反查：哪个账号的 run 正在跑、其 job 日志自报这个 IP（SMB 读不到时的兜底）
     var acct = "";
     if (m.account_id || m.pool_owner) {
-      var label = [m.account_id, m.pool_owner].filter(function (x) { return !!x; }).join(" · ");
+      var label = accLabel(m.account_id, m.pool_owner);   // 真实账号名优先（兜底见 accLabel）
       var src = m.owner_source ? "，来源：" + m.owner_source : "";
-      acct = '<div class="acct muted" title="该机器由这个账号派发' + esc(src) + '">' + esc(label) + "</div>";
+      acct = '<div class="acct muted" title="该机器由这个账号派发：' +
+        esc(accTip(m.account_id, m.pool_owner) + src) + '">' + esc(label) + "</div>";
     } else if (online) {
       // 在线却读不到归属 —— 说清楚「为什么读不到」「怎么才能读到」，
       // 而不是干巴巴一句「账号未知」（用户只会以为面板坏了，然后反复点刷新）。
@@ -767,11 +802,13 @@ function renderAccounts() {
       note = '<div class="muted mon-note">' + esc(a.report_note) + "</div>";
     }
 
-    var name = esc(a.owner || "-");
+    // 账号列主显示 = 真实账号名（owner）；名称缺失时 accLabel 会兜底到代号 / 「未命名账号」。
+    // 代号 acc-N 降级为第二行小字并显式标注「代号」——它是 pool-config 里的 id，仍有对照价值。
+    var name = esc(accLabel(a.id, a.owner));
     if (a.placeholder) name += ' <span class="muted">(待填)</span>';
 
     return "<tr>" +
-      '<td class="strong">' + name + '<div class="muted mono">' + esc(a.id || "") + "</div></td>" +
+      '<td class="strong">' + name + '<div class="muted mono">代号 ' + esc(a.id || "-") + "</div></td>" +
       "<td>" + secret + '<div class="muted mono">' + esc(a.token_secret || "") + "</div></td>" +
       "<td>" + roleBadge(a.role) + "</td>" +
       '<td class="mon-cell">' + mon.join(" ") + note + "</td>" +
@@ -862,9 +899,12 @@ function runNoteRow(text) {
 // 分组表头（跨 8 列）：账号 · owner/repo + 角色 + 在跑/排队 + 数据源 + 条数
 function runGroupHead(g, n) {
   var acc = accountByOwner(g.owner) || {};
-  var bits = ['<span class="rg-id">' + esc(g.id || "主仓库") + "</span>"];
+  var gname = (g.id || g.owner) ? accLabel(g.id, g.owner) : "主仓库";   // 真实账号名优先
+  var bits = ['<span class="rg-id" title="' +
+    esc(accTip(g.id, g.owner, "运行日志分组")) + '">' + esc(gname) + "</span>"];
   if (g.owner) {
-    bits.push('<span class="mono dim">' + esc(g.owner + (g.repo ? "/" + g.repo : "")) + "</span>");
+    bits.push('<span class="mono dim" title="该账号的 fork 仓库">' +
+      esc(g.owner + (g.repo ? "/" + g.repo : "")) + "</span>");
   }
   if (acc.role) bits.push(roleBadge(acc.role));
   if (acc.running_count !== null && acc.running_count !== undefined) {
@@ -906,10 +946,11 @@ function renderRunAccTabs() {
   var html = '<button class="tab' + (RUN_ACC === "all" ? " active" : "") +
     '" data-acc="all" data-tip="所有账号的运行记录（按账号分组）">全部账号</button>';
   html += list.map(function (a) {
-    var nm = a.id || a.owner;
+    var nm = accLabel(a.id, a.owner);      // 显示真实账号名，不再显示 acc-N
     return '<button class="tab' + (RUN_ACC === a.owner ? " active" : "") +
       '" data-acc="' + esc(a.owner) + '" data-tip="只看 ' +
-      esc(nm + " · " + a.owner + "/" + a.repo) + ' 的运行记录">' + esc(nm) + "</button>";
+      esc(accTip(a.id, a.owner, a.owner + (a.repo ? "/" + a.repo : ""))) +
+      ' 的运行记录">' + esc(nm) + "</button>";
   }).join("");
   el.innerHTML = html;
 }
@@ -963,7 +1004,9 @@ function renderRuns() {
       meta.textContent = groups.length + " 个账号 · 共 " + cnt + " 条记录";
     } else {
       var g0 = groups[0];
-      meta.textContent = g0 ? ((g0.id || g0.owner) + " · 共 " + cnt + " 条记录") : "";
+      meta.textContent = g0
+        ? (((g0.id || g0.owner) ? accLabel(g0.id, g0.owner) : "主仓库") + " · 共 " + cnt + " 条记录")
+        : "";
     }
   }
 }

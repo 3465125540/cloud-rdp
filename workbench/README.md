@@ -380,6 +380,20 @@ acc-3 就是活例子：IP `100.112.127.106` 从日志里挖得出来，但节�
 > 诚实边界：只看 Tailscale 在线的机器；派发是**入队**（同仓库 `concurrency` 会让它排到前一台结束）；派发落在
 > `config.repo`（hub）上，不保证与到期那台同账号。
 
+### 账号显示名：`acc-N` → 真实账号名（v1.6.5）
+
+界面上一律显示**真实账号名**（`owner`，如 `code19698fgh`），不再显示内部代号 `acc-N`。
+全站统一走 `accLabel(id, owner)`：
+
+```
+owner → （只有代号时去 /api/accounts 反查 owner）→ 代号 acc-N → 「未命名账号」
+```
+
+改动点：`renderRunAccTabs()`（账号筛选 tab）、`runGroupHead()` / `renderRuns()`（分组表头 / meta）、
+`renderMachines()` + `poolOnlyRow()`（机器表「主机」列第二行）、`renderAccounts()`（账号管理表）。
+代号没删，只从「主显示」降级到 tooltip / 「代号 acc-N」小字 —— 仍能与 `pool-config.json` 对上。
+新增 `accLabel()` / `accTip()` / `accountById()` 三个纯函数。详见主 README 第四节 §21。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -592,7 +606,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（547 项）
+├── selftest.py           # 离线自测（554 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
