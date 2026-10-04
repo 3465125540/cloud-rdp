@@ -1,0 +1,56 @@
+name: _tmp-diag3
+# TEMP probe (deleted right after).
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe
+        shell: pwsh
+        env:
+          T1: ${{ secrets.POOL_TOKEN_1 }}
+          T4: ${{ secrets.POOL_TOKEN_4 }}
+        run: |
+          $base = 'https://api.github.com'
+          function Probe($label, $uri, $token) {
+            $H = @{ Authorization = "token $token"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'diag' }
+            $r = Invoke-WebRequest -Headers $H -Uri $uri -SkipHttpErrorCheck
+            Write-Host ("  {0}: HTTP {1}" -f $label, $r.StatusCode)
+            $sc = $r.Headers['x-oauth-scopes']
+            $rl = $r.Headers['x-ratelimit-remaining']
+            $ac = $r.Headers['x-accepted-oauth-scopes']
+            Write-Host ("      x-oauth-scopes=[{0}] x-accepted=[{1}] rl-remaining=[{2}]" -f $sc, $ac, $rl)
+            $c = [string]$r.Content
+            if ($c.Length -gt 0) { Write-Host ("      body: {0}" -f (($c -replace '\s+',' '))) } else { Write-Host '      body: <EMPTY>' }
+          }
+          Write-Host '===== acc-1 / yc1966asgf ====='
+          Probe '/user'  "$base/user" $env:T1
+          Probe '/rl'    "$base/rate_limit" $env:T1
+          Probe '/repo'  "$base/repos/yc1966asgf/cloud-rdp" $env:T1
+          Write-Host '===== acc-4 / code1969sda ====='
+          Probe '/user'  "$base/user" $env:T4
+          $H4 = @{ Authorization = "token $($env:T4)"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'diag' }
+          $r4 = Invoke-RestMethod -Headers $H4 -Uri "$base/repos/code1969sda/cloud-rdp"
+          Write-Host ("  repo.permissions: {0}" -f ($r4.permissions | ConvertTo-Json -Compress))
+          Write-Host ("  repo.default_branch: {0}  archived={1} disabled={2}" -f $r4.default_branch, $r4.archived, $r4.disabled)
+          # 唯一一次「写」试探：用协调器同样的 inputs，duration_minutes=5（真成功也只跑 5 分钟）
+          $payload = @{
+            ref = 'main'
+            inputs = @{
+              duration_minutes = '5'
+              pool_role        = 'standby'
+              pool_owner       = 'code1969sda'
+              pool_id          = 'cloud-rdp-pool'
+              pool_hub         = '3465125540/cloud-rdp'
+              relay_minutes    = '0'
+              install_apps     = 'true'
+              migrate_139      = 'false'
+              slim_image       = 'auto'
+              chinese          = 'on'
+            }
+          } | ConvertTo-Json -Depth 5 -Compress
+          $r = Invoke-WebRequest -Headers $H4 -Method Post -Uri "$base/repos/code1969sda/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches" -Body $payload -ContentType 'application/json' -SkipHttpErrorCheck
+          Write-Host ("  POST dispatches: HTTP {0}" -f $r.StatusCode)
+          $c = [string]$r.Content
+          if ($c.Length -gt 0) { Write-Host ("      body: {0}" -f (($c -replace '\s+',' '))) } else { Write-Host '      body: <EMPTY>' }
