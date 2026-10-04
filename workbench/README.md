@@ -394,6 +394,23 @@ owner → （只有代号时去 /api/accounts 反查 owner）→ 代号 acc-N �
 代号没删，只从「主显示」降级到 tooltip / 「代号 acc-N」小字 —— 仍能与 `pool-config.json` 对上。
 新增 `accLabel()` / `accTip()` / `accountById()` 三个纯函数。详见主 README 第四节 §21。
 
+### 账号凭证报错人话化：403 → 「重新生成 PAT」（v1.6.6）
+
+账号管理表「凭证」列原来把协调器返回的 .NET 异常原样摊出来
+（`Response status code does not indicate success: 403 (Forbidden).`）—— 用户看不懂也不知道该干什么。
+
+现在 `explainTokenError(note)` 把原始报错翻译成「人话 + 行动建议」，`tokenStateBadge(ts, note)` 与备注行都用它：
+
+| HTTP | 徽标 | 建议 |
+|------|------|------|
+| 403 | `凭证被拒 · 403`（红） | PAT 过期/吊销/权限不足 → 重新生成并更新 Secret |
+| 401 | `凭证无效 · 401`（红） | PAT 已删除/吊销 → 重新生成 |
+| 404 | `仓库不可见 · 404`（红） | PAT 看不到该仓库 |
+| 429 | `被限流 · 429`（黄） | 速率限制，自动恢复 |
+
+原始报错串**降级到 tooltip**（不丢证据）；非 HTTP 报错（如「Secret 未配置」）原样透传。
+本批只改显示 —— token 失效本身仍需人工换 PAT。详见主 README 第四节 §22。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -606,7 +623,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（554 项）
+├── selftest.py           # 离线自测（563 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

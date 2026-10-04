@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.5", server.VERSION == "1.6.5", server.VERSION)
+    check("T168 server.py 版本 1.6.6", server.VERSION == "1.6.6", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2613,6 +2613,25 @@ def main():
           "esc(accLabel(a.id, a.owner))" in app_txt and 'mono">代号 ' in app_txt)
     check("T478 代号仍留在 tooltip（accTip）里，便于与 pool-config 的 acc-N 对照",
           '"代号 " + code' in app_txt)
+
+    # ---------------- 账号凭证报错「人话化」：403/401/404/429 → 可行动提示（v1.6.6） ----------------
+    # 起因（2026-10-04）：acc-1 (yc1966asgf) 的 POOL_TOKEN_1 失效，协调器巡检统一返回 403；
+    #   面板原样摊出 .NET 异常串「Response status code does not indicate success: 403 (Forbidden).」，
+    #   用户看不懂也不知道该干什么 → 翻译成「凭证被拒 · 403」+「重新生成 PAT 并更新 Secret」。
+    print("[账号凭证报错人话化 v1.6.6]")
+    check("T479 ★ app.js 有 explainTokenError()（原始报错 → 人话 + 行动建议）",
+          "function explainTokenError(" in app_txt)
+    check("T480 ★ 403 / 401 / 404 / 429 各有对应文案",
+          'short: "凭证被拒 · 403"' in app_txt and 'short: "凭证无效 · 401"' in app_txt
+          and 'short: "仓库不可见 · 404"' in app_txt and 'short: "被限流 · 429"' in app_txt)
+    check("T481 ★ 「凭证」列徽标走 explainTokenError（不再写死「查询失败」）",
+          "function tokenStateBadge(ts, note)" in app_txt and "explainTokenError(note)" in app_txt
+          and "tokenStateBadge(a.token_state, a.report_note)" in app_txt)
+    check("T482 ★ 账号表备注行显示人话提示，原始 .NET 串降级到 tooltip",
+          "explainTokenError(a.report_note)" in app_txt
+          and 'esc(a.report_note) + "</div>"' not in app_txt)
+    check("T483 提示里给出行动建议（重新生成 PAT / 更新 Secret；fine-grained 权限说明）",
+          "重新生成后更新对应 Secret" in app_txt and "fine-grained" in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

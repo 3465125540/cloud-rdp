@@ -712,10 +712,45 @@ function renderMachines() {
   }).join("");
 }
 
-function tokenStateBadge(ts) {
+/* 把协调器巡检返回的原始报错翻译成「人话 + 该怎么办」。
+   原始串多为 .NET 异常，如 'Response status code does not indicate success: 403 (Forbidden).'
+   —— 直接摊给用户等于没提示。返回 {short, hint, kind}：short 进徽标、hint 进备注行、kind 定色。 */
+function explainTokenError(note) {
+  var s = String(note || "").trim();
+  var m = /(\d{3})\s*\(Forbidden\)/i.exec(s) ? "403"
+    : /(\d{3})\s*\(Unauthorized\)/i.exec(s) ? "401"
+      : /(\d{3})\s*\(Not Found\)/i.exec(s) ? "404"
+        : /(\d{3})\s*\(Too Many Requests\)/i.exec(s) ? "429"
+          : ((/\b(401|403|404|429)\b/.exec(s) || [])[1] || "");
+  if (m === "403") {
+    return { short: "凭证被拒 · 403", kind: "bad",
+      hint: "GitHub 用这个 PAT 发请求被 403（Forbidden）拒绝 —— 通常 = PAT 已过期 / 被吊销 / 权限不足" +
+        "（classic 需 repo + workflow；fine-grained 需 Actions 读写 + Contents 读写，且勾选该仓库）。" +
+        "重新生成后更新对应 Secret 即可。" };
+  }
+  if (m === "401") {
+    return { short: "凭证无效 · 401", kind: "bad",
+      hint: "GitHub 认为这个 PAT 无效（Unauthorized）—— 多半已被删除 / 吊销。重新生成并更新 Secret。" };
+  }
+  if (m === "404") {
+    return { short: "仓库不可见 · 404", kind: "bad",
+      hint: "这个 PAT 看不到该仓库（404）—— 仓库可能已删除 / 改名，或该 PAT 未被授权访问它。" };
+  }
+  if (m === "429") {
+    return { short: "被限流 · 429", kind: "warn",
+      hint: "触发了 GitHub 速率限制，等一会儿会自动恢复（非配置问题）。" };
+  }
+  return { short: "查询失败", kind: "warn", hint: s || "协调器巡检该账号时失败（原因未知）。" };
+}
+
+function tokenStateBadge(ts, note) {
   if (ts === "ok") return badge("凭证正常", "ok");
   if (ts === "missing") return badge("缺 Secret", "bad");
-  if (ts === "query_failed") return badge("查询失败", "warn");
+  if (ts === "query_failed") {
+    var te = explainTokenError(note);
+    return '<span data-tip="' + esc(te.hint + "　原始报错：" + (note || "")) + '">' +
+      badge(te.short, te.kind) + "</span>";
+  }
   if (ts === "disabled") return badge("已停用", "mute");
   return '<span class="muted">—</span>';
 }
@@ -768,7 +803,7 @@ function renderAccounts() {
     }
 
     // ---- 实时监测列：凭证状态 + 在跑机数 + 最近一次 run ----
-    var mon = [tokenStateBadge(a.token_state)];
+    var mon = [tokenStateBadge(a.token_state, a.report_note)];
     // 「在跑」必须分清「真在跑」和「排队中」——
     // 老的 alive_count 口径是「**未结束**的 run 数」，把 pending / queued 也算进去；
     // 但排队中的 run 还没分到 runner、机器根本没起来，Tailscale 上没有节点，
@@ -799,7 +834,10 @@ function renderAccounts() {
     if (a.source === "live") mon.push('<span class="src-tag" title="工作台用本机 Token 实时探测">实时</span>');
     var note = "";
     if (a.report_note && a.token_state !== "ok") {
-      note = '<div class="muted mon-note">' + esc(a.report_note) + "</div>";
+      // 原始报错多是 .NET 异常串 → 翻译成「人话 + 该怎么办」；原始串留在 tooltip 里备查。
+      var te = explainTokenError(a.report_note);
+      note = '<div class="muted mon-note" title="' +
+        esc("原始报错：" + a.report_note) + '">' + esc(te.hint) + "</div>";
     }
 
     // 账号列主显示 = 真实账号名（owner）；名称缺失时 accLabel 会兜底到代号 / 「未命名账号」。

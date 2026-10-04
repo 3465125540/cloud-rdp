@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（554 项）
+python workbench\selftest.py   :: 离线自测（563 项）
 ```
 
 | 面板 | 内容 |
@@ -1385,6 +1385,42 @@ step 8 正常跑完、整场 **6h04m**；acc-5（缺这个参数）跑到 **4h16
 数据在 Node 里跑真实渲染函数，账号 tab 实际产出 = `全部账号 | yc1966asgf | 3465125540 | code1969sda | code19698fgh`，
 分组表头 rg-id 同名；兜底链 16 项断言全过。
 
+### 22. 账号凭证报错「人话化」：403 → 该重新生成 PAT 了（v1.6.6）
+
+**现象**：账号管理表的「凭证」列显示 `查询失败`，备注行摊出一串 .NET 异常：
+`Response status code does not indicate success: 403 (Forbidden).` —— 看不懂，也不知道该干什么。
+
+**真机取证**（2026-10-04，hub 协调器 run `37165902257` 日志）：
+
+```
+[pool] 账号 acc-1 (yc1966asgf)：查询失败 —— Response status code does not indicate success: 403 (Forbidden).
+[pool] fork 自愈：acc-1 (yc1966asgf) 未同步 —— compare 失败：... 403 (Forbidden).
+[pool] 派发失败 → acc-1 (yc1966asgf) —— ... 403 (Forbidden).
+```
+
+* 同一个 token 的**读 runs / compare / 派发 workflow 全部 403** ⇒ 问题在 token 本身，不是某个接口。
+* 该 Secret **没被改过**（`POOL_TOKEN_1` 的 `updated_at` 仍是 2026-09-22）⇒ 不是被覆盖，是 token 自身失效。
+* 时间线（逐 run 扫描）：**2026-10-03T01:19Z 还正常**（「在跑 1 台 / 排队 1 台」），**05:54Z 起连续 403**。
+
+**修法**：前端把原始报错翻译成「人话 + 行动建议」（`explainTokenError()`）：
+
+| HTTP | 徽标 | 含义 / 怎么办 |
+|------|------|----------------|
+| 403 | `凭证被拒 · 403`（红） | PAT 已过期 / 被吊销 / 权限不足（classic 需 `repo`+`workflow`；fine-grained 需 Actions 读写 + Contents 读写并勾选该仓库）→ **重新生成 PAT 并更新该 Secret** |
+| 401 | `凭证无效 · 401`（红） | PAT 已被删除 / 吊销 → 重新生成 |
+| 404 | `仓库不可见 · 404`（红） | PAT 看不到该仓库（仓库已删/改名，或未授权给它） |
+| 429 | `被限流 · 429`（黄） | 速率限制，会自动恢复（非配置问题） |
+
+徽标 tooltip 与备注行都给人话；**原始报错串降级到 tooltip** 里备查（不丢证据）。
+非 HTTP 类的报错（如「Secret 未配置」）原样透传，不做误翻译。
+
+**验证**：`selftest.py` **563 PASS / 0 FAIL**（本批 T479–T483）；另用**真实** `report_note`
+（就是那串 403）在 Node 里跑真实 `explainTokenError()`：→ `凭证被拒 · 403 / bad`，12 项断言全过。
+
+> **诚实边界**：本批只改**显示**，不碰协调器、不改池状态；**token 失效这件事本身仍需人工换 PAT**
+> （工作台拿不到账号自己的 PAT，Secret 值 GitHub 也永不回显）。另：协调器的「派发失败」目前**不写进
+> 池状态**，所以面板看不到「这个账号派发不出去」——那是另一个待补的观测点。
+
 ## 五、目录结构
 
 ```
@@ -1392,7 +1428,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（554 项）
+│   ├── selftest.py                     #   离线自测（563 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1488,6 +1524,7 @@ cloud-rdp/
 | **点「刷新」后时间戳不动 / 一直「后台刷新中」** | `overview_seconds=20` 秒小于快照**实测构建耗时**（13~49 秒）→ 快照一建出来就已过期，每个请求都触发重建；且 `stale` 被误写成「比 TTL 老」而非「真在重建」。另：请求在途时点刷新会被 `if (BUSY) return` **静默丢掉** | **已修**：TTL 取 `max(配置, 构建耗时 + 5 秒)`；`stale` 只表示「有重建在途」；按钮加**禁用 + 「刷新中…」**进度，时间戳显示「更新于 …（N 秒前）」，在途点击会**排队补发**。详见第四节 §18 |
 | **概览「恢复异常」显示 N 数据，但机器其实没失败** | 恢复失败标记文件（`_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）躺在数据目录根，会**随数据目录同步到 139、再被还原到别的机器** → 一台机器的失败标记被所有机器继承；且工作台回退读标记时只测存在、不看时间，几天前的老标记也照算 | **已修**：数据目录同步**排除** `_RESTORE_*.txt`（断源头）；回退读标记时解析时间，**旧格式 / 早于本机本次开机的**标为陈旧，不计入异常，机器表显示灰色「旧标记·已忽略」。详见第四节 §19 |
 | **界面上账号显示成 `acc-1 / acc-3`，看不出是谁** | 前端多处直接渲染了账号池的内部代号 `id`（`acc-N`），而不是 GitHub 账号名 | **v1.6.5 起**：全站统一 `accLabel()` —— 显示真实账号名（`owner`），名称缺失时依次兜底到「代号 acc-N」→「未命名账号」；代号降级到 tooltip / 小字，仍可与 `pool-config.json` 对照。详见第四节 §21 |
+| **账号「凭证」列显示「查询失败」+ 一串 .NET 异常（`403 (Forbidden)`）** | 该账号的 PAT（如 `POOL_TOKEN_1`）**失效**了 —— 协调器用它读 runs / 同步 fork / 派发机器全被 403 拒绝；面板原来把 .NET 异常原样摊出来 | **v1.6.6 起**：翻译成「凭证被拒 · 403」并给出行动建议（重新生成 PAT → 更新该 Secret）；401/404/429 各有对应文案，原始串降级到 tooltip。详见第四节 §22 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |
