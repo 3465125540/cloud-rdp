@@ -348,7 +348,7 @@ function Get-PoolState {
 # 输入：配置 + 当前在跑机列表 + 现在时间
 # 输出：{ dispatch = @( {account, role, reason} ); desiredOwners = @(...); reason = '...' }
 function Get-PoolPlan {
-    param($Config, [object[]]$Alive, [datetime]$Now)
+    param($Config, [object[]]$Alive, [datetime]$Now, [string[]]$ExcludeOwners = @())
 
     $target   = [int]$Config.target_machines
     $life     = [int]$Config.machine.lifetime_minutes
@@ -357,18 +357,34 @@ function Get-PoolPlan {
     $alive    = @($Alive)
     $nowUtc   = $Now.ToUniversalTime()
 
+    # 兜底账号（账号项写 `reserve: true`，如 acc-3/hub）：**只在第一梯队全都用不了时**才启用。
+    # 目的：降低 hub 账号的使用频率 —— 它是池子最后一道保险，不该当日常主力。
+    $normal  = @($accounts | Where-Object { $_.reserve -ne $true })
+    $reserve = @($accounts | Where-Object { $_.reserve -eq $true })
+
+    # 「已知不可用」的账号（上一轮凭证坏 / 派发失败）→ 本轮不参与候选：
+    # 死账号不该占着坑，否则协调器每轮都先试它们、永远轮不到能用的那个。
+    # 只取上一轮 → 天然一轮自愈：它恢复正常后下一轮就不再被跳过。
+    $skip = @($ExcludeOwners | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
     $busy   = @($alive | ForEach-Object { [string]$_.owner })
     # 注意：用 ::new() 而非 New-Object —— Windows PowerShell 5.1 下
     # 「New-Object 建的 List[object]」被 @() 包住会抛 ArgumentException（参数类型不匹配）。
     $plan   = [System.Collections.Generic.List[object]]::new()
 
-    # 选一个「没被占用」的账号；可排除某个 owner（轮换时排除被替换者）
+    # 选一个「没被占用」的账号；可排除某个 owner（轮换时排除被替换者）。
+    # 顺序 = 第一梯队 → 兜底梯队；两梯都没人可用才返回 $null。
     $pickFree = {
         param([string]$excludeOwner)
-        foreach ($a in $accounts) {
-            if ($busy -contains [string]$a.owner) { continue }
-            if ($a.owner -eq $excludeOwner) { continue }
-            return $a
+        foreach ($tierName in @('normal', 'reserve')) {
+            $tier = if ($tierName -eq 'normal') { $normal } else { $reserve }
+            foreach ($a in @($tier)) {
+                $o = [string]$a.owner
+                if ($busy -contains $o) { continue }
+                if ($o -eq $excludeOwner) { continue }
+                if ($skip -contains $o) { continue }
+                return $a
+            }
         }
         return $null
     }

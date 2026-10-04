@@ -136,7 +136,25 @@ foreach ($acc in $accounts) {
 Say "fork 自愈：$(@($forkSync | Where-Object { $_.action -eq 'synced' }).Count) 个已快进 / 共 $($forkSync.Count) 个账号（其余：已最新/本仓库/无 token）"
 
 # ---------- 2. 决策 ----------
-$plan = Get-PoolPlan -Config $cfg -Alive $alive -Now $now
+# 从上一轮状态里挑出「已知不可用」的账号：凭证坏（query_failed / missing）或上一轮派发失败。
+# 它们本轮不参与候选 —— 死账号占着候选位会让协调器每轮都白试一遍、永远轮不到能用的那个
+# （acc-1 账号被停用 + acc-4 Actions 被禁用时，池子就是这样卡在 1/2 台补不上）。
+# 只取上一轮 → 天然一轮自愈：账号恢复后下一轮就不再被跳过。
+$blocked = @()
+if ($prev -and $prev.accounts) {
+    foreach ($pa in @($prev.accounts)) {
+        if (-not $pa) { continue }
+        $own = [string]$pa.owner
+        if ([string]::IsNullOrWhiteSpace($own)) { continue }
+        $ts = [string]$pa.token_state
+        if ($ts -eq 'query_failed' -or $ts -eq 'missing') { $blocked += $own; continue }
+        if ([string]$pa.note -like '*派发失败*') { $blocked += $own }
+    }
+    $blocked = @($blocked | Select-Object -Unique)
+}
+if ($blocked.Count -gt 0) { Say "已知不可用（本轮不参与候选）：$($blocked -join ', ')" }
+
+$plan = Get-PoolPlan -Config $cfg -Alive $alive -Now $now -ExcludeOwners $blocked
 Say "决策：$($plan.reason)  primary候选=$($plan.primaryOwner)"
 
 # ---------- 3. 执行派发（带防抖：同一账号 8 分钟内不重复派）----------

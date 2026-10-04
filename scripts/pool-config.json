@@ -5,6 +5,7 @@
     "账号池配置（无任何密钥！）。真实 PAT 只放 GitHub Secret，绝不写进本文件。",
     "每个账号 = 一个 fork（或独立仓库）的 cloud-rdp，用 token_secret 指向的 Secret 里的 PAT 去查询/触发。",
     "把 owner 换成真实 GitHub 登录名、token_secret 换成你在 Secret 里建的变量名即可。",
+    "账号项可加 \"reserve\": true —— 兜底账号：只在第一梯队（其余所有账号）都用不了时才被派发。",
     "token_secret 对应的 PAT 需要 repo + workflow 权限（能读 actions runs、能 workflow_dispatch）。"
   ],
   "hub": {
@@ -39,7 +40,9 @@
       "owner": "3465125540",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_3",
-      "enabled": true
+      "enabled": true,
+      "_reserve_说明": "兜底账号：只在第一梯队（其余所有账号）都用不了时才被派发。降低 hub 账号的使用频率。",
+      "reserve": true
     },
     {
       "id": "acc-4",

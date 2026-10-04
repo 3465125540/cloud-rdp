@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.7"
+VERSION = "1.6.8"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1853,6 +1853,9 @@ def get_accounts():
             "owner": owner,
             "repo": repo_name,
             "enabled": enabled,
+            # 兜底账号（pool-config.json 里 reserve: true）：协调器只在第一梯队全都用不了时才派它。
+            # 只用于界面标注，不影响任何后端逻辑。
+            "reserve": a.get("reserve") is True,
             "token_secret": secret,
             "secret_present": secret_present,
             "secret_via": secret_via,

@@ -425,6 +425,26 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §23。
 
+### 账号调度「兜底梯队」+「隐藏失效账号」（v1.6.8）
+
+**① 兜底账号**：`scripts/pool-config.json` 的账号项加 `"reserve": true` 即降为**兜底** ——
+协调器（`Get-PoolPlan`）的候选顺序变成「第一梯队 → 兜底梯队」，只有第一梯队全都用不了时才派兜底账号。
+老配置没写 `reserve` → 全部算第一梯队，行为与旧版一致。本仓库给 acc-3（hub）标了兜底。
+
+配套：`Get-PoolPlan -ExcludeOwners` —— 协调器把「已知不可用」的账号（上一轮凭证坏 / 派发失败）
+排除在候选之外，否则死账号会占着第一梯队的候选位、让协调器每轮白试一遍。排除列表只取上一轮，天然一轮自愈。
+
+界面：账号表在兜底账号后面标一个灰色 **「兜底」** 徽标（数据来自 `/api/accounts` 的 `reserve` 字段）。
+
+**② 隐藏失效账号**：账号管理卡片右上角新增按钮。失效 = 模板占位 / 已停用 / 凭证坏（`query_failed`、`missing`）
+/ 派发失败（note 里带「派发失败」）。点一下同时隐藏**账号表** + **运行日志分组** + **账号筛选 tab**；
+开关存 `localStorage["wb.hideDeadAccounts"]`，刷新后保持；统计行会写「已隐藏 N 个失效账号」。
+
+> ⚠️ 判定基于协调器发布的巡检结果 —— 新增的失效原因要等协调器下一轮跑过才会出现在 `note` 里。
+> ⚠️ 「兜底」徽标需要**重启工作台**（`reserve` 字段由 server.py 透出）。
+
+详见主 README 第四节 §24。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -637,7 +657,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（569 项）
+├── selftest.py           # 离线自测（583 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

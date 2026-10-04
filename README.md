@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（569 项）
+python workbench\selftest.py   :: 离线自测（583 项）
 ```
 
 | 面板 | 内容 |
@@ -1458,6 +1458,62 @@ Invoke-RestMethod 非 2xx → 抛 HttpResponseException
 | acc-1 `yc1966asgf` | `{"message":"Sorry. Your account was suspended"}` | **账号被 GitHub 停用** —— 所有 API 403，换 PAT 也没用 |
 | acc-4 `code1969sda` | `{"message":"Actions has been disabled for this user."}` | **该账号的 Actions 被禁用** —— PAT 有效、仓库可读、workflow 是 `active`，但派发一律 422 |
 
+### 24. 账号调度：hub 账号降为「兜底」+ 前端「隐藏失效账号」（v1.6.8）
+
+**需求**：① 降低 hub 账号（`3465125540` / acc-3）的使用频率，把它当兜底机器 —— **只在其余所有账号都用不了时才派它**；
+② 加一个「隐藏失效账号」按钮，点了把失效账号的**账号信息 + 运行日志**一起藏起来。
+
+#### ① 兜底梯队（`reserve`）
+
+账号项加一个 `reserve: true` 即标记为兜底（本仓库给 acc-3 标了）。`Get-PoolPlan` 的候选顺序变成**两梯队**：
+
+```
+第一梯队（reserve != true）  →  兜底梯队（reserve == true）  →  都没有 → 不派
+```
+
+| 场景 | 结果 |
+|------|------|
+| 第一梯队够用 | **完全不碰兜底账号** |
+| 第一梯队全被占用/不可用 | 才启用兜底账号 |
+| 账号项没写 `reserve`（老配置） | 全部算第一梯队，**行为与旧版完全一致** |
+
+**关键配套**：新增 `-ExcludeOwners`，协调器把「**已知不可用**」的账号（上一轮 `token_state` = `query_failed`/`missing`，
+或 `note` 里带「派发失败」）排除在候选之外。没有这一步，兜底规则会被死账号架空 ——
+acc-1（账号被停用）/ acc-4（Actions 被禁用）虽然永远派发失败，却**占着第一梯队的候选位**，
+协调器每轮都先试它们、**永远轮不到能用的那个**，池子就卡在 1/2 台补不上。
+排除列表**只取上一轮** ⇒ 天然一轮自愈：账号恢复后下一轮就不再被跳过。
+
+**验证**（本机 PS 7 直接 dot-source `pool-lib.ps1` 跑 `Get-PoolPlan`，7 个场景全过）：
+
+| 场景 | 产出 |
+|------|------|
+| 排除 acc-1/acc-4 + 目标 2 台 | `acc-5, acc-3` ← 死账号不再占位，兜底才补位 |
+| 只有 acc-3(兜底)+acc-5，目标 1 台 | `acc-5` ← **兜底不被优先** |
+| 第一梯队全被排除 | `acc-3` ← 兜底只在此时启用 |
+| 第一梯队够用 | `acc-1, acc-5` ← 完全不碰兜底 |
+| 老配置（无 `reserve` 字段） | 顺序不变，行为与旧版一致 |
+
+#### ② 「隐藏失效账号」按钮
+
+「失效」的判定（`isAccountDead()`，只影响**显示**，不改任何数据）：
+
+| 判定项 | 说明 |
+|--------|------|
+| 模板占位 | `REPLACE_OWNER_N` |
+| 已停用 | `enabled: false` |
+| 凭证坏 | `token_state` = `query_failed` / `missing` |
+| 派发失败 | 协调器巡检 `note` 里带「派发失败」（如 acc-4 的 422） |
+
+点一下同时隐藏：**账号管理表**、**运行日志的账号分组**、**运行日志的账号筛选 tab**。
+开关状态记在本机浏览器 `localStorage["wb.hideDeadAccounts"]`（刷新后保持，`try/catch` 兜住隐私模式）；
+按钮文案随状态在「隐藏失效账号 ↔ 显示失效账号」之间切换；统计行会写「已隐藏 N 个失效账号」，免得以为账号变少了。
+
+> **诚实边界**：① 判定完全基于协调器发布的巡检结果 —— acc-4 的「派发失败」要**等协调器下一轮跑过**
+> （约 3 小时，或点「立即巡检」）才会写进 `note`，在那之前它不会被判定为失效。
+> ② 兜底账号**不改变 `target_machines` 语义**：目标 2 台、而第一梯队只有 1 个可用账号时，兜底账号仍会被派去凑第 2 台
+> —— 这正是「其余机器都不可用」的情形。③ 本次**没动用户的 `enabled` 开关**：acc-1/acc-4 仍是启用状态，
+> 只是被 `-ExcludeOwners` 动态跳过（账号恢复即自动回归）。
+
 ## 五、目录结构
 
 ```
@@ -1465,7 +1521,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（569 项）
+│   ├── selftest.py                     #   离线自测（583 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1563,6 +1619,7 @@ cloud-rdp/
 | **界面上账号显示成 `acc-1 / acc-3`，看不出是谁** | 前端多处直接渲染了账号池的内部代号 `id`（`acc-N`），而不是 GitHub 账号名 | **v1.6.5 起**：全站统一 `accLabel()` —— 显示真实账号名（`owner`），名称缺失时依次兜底到「代号 acc-N」→「未命名账号」；代号降级到 tooltip / 小字，仍可与 `pool-config.json` 对照。详见第四节 §21 |
 | **账号「凭证」列显示「查询失败」+ 一串 .NET 异常（`403 (Forbidden)`）** | 该账号的 PAT（如 `POOL_TOKEN_1`）**失效**了 —— 协调器用它读 runs / 同步 fork / 派发机器全被 403 拒绝；面板原来把 .NET 异常原样摊出来 | **v1.6.6 起**：翻译成「凭证被拒 · 403」并给出行动建议（重新生成 PAT → 更新该 Secret）；401/404/429 各有对应文案，原始串降级到 tooltip。详见第四节 §22 |
 | **账号面板只显示 `403 (Forbidden)` / `422`，看不到原因** | `Invoke-RestMethod` 抛错时**响应体已被 dispose**，catch 里 `GetResponseStream()` 永远读到空串 → GitHub 的 `message` 永久丢失；且「派发失败」原来不写进池状态，面板根本看不到 | **v1.6.7 起**：`Invoke-GhApi` 改用 `-SkipHttpErrorCheck` 保住响应体并把 message 拼进异常；协调器把「派发失败」写进账号 note；面板识别「账号被停用 / Actions 被禁用 / 派发被拒 · 422」。详见第四节 §23 |
+| **想让某个账号少用点（当兜底）、或界面上一堆失效账号太吵** | 原来候选顺序就是 pool-config 里的账号顺序，hub 账号总被优先；失效账号既占候选位又占屏幕 | **v1.6.8 起**：账号项加 `"reserve": true` 即降为**兜底**（只在第一梯队全不可用时才派）；协调器同时排除「已知不可用」账号（凭证坏/派发失败），死账号不再占位。前端新增「**隐藏失效账号**」按钮，一键藏掉失效账号的账号表 + 运行日志。详见第四节 §24 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

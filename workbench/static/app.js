@@ -75,6 +75,37 @@ function accTip(id, owner, extra) {
   if (extra) bits.push(extra);
   return bits.join(" · ");
 }
+
+/* ------------------------------------------------------------ 「隐藏失效账号」开关
+   失效（不可用）= 模板占位 / 已停用 / 凭证坏（query_failed、missing）/ 派发失败。
+   开关记在本机浏览器（localStorage），点一下同时隐藏「账号表」与「运行日志」里的这些账号。 */
+var HIDE_DEAD_KEY = "wb.hideDeadAccounts";
+var HIDE_DEAD = (function () { try { return localStorage.getItem(HIDE_DEAD_KEY) === "1"; } catch (e) { return false; } })();
+function setHideDead(on) {
+  HIDE_DEAD = !!on;
+  try { localStorage.setItem(HIDE_DEAD_KEY, HIDE_DEAD ? "1" : "0"); } catch (e) { /* 隐私模式等：忽略 */ }
+}
+function isAccountDead(a) {
+  if (!a) return true;
+  if (a.placeholder) return true;                       // REPLACE_OWNER_N 模板占位
+  if (a.enabled === false) return true;                 // 已停用（协调器不再给它派机器）
+  var ts = String(a.token_state || "");
+  if (ts === "query_failed" || ts === "missing") return true;   // 凭证坏 / 缺 Secret
+  if (String(a.report_note || "").indexOf("派发失败") >= 0) return true;  // 派发不出去（如 422）
+  return false;
+}
+// 按 owner 反查是否失效（运行日志的分组只有 owner，没有 token_state）
+function ownerIsDead(owner) {
+  var a = accountByOwner(owner);
+  return a ? isAccountDead(a) : false;
+}
+// 「隐藏失效账号」按钮的文案：开着时提示点它可恢复显示
+function updateHideDeadLabel() {
+  var el = $("#btn-hide-dead");
+  if (!el) return;
+  el.textContent = HIDE_DEAD ? "显示失效账号" : "隐藏失效账号";
+  el.classList.toggle("btn-primary", HIDE_DEAD);
+}
 // 后端返回的不是 JSON（多半是 HTML）时的统一提示。
 // 常见于「当前页面不是由工作台后端提供的」——比如用静态预览面板打开、或直接双击 index.html：
 // 此时 /api/... 会落到那个静态服务器上，返回它的 HTML，而不是工作台的 JSON。
@@ -267,6 +298,7 @@ function render() {
   renderStats();
   renderMachines();
   updateFoldAllLabel();
+  updateHideDeadLabel();
   renderAccounts();
   renderRunAccTabs();
   renderRuns();
@@ -794,13 +826,17 @@ function runStateKind(state) {
 
 function renderAccounts() {
   var acc = DATA.accounts || {};
-  var rows = acc.accounts || [];
+  var allRows = acc.accounts || [];
+  // 「隐藏失效账号」：只影响**显示**，不改任何数据；统计里说清藏了几个，免得以为账号少了。
+  var deadRows = allRows.filter(isAccountDead);
+  var rows = HIDE_DEAD ? allRows.filter(function (a) { return !isAccountDead(a); }) : allRows;
   var tb = $("#tbl-accounts tbody");
   $("#accounts-empty").hidden = rows.length > 0;
 
   var bits = [];
   if (acc.ok) {
-    bits.push(rows.length + " 个账号");
+    bits.push(allRows.length + " 个账号");
+    if (HIDE_DEAD && deadRows.length) bits.push("已隐藏 " + deadRows.length + " 个失效账号");
     if (acc.monitor_available) {
       // 实时北京时间（绝对时间，UTC+8）：前端从原始 UTC 换算，旧后端（只给 state_updated）也正确
       var bj = bjTime(acc.state_updated) || acc.state_updated_beijing || "?";
@@ -876,6 +912,11 @@ function renderAccounts() {
     // 代号 acc-N 降级为第二行小字并显式标注「代号」——它是 pool-config 里的 id，仍有对照价值。
     var name = esc(accLabel(a.id, a.owner));
     if (a.placeholder) name += ' <span class="muted">(待填)</span>';
+    if (a.reserve) {
+      // 兜底账号（pool-config 里 reserve: true）：协调器只在第一梯队全都用不了时才派它。
+      name += ' <span class="badge mute" data-tip="兜底账号：只在第一梯队（其余所有账号）都用不了时' +
+        '才被派发 —— 用来降低它的使用频率。见 pool-config.json 的 reserve 字段。">兜底</span>';
+    }
 
     return "<tr>" +
       '<td class="strong">' + name + '<div class="muted mono">代号 ' + esc(a.id || "-") + "</div></td>" +
@@ -913,6 +954,10 @@ function runGroups() {
              token_source: a.token_source || "none", ok: a.ok !== false,
              error: a.error || "", runs: a[RUN_TAB] || [], fallback: a.fallback_run || null };
   });
+  // 「隐藏失效账号」：连它的运行日志一起藏（owner 反查账号池判断是否失效）
+  if (HIDE_DEAD) {
+    groups = groups.filter(function (g) { return !g.owner || !ownerIsDead(g.owner); });
+  }
   if (RUN_ACC !== "all") {
     groups = groups.filter(function (g) { return g.owner === RUN_ACC; });
   }
@@ -1002,6 +1047,8 @@ function renderRunAccTabs() {
   var sub = $("#runs-sub");
   if (!el) return;
   var list = (DATA.runs || {}).accounts || [];
+  // 「隐藏失效账号」：失效账号的 tab 也一起藏
+  if (HIDE_DEAD) list = list.filter(function (a) { return !ownerIsDead(a.owner); });
   if (list.length <= 1) {
     el.innerHTML = "";
     if (sub) sub.hidden = true;
@@ -1009,7 +1056,7 @@ function renderRunAccTabs() {
     return;
   }
   if (sub) sub.hidden = false;
-  // 选中的账号被删掉/停用了 → 回到「全部账号」
+  // 选中的账号被删掉/停用/隐藏了 → 回到「全部账号」
   var owners = list.map(function (a) { return a.owner; });
   if (RUN_ACC !== "all" && owners.indexOf(RUN_ACC) < 0) RUN_ACC = "all";
 
@@ -1397,6 +1444,17 @@ function bind() {
     f.hidden = !f.hidden;
     if (!f.hidden) $("#acc-owner").focus();
   });
+  // 「隐藏失效账号」：只影响显示（账号表 + 运行日志），状态记在本机浏览器
+  var hideDeadBtn = $("#btn-hide-dead");
+  if (hideDeadBtn) {
+    hideDeadBtn.addEventListener("click", function () {
+      setHideDead(!HIDE_DEAD);
+      updateHideDeadLabel();
+      renderAccounts();
+      renderRunAccTabs();
+      renderRuns();
+    });
+  }
   $("#btn-add-cancel").addEventListener("click", function () {
     $("#form-add-account").hidden = true;
     $("#acc-add-msg").textContent = "";

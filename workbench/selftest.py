@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.7", server.VERSION == "1.6.7", server.VERSION)
+    check("T168 server.py 版本 1.6.8", server.VERSION == "1.6.8", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2658,6 +2658,55 @@ def main():
     check("T489 ★ token_state=ok 但 note 含派发失败 → 徽标「凭证正常 · 派发失败」(bad)，备注行不再被吞",
           "凭证正常 · 派发失败" in app_txt and 'indexOf("派发失败")' in app_txt
           and "if (a.report_note && a.token_state !== \"ok\")" not in app_txt)
+
+    # ---------------- 调度：acc-3 降为兜底（reserve）+ 跳过已知不可用（v1.6.8） ----------------
+    # 需求（2026-10-04）：「降低 acc-3 (3465125540) 的使用频率，把它当兜底机器 ——
+    #   只在其余所有机器均不可用时才启用」。
+    print("[账号调度 兜底梯队 v1.6.8]")
+    check("T490 ★ Get-PoolPlan 支持 reserve 梯队（第一梯队 normal → 兜底 reserve，两梯都没人才返回空）",
+          "$normal  = @($accounts | Where-Object { $_.reserve -ne $true })" in pcl_txt
+          and "$reserve = @($accounts | Where-Object { $_.reserve -eq $true })" in pcl_txt
+          and "foreach ($tierName in @('normal', 'reserve'))" in pcl_txt)
+    check("T491 ★ Get-PoolPlan 支持 -ExcludeOwners（已知不可用的账号不参与候选）",
+          "[string[]]$ExcludeOwners = @()" in pcl_txt and "$skip -contains $o" in pcl_txt)
+    check("T492 ★ 协调器从上一轮状态算出「已知不可用」并传进决策（凭证坏 / 派发失败）",
+          "$ts -eq 'query_failed' -or $ts -eq 'missing'" in pcp_txt
+          and "[string]$pa.note -like '*派发失败*'" in pcp_txt
+          and "Get-PoolPlan -Config $cfg -Alive $alive -Now $now -ExcludeOwners $blocked" in pcp_txt)
+    check("T493 ★ 协调器在决策**之前**算 blocked（顺序错了就等于没生效）",
+          pcp_txt.index("$blocked = @()") < pcp_txt.index("Get-PoolPlan -Config $cfg"))
+    _pc = json.loads(open(os.path.join(repo_dir, "scripts", "pool-config.json"), encoding="utf-8").read())
+    _acc3 = [a for a in _pc["accounts"] if a.get("id") == "acc-3"]
+    check("T494 ★ pool-config.json 里 acc-3 标了 reserve: true（兜底）",
+          len(_acc3) == 1 and _acc3[0].get("reserve") is True)
+    check("T495 其余账号没有被误标 reserve（只有 acc-3 是兜底）",
+          [a["id"] for a in _pc["accounts"] if a.get("reserve") is True] == ["acc-3"])
+    check("T496 server.py 把 reserve 透出给前端（/api/accounts 的 reserve 字段）",
+          '"reserve": a.get("reserve") is True,' in open(
+              os.path.join(repo_dir, "workbench", "server.py"), encoding="utf-8").read())
+
+    # ---------------- 前端：「隐藏失效账号」按钮（v1.6.8） ----------------
+    print("[隐藏失效账号 v1.6.8]")
+    check("T497 ★ index.html 有「隐藏失效账号」按钮",
+          'id="btn-hide-dead"' in idx_txt and "隐藏失效账号" in idx_txt)
+    check("T498 ★ app.js 有失效判定 isAccountDead（占位 / 停用 / 凭证坏 / 派发失败）",
+          "function isAccountDead(" in app_txt and "a.placeholder" in app_txt
+          and 'ts === "query_failed" || ts === "missing"' in app_txt
+          and 'indexOf("派发失败") >= 0' in app_txt)
+    check("T499 ★ 开关状态存本机浏览器（localStorage）且 try/catch 兜住隐私模式",
+          'HIDE_DEAD_KEY = "wb.hideDeadAccounts"' in app_txt
+          and "function setHideDead(" in app_txt and "localStorage.setItem(HIDE_DEAD_KEY" in app_txt)
+    check("T500 ★ 账号表 + 运行日志分组 + 账号 tab 三处都过滤失效账号",
+          "var rows = HIDE_DEAD ? allRows.filter(function (a) { return !isAccountDead(a); }) : allRows;" in app_txt
+          and "groups = groups.filter(function (g) { return !g.owner || !ownerIsDead(g.owner); });" in app_txt
+          and "if (HIDE_DEAD) list = list.filter(function (a) { return !ownerIsDead(a.owner); });" in app_txt)
+    check("T501 ★ 按钮文案随状态切换（隐藏 ↔ 显示），render() 里同步",
+          'el.textContent = HIDE_DEAD ? "显示失效账号" : "隐藏失效账号"' in app_txt
+          and "updateHideDeadLabel();" in app_txt and 'setHideDead(!HIDE_DEAD)' in app_txt)
+    check("T502 账号表标注「兜底」徽标（reserve 账号）",
+          "if (a.reserve) {" in app_txt and ">兜底</span>" in app_txt)
+    check("T503 隐藏后统计里说明藏了几个（免得以为账号变少了）",
+          '"已隐藏 " + deadRows.length + " 个失效账号"' in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()
