@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（563 项）
+python workbench\selftest.py   :: 离线自测（569 项）
 ```
 
 | 面板 | 内容 |
@@ -1421,6 +1421,43 @@ step 8 正常跑完、整场 **6h04m**；acc-5（缺这个参数）跑到 **4h16
 > （工作台拿不到账号自己的 PAT，Secret 值 GitHub 也永不回显）。另：协调器的「派发失败」目前**不写进
 > 池状态**，所以面板看不到「这个账号派发不出去」——那是另一个待补的观测点。
 
+### 23. 账号故障「可诊断」：API 报错必须带上响应体（v1.6.7）
+
+**现象**：账号面板只显示光秃秃的 `403 (Forbidden)` / `422`，**看不到 GitHub 说的原因**，排查像猜谜。
+
+**根因**（2026-10-04 本地 pwsh 实测）：
+
+```
+Invoke-RestMethod 非 2xx → 抛 HttpResponseException
+  .Exception.Response            = HttpResponseMessage        （有）
+  .Exception.Response.GetResponseStream()  → 方法不存在
+  .Exception.Response.Content.ReadAsStringAsync()
+      → "Cannot access a disposed object: HttpConnectionResponseContent"
+```
+
+即：**抛错时响应体已被 dispose，任何 catch 里的补救都读不回来**。项目原来的写法
+（`New-Object StreamReader($_.Exception.Response.GetResponseStream())`）在 PowerShell 7 上**永远拿到空串** ——
+于是 GitHub 的 `message` 永久丢失。唯一可靠的办法是**别让它抛**：`-SkipHttpErrorCheck`（PS 7）先拿到响应体。
+
+**修法**：
+
+| 文件 | 改动 |
+|------|------|
+| `scripts/pool-lib.ps1` | `Invoke-GhApi` 改用 `Invoke-WebRequest -SkipHttpErrorCheck`；非 2xx 时把 GitHub 的 `message` 拼进异常：`HTTP 403 Forbidden [/path] Sorry. Your account was suspended`。PS 5.1 无此开关 → 退回 `Invoke-RestMethod`（拿不到 body，但不报错） |
+| `scripts/pool-coordinator.ps1` | **把「派发失败」并进该账号的巡检 `note`** —— 之前派发失败只打日志，面板完全看不到（acc-4 的 422 藏了一整天） |
+| `workbench/static/app.js` | `explainTokenError` 新增**账号级**故障识别：`account was suspended` → 「账号被停用」、`Actions has been disabled for this user` → 「Actions 被禁用」、422 → 「派发被拒 · 422」；`tokenStateBadge` 在 `token_state=ok` 但 `note` 含「派发失败」时显示「凭证正常 · 派发失败」（红）；备注行不再要求 `token_state != ok` |
+
+**验证**：`selftest.py` **569 PASS / 0 FAIL**（本批 T484–T489）；`pool-lib.ps1` / `pool-coordinator.ps1`
+用 `[Parser]::ParseFile` 语法校验通过；**dot-source 真文件实测**：成功路径返回 `PSCustomObject`，
+错误路径异常消息 = `HTTP 401 Unauthorized [/user] Bad credentials` / `HTTP 404 NotFound [...] Not Found`。
+
+**这次真机探针的实际产出**（只读探测，用完即删）：
+
+| 账号 | GitHub 原话 | 结论 |
+|------|------------|------|
+| acc-1 `yc1966asgf` | `{"message":"Sorry. Your account was suspended"}` | **账号被 GitHub 停用** —— 所有 API 403，换 PAT 也没用 |
+| acc-4 `code1969sda` | `{"message":"Actions has been disabled for this user."}` | **该账号的 Actions 被禁用** —— PAT 有效、仓库可读、workflow 是 `active`，但派发一律 422 |
+
 ## 五、目录结构
 
 ```
@@ -1428,7 +1465,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（563 项）
+│   ├── selftest.py                     #   离线自测（569 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1525,6 +1562,7 @@ cloud-rdp/
 | **概览「恢复异常」显示 N 数据，但机器其实没失败** | 恢复失败标记文件（`_RESTORE_FAILED.txt` / `_RESTORE_EMPTY.txt`）躺在数据目录根，会**随数据目录同步到 139、再被还原到别的机器** → 一台机器的失败标记被所有机器继承；且工作台回退读标记时只测存在、不看时间，几天前的老标记也照算 | **已修**：数据目录同步**排除** `_RESTORE_*.txt`（断源头）；回退读标记时解析时间，**旧格式 / 早于本机本次开机的**标为陈旧，不计入异常，机器表显示灰色「旧标记·已忽略」。详见第四节 §19 |
 | **界面上账号显示成 `acc-1 / acc-3`，看不出是谁** | 前端多处直接渲染了账号池的内部代号 `id`（`acc-N`），而不是 GitHub 账号名 | **v1.6.5 起**：全站统一 `accLabel()` —— 显示真实账号名（`owner`），名称缺失时依次兜底到「代号 acc-N」→「未命名账号」；代号降级到 tooltip / 小字，仍可与 `pool-config.json` 对照。详见第四节 §21 |
 | **账号「凭证」列显示「查询失败」+ 一串 .NET 异常（`403 (Forbidden)`）** | 该账号的 PAT（如 `POOL_TOKEN_1`）**失效**了 —— 协调器用它读 runs / 同步 fork / 派发机器全被 403 拒绝；面板原来把 .NET 异常原样摊出来 | **v1.6.6 起**：翻译成「凭证被拒 · 403」并给出行动建议（重新生成 PAT → 更新该 Secret）；401/404/429 各有对应文案，原始串降级到 tooltip。详见第四节 §22 |
+| **账号面板只显示 `403 (Forbidden)` / `422`，看不到原因** | `Invoke-RestMethod` 抛错时**响应体已被 dispose**，catch 里 `GetResponseStream()` 永远读到空串 → GitHub 的 `message` 永久丢失；且「派发失败」原来不写进池状态，面板根本看不到 | **v1.6.7 起**：`Invoke-GhApi` 改用 `-SkipHttpErrorCheck` 保住响应体并把 message 拼进异常；协调器把「派发失败」写进账号 note；面板识别「账号被停用 / Actions 被禁用 / 派发被拒 · 422」。详见第四节 §23 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

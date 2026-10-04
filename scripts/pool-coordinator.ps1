@@ -197,6 +197,21 @@ foreach ($x in $dispatched) {
         url     = ''
     }
 }
+# 把「派发失败」并进对应账号的巡检明细 —— 否则面板只显示「凭证正常」，看不出这个账号其实出不了机器
+# （acc-4 的 422 就是这样在面板上藏了一整天）。复用已有的 note 通道，不新增状态字段。
+foreach ($x in $dispatched) {
+    if ($x.ok) { continue }
+    $own = [string]$x.account.owner
+    foreach ($rep in $reports) {
+        if ([string]$rep.owner -ne $own) { continue }
+        $tag = "派发失败（$($x.reason)）：$($x.error)"
+        if ([string]::IsNullOrWhiteSpace([string]$rep.note)) { $rep.note = $tag }
+        else { $rep.note = "$([string]$rep.note)　$tag" }
+        Say "巡检明细：$own 追加派发失败 —— $($x.error)"
+        break
+    }
+}
+
 $state = Build-PoolState -Config $cfg -Alive $finalAlive -Reports $reports
 
 # 记录最近派发时间（供下一轮防抖）

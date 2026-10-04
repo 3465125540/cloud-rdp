@@ -50,7 +50,15 @@ function Get-PoolAccountToken {
     return [string]$item.Value
 }
 
-# 统一的 GitHub REST 调用（GET/POST/...）。失败抛异常，由调用方兜。
+# 统一的 GitHub REST 调用（GET/POST/...）。非 2xx 抛异常，由调用方兜。
+#
+# ⚠️ 为什么不能直接用 Invoke-RestMethod：非 2xx 时它抛 HttpResponseException，而且
+#    **响应体已经被 dispose** —— catch 里再 GetResponseStream() / ReadAsStringAsync() 只会得到
+#    "Cannot access a disposed object"，GitHub 的 message（如 "Sorry. Your account was suspended"、
+#    "Actions has been disabled for this user."）**永久丢失**，上层只能看到光秃秃的 "403 (Forbidden)"。
+#    acc-1 / acc-4 的事故因此排查了一整天才定位（见 README §23）。
+#    改用 -SkipHttpErrorCheck（PowerShell 7+）先把响应体拿到手，再把 message 拼进异常消息。
+#    PowerShell 5.1 没有这个开关 → 退回老行为（拿不到 body，但不会报错）。
 function Invoke-GhApi {
     param(
         [string]$Token,
@@ -71,6 +79,22 @@ function Invoke-GhApi {
     if ($null -ne $Body) {
         $params['ContentType'] = 'application/json'
         $params['Body']        = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 8))
+    }
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $resp = Invoke-WebRequest @params -SkipHttpErrorCheck
+        $code = [int]$resp.StatusCode
+        $text = [string]$resp.Content
+        if ($code -ge 400) {
+            $msg = ''
+            try { $msg = [string]((($text | ConvertFrom-Json).message)) } catch { }
+            if ([string]::IsNullOrWhiteSpace($msg)) {
+                $msg = (($text -replace '\s+', ' ').Trim())
+                if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 300) }
+            }
+            throw ("HTTP {0} {1} [{2}] {3}" -f $code, $resp.StatusDescription, $Path, $msg)
+        }
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        return ($text | ConvertFrom-Json)
     }
     return Invoke-RestMethod @params
 }
@@ -159,14 +183,10 @@ function Invoke-WorkflowDispatch {
         Invoke-GhApi -Token $Token -Method 'POST' -Path $path -Body $body -ApiBaseUri $ApiBaseUri | Out-Null
         return @{ ok = $true; error = '' }
     } catch {
-        $detail = ''
-        if ($_.Exception.Response) {
-            try {
-                $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $detail = $sr.ReadToEnd(); $sr.Close()
-            } catch { }
-        }
-        return @{ ok = $false; error = ("$($_.Exception.Message) $detail").Trim() }
+        # Invoke-GhApi 已把 GitHub 的 message 拼进异常消息，这里直接用即可。
+        # （旧代码额外用 GetResponseStream() 掏 body —— 在 PowerShell 7 上**永远掏不到**，
+        #   因为响应体在抛错时已被 dispose；那正是 403/422 只剩状态码的根因。）
+        return @{ ok = $false; error = $_.Exception.Message }
     }
 }
 

@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.6", server.VERSION == "1.6.6", server.VERSION)
+    check("T168 server.py 版本 1.6.7", server.VERSION == "1.6.7", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2632,6 +2632,32 @@ def main():
           and 'esc(a.report_note) + "</div>"' not in app_txt)
     check("T483 提示里给出行动建议（重新生成 PAT / 更新 Secret；fine-grained 权限说明）",
           "重新生成后更新对应 Secret" in app_txt and "fine-grained" in app_txt)
+
+    # ---------------- 账号故障「可诊断」：API 报错必须带上响应体（v1.6.7） ----------------
+    # 起因（2026-10-04 真机探针）：acc-1 的**账号被 GitHub 停用**、acc-4 的 **Actions 被禁用**，
+    #   但面板/日志只有光秃秃的 "403 (Forbidden)" / "422" —— 因为 Invoke-RestMethod 抛错时
+    #   响应体已被 dispose，catch 里 GetResponseStream() 永远读不到（实测 "Cannot access a disposed object"）。
+    print("[账号故障可诊断 v1.6.7]")
+    check("T484 ★ pool-lib 的 Invoke-GhApi 用 -SkipHttpErrorCheck 保住响应体，并把 message 拼进异常",
+          "-SkipHttpErrorCheck" in pcl_txt
+          and "Invoke-WebRequest @params -SkipHttpErrorCheck" in pcl_txt
+          and 'throw ("HTTP {0} {1} [{2}] {3}"' in pcl_txt)
+    _gs = [l for l in pcl_txt.splitlines() if "GetResponseStream" in l]
+    check("T485 ★ 代码里不再有「抛错后再掏响应体」的死写法（只剩注释在解释这个坑）",
+          len(_gs) == 2 and all(l.strip().startswith("#") for l in _gs),
+          "命中 %d 行" % len(_gs))
+    check("T486 PS7 用新写法、PS5.1 有兜底（-SkipHttpErrorCheck 只有 PS7 才有）",
+          "$PSVersionTable.PSVersion.Major -ge 7" in pcl_txt and "return Invoke-RestMethod @params" in pcl_txt)
+    check("T487 ★ 协调器把「派发失败」并进账号巡检 note（否则面板只显示「凭证正常」，看不出出不了机器）",
+          "派发失败（$($x.reason)）：$($x.error)" in pcp_txt and "$rep.note = $tag" in pcp_txt
+          and pcp_txt.index("$rep.note = $tag") < pcp_txt.index("$state = Build-PoolState"))
+    check("T488 ★ app.js 认「账号被停用 / Actions 被禁用 / 422」这些账号级故障",
+          "account was suspended" in app_txt and "actions has been disabled for this user" in app_txt
+          and 'short: "账号被停用"' in app_txt and 'short: "Actions 被禁用"' in app_txt
+          and 'short: "派发被拒 · 422"' in app_txt)
+    check("T489 ★ token_state=ok 但 note 含派发失败 → 徽标「凭证正常 · 派发失败」(bad)，备注行不再被吞",
+          "凭证正常 · 派发失败" in app_txt and 'indexOf("派发失败")' in app_txt
+          and "if (a.report_note && a.token_state !== \"ok\")" not in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

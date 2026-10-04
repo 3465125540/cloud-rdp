@@ -713,15 +713,32 @@ function renderMachines() {
 }
 
 /* 把协调器巡检返回的原始报错翻译成「人话 + 该怎么办」。
-   原始串多为 .NET 异常，如 'Response status code does not indicate success: 403 (Forbidden).'
-   —— 直接摊给用户等于没提示。返回 {short, hint, kind}：short 进徽标、hint 进备注行、kind 定色。 */
+   输入两种形态：
+     · 旧：.NET 异常串，如 'Response status code does not indicate success: 403 (Forbidden).'
+     · 新（v1.6.7 起 Invoke-GhApi 会带上 GitHub 的 message）：'HTTP 403 Forbidden [/user] Sorry. Your account was suspended'
+   返回 {short, hint, kind}：short 进徽标、hint 进备注行、kind 定色。 */
 function explainTokenError(note) {
   var s = String(note || "").trim();
+  var low = s.toLowerCase();
+  // ① 先认「账号级」的明确拒绝 —— 这类换 PAT 也没用，必须去 GitHub 侧处理
+  if (low.indexOf("account was suspended") >= 0 || low.indexOf("account is suspended") >= 0) {
+    return { short: "账号被停用", kind: "bad",
+      hint: "GitHub 停用了这个账号（Sorry. Your account was suspended）—— 不是 PAT 的问题，" +
+        "换新 PAT 也没用：该账号下所有 API 都 403。需要去 GitHub 申诉/恢复账号（github.com/contact），" +
+        "恢复后再重新生成 PAT 并更新该 Secret。" };
+  }
+  if (low.indexOf("actions has been disabled for this user") >= 0) {
+    return { short: "Actions 被禁用", kind: "bad",
+      hint: "GitHub 禁用了这个账号的 Actions（Actions has been disabled for this user）—— " +
+        "PAT 有效、仓库可读，但**派发不了任何 workflow**（422），这个账号再也出不了机器。" +
+        "同样要在 GitHub 账号侧解决（申诉 / 恢复 Actions），工作台这边无解。" };
+  }
+  // ② 再按 HTTP 状态码给通用解释
   var m = /(\d{3})\s*\(Forbidden\)/i.exec(s) ? "403"
     : /(\d{3})\s*\(Unauthorized\)/i.exec(s) ? "401"
       : /(\d{3})\s*\(Not Found\)/i.exec(s) ? "404"
         : /(\d{3})\s*\(Too Many Requests\)/i.exec(s) ? "429"
-          : ((/\b(401|403|404|429)\b/.exec(s) || [])[1] || "");
+          : ((/\b(401|403|404|429|422)\b/.exec(s) || [])[1] || "");
   if (m === "403") {
     return { short: "凭证被拒 · 403", kind: "bad",
       hint: "GitHub 用这个 PAT 发请求被 403（Forbidden）拒绝 —— 通常 = PAT 已过期 / 被吊销 / 权限不足" +
@@ -740,11 +757,24 @@ function explainTokenError(note) {
     return { short: "被限流 · 429", kind: "warn",
       hint: "触发了 GitHub 速率限制，等一会儿会自动恢复（非配置问题）。" };
   }
+  if (m === "422") {
+    return { short: "派发被拒 · 422", kind: "bad",
+      hint: "GitHub 拒绝了这个派发请求（422）—— 常见于「该账号的 Actions 被禁用」或 workflow 输入不匹配。" +
+        "看后面的原始报错里 GitHub 的 message。" };
+  }
   return { short: "查询失败", kind: "warn", hint: s || "协调器巡检该账号时失败（原因未知）。" };
 }
 
 function tokenStateBadge(ts, note) {
-  if (ts === "ok") return badge("凭证正常", "ok");
+  if (ts === "ok") {
+    // 凭证没问题，但本轮「派发失败」（如 422 Actions 被禁用）—— 不显出来就会被误判成「这账号是好的」。
+    if (String(note || "").indexOf("派发失败") >= 0) {
+      var de = explainTokenError(note);
+      return '<span data-tip="' + esc(de.hint + "　原始报错：" + note) + '">' +
+        badge("凭证正常 · 派发失败", "bad") + "</span>";
+    }
+    return badge("凭证正常", "ok");
+  }
   if (ts === "missing") return badge("缺 Secret", "bad");
   if (ts === "query_failed") {
     var te = explainTokenError(note);
@@ -833,8 +863,10 @@ function renderAccounts() {
     }
     if (a.source === "live") mon.push('<span class="src-tag" title="工作台用本机 Token 实时探测">实时</span>');
     var note = "";
-    if (a.report_note && a.token_state !== "ok") {
-      // 原始报错多是 .NET 异常串 → 翻译成「人话 + 该怎么办」；原始串留在 tooltip 里备查。
+    if (a.report_note) {
+      // 备注不再只在「凭证异常」时显示 —— 协调器现在会把「派发失败」也写进 note
+      // （token_state 可能仍是 ok，如 acc-4 的 422 Actions 被禁用）。
+      // 原始报错多是 .NET 异常串 / GitHub message → 翻译成「人话 + 该怎么办」，原始串留 tooltip 备查。
       var te = explainTokenError(a.report_note);
       note = '<div class="muted mon-note" title="' +
         esc("原始报错：" + a.report_note) + '">' + esc(te.hint) + "</div>";

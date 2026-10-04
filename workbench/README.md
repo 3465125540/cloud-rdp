@@ -411,6 +411,20 @@ owner → （只有代号时去 /api/accounts 反查 owner）→ 代号 acc-N �
 原始报错串**降级到 tooltip**（不丢证据）；非 HTTP 报错（如「Secret 未配置」）原样透传。
 本批只改显示 —— token 失效本身仍需人工换 PAT。详见主 README 第四节 §22。
 
+### 账号故障「可诊断」：报错必须带上 GitHub 的 message（v1.6.7）
+
+原来面板只有光秃秃的 `403 (Forbidden)` / `422` —— 因为 `Invoke-RestMethod` 抛错时**响应体已被 dispose**，
+catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object`。修法：
+
+* `scripts/pool-lib.ps1` 的 `Invoke-GhApi` 改用 `Invoke-WebRequest -SkipHttpErrorCheck`（PS 7），
+  非 2xx 时把 GitHub 的 `message` 拼进异常：`HTTP 403 Forbidden [/path] Sorry. Your account was suspended`。
+* `scripts/pool-coordinator.ps1` 把「派发失败」并进该账号的巡检 `note`（之前只打日志，面板看不到）。
+* `app.js` `explainTokenError` 新增账号级识别：「账号被停用」/「Actions 被禁用」/「派发被拒 · 422」；
+  `tokenStateBadge` 在 `token_state=ok` 但 note 含「派发失败」时显示「凭证正常 · 派发失败」（红）；
+  备注行不再只在 `token_state != ok` 时显示。
+
+详见主 README 第四节 §23。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -623,7 +637,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（563 项）
+├── selftest.py           # 离线自测（569 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
