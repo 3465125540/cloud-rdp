@@ -1,0 +1,51 @@
+name: _tmp-diag2
+# TEMP read-only probe (deleted right after).
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe
+        shell: pwsh
+        env:
+          T1: ${{ secrets.POOL_TOKEN_1 }}
+          T4: ${{ secrets.POOL_TOKEN_4 }}
+        run: |
+          $base = 'https://api.github.com'
+          function Raw($label, $uri, $token) {
+            $H = @{ Authorization = "token $token"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'diag' }
+            try {
+              $r = Invoke-WebRequest -Headers $H -Uri $uri -SkipHttpErrorCheck
+              $rl = $r.Headers['x-ratelimit-remaining']
+              $lim = $r.Headers['x-ratelimit-limit']
+              $rst = $r.Headers['x-ratelimit-reset']
+              $ra = $r.Headers['retry-after']
+              Write-Host ("  {0}: HTTP {1} | rl={2}/{3} reset={4} retry-after={5}" -f $label, $r.StatusCode, $rl, $lim, $rst, $ra)
+              Write-Host ("      body: {0}" -f (($r.Content -replace '\s+',' ').Substring(0, [Math]::Min(400, $r.Content.Length))))
+            } catch { Write-Host ("  {0}: EXC {1}" -f $label, $_.Exception.Message) }
+          }
+          Write-Host '===== acc-1 / yc1966asgf ====='
+          Raw '/user'   "$base/user"   $env:T1
+          Raw '/repos'  "$base/repos/yc1966asgf/cloud-rdp" $env:T1
+          Raw '/runs'   "$base/repos/yc1966asgf/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=1" $env:T1
+          Write-Host '===== acc-4 / code1969sda ====='
+          Raw '/user'   "$base/user"   $env:T4
+          $H4 = @{ Authorization = "token $($env:T4)"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'diag' }
+          # fork 的 windows-rdp.yml blob sha vs hub 的
+          $r4 = Invoke-RestMethod -Headers $H4 -Uri "$base/repos/code1969sda/cloud-rdp/contents/.github/workflows/windows-rdp.yml?ref=main"
+          Write-Host ("  fork windows-rdp.yml blob sha: {0}" -f $r4.sha)
+          $c4 = Invoke-RestMethod -Headers $H4 -Uri "$base/repos/code1969sda/cloud-rdp/commits/main"
+          Write-Host ("  fork main HEAD: {0}  ({1})" -f $c4.sha.Substring(0,7), $c4.commit.message.Split("`n")[0])
+          $cmp = Invoke-RestMethod -Headers $H4 -Uri "$base/repos/code1969sda/cloud-rdp/compare/3465125540:main...code1969sda:main"
+          Write-Host ("  compare hub...fork: status={0} ahead={1} behind={2}" -f $cmp.status, $cmp.ahead_by, $cmp.behind_by)
+          $hub = Invoke-RestMethod -Headers $H4 -Uri "$base/repos/3465125540/cloud-rdp/contents/.github/workflows/windows-rdp.yml?ref=main"
+          Write-Host ("  hub  windows-rdp.yml blob sha: {0}" -f $hub.sha)
+          Write-Host ("  => 文件一致? {0}" -f ($r4.sha -eq $hub.sha))
+          # 该 fork 的 workflow_dispatch 输入清单（从文件内容里抓）
+          $txt = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($r4.content))
+          $lines = $txt.Split("`n")
+          $i = 0; $out = @()
+          foreach ($l in $lines) { if ($l -match 'workflow_dispatch') { $i = 1 }; if ($i -eq 1) { $out += $l.TrimEnd() }; if ($out.Count -gt 26) { break } }
+          Write-Host '  fork on: 块:'
+          foreach ($l in $out) { Write-Host ("      {0}" -f $l) }
