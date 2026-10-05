@@ -147,17 +147,8 @@ Write-MLog ("配置：host={0} port={1} security={2} user={3} from={4} to={5} cc
     $SmtpHost, $SmtpPort, $Security, $SmtpUser, $MailFrom, ($toList -join ','), ($ccList -join ','), ([string]$SmtpPass).Length)
 
 # ---------------------------------------------------------------- 3. 组装 MIME
-$b64 = ConvertTo-B64 $BodyText
-$sb = [System.Text.StringBuilder]::new()
-for ($i = 0; $i -lt $b64.Length; $i += 76) {
-    $n = [Math]::Min(76, $b64.Length - $i)
-    [void]$sb.Append($b64.Substring($i, $n)).Append("`r`n")
-}
-$bodyB64 = $sb.ToString().TrimEnd()
-
 # Message-ID 的域必须是**真实 FQDN**。原来写死 `@cloudrdp`（无点）——
-# 真机 2026-10-05：139 邮箱（smtp.139.com → 19955650119@139.com + milkyaizj@139.com）
-# SMTP 全绿收 250，两个收件箱都收不到；这种「域名不合法」的邮件头正是被判垃圾/静默丢弃的典型。
+# 真机 2026-10-05：139 邮箱 SMTP 全绿收 250，两个收件箱都收不到；这种「域名不合法」的邮件头正是被判垃圾的典型。
 # 取发件人域（如 139.com），最稳。
 $midDomain = 'cloudrdp.local'
 try {
@@ -168,23 +159,39 @@ try {
     }
 } catch { }
 
-$hdr = [System.Text.StringBuilder]::new()
-[void]$hdr.Append('From: ' + (Format-AddrHeader $FromName $MailFrom) + "`r`n")
-# Reply-To / Sender 与 From 对齐 —— 部分服务器会校验「From 域 == Sender 域」，缺了会降信誉
-[void]$hdr.Append('Reply-To: <' + $MailFrom + '>' + "`r`n")
-[void]$hdr.Append('Sender: <' + $MailFrom + '>' + "`r`n")
-[void]$hdr.Append('To: ' + ($toList -join ', ') + "`r`n")
-if ($ccList.Count -gt 0) { [void]$hdr.Append('Cc: ' + ($ccList -join ', ') + "`r`n") }
-[void]$hdr.Append('Subject: ' + (Format-Rfc2047 $Subject) + "`r`n")
-# 必须 ToUniversalTime()：'r' 只格式化本地时间再拼字面量 "GMT"，直接用会差一个时区
-[void]$hdr.Append('Date: ' + (Get-Date).ToUniversalTime().ToString('r') + "`r`n")
-[void]$hdr.Append('Message-ID: <' + [guid]::NewGuid().ToString('N') + '@' + $midDomain + '>' + "`r`n")
-[void]$hdr.Append("MIME-Version: 1.0`r`n")
-[void]$hdr.Append("Content-Type: text/plain; charset=utf-8`r`n")
-[void]$hdr.Append("Content-Transfer-Encoding: base64`r`n")
-[void]$hdr.Append("X-Mailer: CloudRDP`r`n")
-[void]$hdr.Append("`r`n")
-$payload = $hdr.ToString() + $bodyB64
+function ConvertTo-Base64Body([string]$s) {
+    $b64 = ConvertTo-B64 $s
+    $sb = [System.Text.StringBuilder]::new()
+    for ($i = 0; $i -lt $b64.Length; $i += 76) {
+        $n = [Math]::Min(76, $b64.Length - $i)
+        [void]$sb.Append($b64.Substring($i, $n)).Append("`r`n")
+    }
+    return $sb.ToString().TrimEnd()
+}
+
+# ★ 正文编码默认 **8bit**（原始 UTF-8）—— 最像正常邮件。
+#   为什么改：真机 2026-10-05 139 直接判 `550 Mail rejected score is 20.156`（就在阈值边上 ——
+#   同一套配置有时过、有时不过）。base64 编码的**纯文本**正文（MIME_BASE64_TEXT）本身就是反垃圾加分项，
+#   8bit 不带这个特征；顺带去掉了自定义 `X-Mailer`（弱特征）与冗余 `Sender`。
+#   服务器没宣告 8BITMIME 时才退回 base64（否则中文会乱码）。
+function Build-MailPayload([string]$Cte) {
+    $hdr = [System.Text.StringBuilder]::new()
+    [void]$hdr.Append('From: ' + (Format-AddrHeader $FromName $MailFrom) + "`r`n")
+    [void]$hdr.Append('Reply-To: <' + $MailFrom + '>' + "`r`n")
+    [void]$hdr.Append('To: ' + ($toList -join ', ') + "`r`n")
+    if ($ccList.Count -gt 0) { [void]$hdr.Append('Cc: ' + ($ccList -join ', ') + "`r`n") }
+    [void]$hdr.Append('Subject: ' + (Format-Rfc2047 $Subject) + "`r`n")
+    # 必须 ToUniversalTime()：'r' 只格式化本地时间再拼字面量 "GMT"，直接用会差一个时区
+    [void]$hdr.Append('Date: ' + (Get-Date).ToUniversalTime().ToString('r') + "`r`n")
+    [void]$hdr.Append('Message-ID: <' + [guid]::NewGuid().ToString('N') + '@' + $midDomain + '>' + "`r`n")
+    [void]$hdr.Append("MIME-Version: 1.0`r`n")
+    [void]$hdr.Append("Content-Type: text/plain; charset=utf-8`r`n")
+    [void]$hdr.Append("Content-Transfer-Encoding: $Cte`r`n")
+    [void]$hdr.Append("`r`n")
+    if ($Cte -eq 'base64') { return $hdr.ToString() + (ConvertTo-Base64Body $BodyText) }
+    return $hdr.ToString() + ($BodyText -replace "`r?`n", "`r`n")
+}
+$payload = Build-MailPayload '8bit'
 
 # ---------------------------------------------------------------- 4. DryRun
 if ($DryRun) {
@@ -312,6 +319,14 @@ while ($true) {
             $writer = New-SmtpWriter $stream
             $ehlo = Invoke-SmtpCmd $writer $reader ("EHLO " + $env:COMPUTERNAME) @(250) 'EHLO(2)'
             Write-MLog 'STARTTLS 升级完成'
+        }
+
+        # 正文编码定稿：宣告 8BITMIME 就用 8bit（默认），否则退回 base64（防中文乱码）
+        $supports8 = $false
+        foreach ($l in $ehlo.Lines) { if ($l -match '(?i)8BITMIME') { $supports8 = $true; break } }
+        if (-not $supports8) {
+            Write-MLog '服务器未宣告 8BITMIME —— 正文退回 base64'
+            $payload = Build-MailPayload 'base64'
         }
 
         # ---- AUTH：优先 LOGIN，失败再退 PLAIN ----

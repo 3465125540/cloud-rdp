@@ -2500,8 +2500,12 @@ def main():
     check("T460 ★ Message-ID 用发件人真实域（不再写死 @cloudrdp）—— 非法域会被 139/QQ 静默丢弃",
           "Message-ID" in mail_txt and "'@' + $midDomain" in mail_txt
           and "@cloudrdp>" not in mail_txt and "$midDomain" in mail_txt)
-    check("T461 发信头补 Reply-To / Sender（与 From 域对齐，降垃圾评分）",
-          "Reply-To: <" in mail_txt and "Sender: <" in mail_txt)
+    check("T461 发信头补 Reply-To（与 From 域对齐）", "Reply-To: <" in mail_txt)
+    # ★ 139 直接判「550 Mail rejected score is 20.156」（就在阈值边上）——
+    #   base64 编码的**纯文本**正文（MIME_BASE64_TEXT）本身是反垃圾加分项 → 改 8bit（服务器支持时）。
+    check("T464 ★ 正文改 8bit（去掉 MIME_BASE64_TEXT 反垃圾特征）+ 去掉自定义 X-Mailer；不支持 8BITMIME 才退回 base64",
+          "Build-MailPayload '8bit'" in mail_txt and "8BITMIME" in mail_txt
+          and "Build-MailPayload 'base64'" in mail_txt and "X-Mailer: CloudRDP" not in mail_txt)
     check("T462 mail-test 支持「重发连接信息」：conn_ip/conn_user/conn_pass → send-connection-mail.ps1",
           "conn_ip" in mt_txt and "send-connection-mail.ps1" in mt_txt and "connmail.log" in mt_txt)
     # ★ 数组 splat（@('-Ip','x')）是**按位置**绑定的 —— '-Ip' 会被当成位置参数的值，
