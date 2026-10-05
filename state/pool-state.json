@@ -1,7 +1,7 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-04T23:10:56.5051690Z",
+  "updated_utc": "2026-10-05T02:05:30.5134559Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-5",
@@ -17,6 +17,13 @@
       "repo": "cloud-rdp",
       "run_id": 37231019744,
       "since": "2026-10-04T20:09:27Z"
+    },
+    {
+      "account": "acc-5",
+      "owner": "code19698fgh",
+      "repo": "cloud-rdp",
+      "run_id": 37249004738,
+      "since": "2026-10-05T00:49:38Z"
     }
   ],
   "accounts": [
@@ -69,7 +76,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "",
+      "note": "派发失败（rotate 3465125540）：HTTP 422 UnprocessableEntity [/repos/code1969sda/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches] Actions has been disabled for this user.",
       "role": ""
     },
     {
@@ -79,28 +86,28 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_5",
       "token_state": "ok",
-      "alive_count": 1,
+      "alive_count": 2,
       "running_count": 1,
-      "queued_count": 0,
+      "queued_count": 1,
       "total": 20,
       "last_run": {
-        "run_id": 37231018813,
-        "status": "in_progress",
+        "run_id": 37249004738,
+        "status": "pending",
         "conclusion": "",
-        "created_at": "2026-10-04T20:09:26Z",
-        "event": "workflow_dispatch",
-        "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/37231018813"
+        "created_at": "2026-10-05T00:49:38Z",
+        "event": "schedule",
+        "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/37249004738"
       },
       "note": "",
-      "role": "primary"
+      "role": "standby"
     }
   ],
   "recent_dispatches": {
+    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "code1969sda": "2026-10-02T06:48:37.0410716Z",
     "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
     "3465125540": "2026-10-04T20:09:22.4048222Z",
-    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
-    "code19698fgh": "2026-10-04T20:09:22.4048222Z",
-    "code1969sda": "2026-10-02T06:48:37.0410716Z"
+    "code19698fgh": "2026-10-04T20:09:22.4048222Z"
   }
 }
