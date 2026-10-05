@@ -1,18 +1,21 @@
-# 邮件自测：单跑 0c1「UU远程 连接信息 + 发信」，**不开云机**。
+# 邮件自测 / 连接信息重发 —— **不开云机**。
 #
 # 为什么要这个：
 #   0c1 的邮件只有开机流程才会发 —— 想验证「邮件能不能到 / 内容对不对」就得开一台云机，
-#   代价太大（几分钟到几十分钟，还占账号池）。这个 workflow 把 0c1 那一步单独拉出来，
-#   在 GitHub 托管的 windows runner 上跑一遍（几分钟、不占云机），真的把邮件发出去。
+#   代价太大（几分钟到几十分钟，还占账号池）。这个 workflow 在 GitHub 托管的 windows runner
+#   上跑一遍（几分钟、不占云机），真的把邮件发出去；也用来「把某台机器的连接信息重发一次」。
 #
 # 用法：Actions → 「Mail Test (0c1 连接信息)」→ Run workflow
 #   install_uu = true   真装 UU远程 再发（约 3 分钟，邮件内容完整：设备 ID + 验证码）
 #   install_uu = false  跳过安装，只测发信链路（约 30 秒；连接信息会显示「未取到」）
 #   dry_run    = true   只渲染邮件内容、不真发（排查 SMTP 配置用）
+#   conn_ip    = 非空时 → **只重发「连接信息」邮件**（RDP：Tailscale IP / 账号 / 密码），不跑 0c1。
+#               例：conn_ip=100.106.159.80 conn_user=a conn_pass=a
+#               它用本仓库的 MAIL_* Secrets + 仓库里**当前**的 send-mail.ps1 发（所以改完脚本立刻能验证）。
 #
 # 复用与 0e / 0c1 完全相同的 MAIL_* Secrets —— 这里通，开机那封就通。
 #
-# ⚠️ 这里只验证「发信链路」。这台是 GitHub 托管运行器，**不是账户 a 的云机** ——
+# ⚠️ 0c1 那一路只验证「发信链路」。这台是 GitHub 托管运行器，**不是账户 a 的云机** ——
 #    邮件里的「机器」会显示「单跑测试（GitHub 托管运行器，非账户 a 的云机）」。
 #    账户 a 的真机连接信息由 windows-rdp.yml 的 0c1 发出（机器 = github-rdp-server-N + 100.x）。
 name: Mail Test (0c1 连接信息)
@@ -28,6 +31,18 @@ on:
         description: 'true = 只渲染邮件内容不真发（排查 SMTP 用）'
         required: false
         default: 'false'
+      conn_ip:
+        description: '非空 = 只重发「连接信息」邮件（填 Tailscale IP，如 100.106.159.80）；留空则跑 0c1'
+        required: false
+        default: ''
+      conn_user:
+        description: 'conn_ip 非空时：用户名（默认 a）'
+        required: false
+        default: 'a'
+      conn_pass:
+        description: 'conn_ip 非空时：密码（默认 a）'
+        required: false
+        default: 'a'
 
 permissions:
   contents: read
@@ -61,7 +76,21 @@ jobs:
       - name: 拉取仓库
         uses: actions/checkout@v4
 
+      - name: 重发「连接信息」邮件（conn_ip 非空时）
+        if: ${{ inputs.conn_ip != '' }}
+        shell: pwsh
+        run: |
+          $sys = 'D:\cloudrdp-sys'
+          New-Item -ItemType Directory -Force -Path "$sys\_state" | Out-Null
+          $env:CLOUDRDP_SYS_DIR = $sys
+          $a = @('-Ip', '${{ inputs.conn_ip }}', '-LogPath', "$sys\_state\connmail.log")
+          if ('${{ inputs.conn_user }}' -ne '') { $a += @('-User', '${{ inputs.conn_user }}') }
+          if ('${{ inputs.conn_pass }}' -ne '') { $a += @('-Pass', '${{ inputs.conn_pass }}') }
+          if ('${{ inputs.dry_run }}' -eq 'true') { $a += '-DryRun' }
+          .\scripts\send-connection-mail.ps1 @a
+
       - name: 0c1 连接信息 + 发信（单跑）
+        if: ${{ inputs.conn_ip == '' }}
         shell: pwsh
         run: |
           $sys = 'D:\cloudrdp-sys'
@@ -77,7 +106,8 @@ jobs:
         shell: pwsh
         run: |
           $sys = 'D:\cloudrdp-sys'
-          foreach ($f in @("$sys\_state\uu-remote.log", "$sys\_state\uu-remote.json")) {
+          foreach ($f in @("$sys\_state\uu-remote.log", "$sys\_state\uu-remote.json",
+                           "$sys\_state\connmail.log")) {
             if (Test-Path -LiteralPath $f) { "===== $f ====="; Get-Content -LiteralPath $f -Raw }
           }
 
@@ -86,7 +116,9 @@ jobs:
         shell: pwsh
         run: |
           $sys = 'D:\cloudrdp-sys'
-          $log = if (Test-Path "$sys\_state\uu-remote.log") { Get-Content "$sys\_state\uu-remote.log" -Raw } else { '' }
+          $log = (@("$sys\_state\uu-remote.log", "$sys\_state\connmail.log") |
+                    Where-Object { Test-Path -LiteralPath $_ } |
+                    ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n"
           if ('${{ inputs.dry_run }}' -eq 'true') { Write-Host 'DRY RUN —— 只渲染，不判定发信结果'; exit 0 }
           if ($log -match '已发送：')      { Write-Host '✅ 邮件已发送（见日志「已发送：<收件人>」）'; exit 0 }
           if ($log -match '未配置 ')       { Write-Host '⚠️ 仓库没配 MAIL_* Secrets —— 视为「未启用邮箱」，不是失败'; exit 0 }

@@ -2502,6 +2502,8 @@ def main():
           and "@cloudrdp>" not in mail_txt and "$midDomain" in mail_txt)
     check("T461 发信头补 Reply-To / Sender（与 From 域对齐，降垃圾评分）",
           "Reply-To: <" in mail_txt and "Sender: <" in mail_txt)
+    check("T462 mail-test 支持「重发连接信息」：conn_ip/conn_user/conn_pass → send-connection-mail.ps1",
+          "conn_ip" in mt_txt and "send-connection-mail.ps1" in mt_txt and "connmail.log" in mt_txt)
 
     # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
     # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，
