@@ -2549,6 +2549,13 @@ def main():
           and "[System.Text.Encoding]::ASCII, 4096, $true" not in mail_txt)
     check("T516 8bit 正文做 dot-stuffing（行首 '.' 会被 SMTP 当成正文结束 → 邮件被截断）",
           r"-replace '(?m)^\.', '..'" in mail_txt)
+    # 真机 #5（db51a87，mail-test）：精简后的正文仍被判 `550 … Mail rejected score is 18.537`；
+    # 而同一份正文 / 编码在 #3 却收 250 —— 139 这个反垃圾在**阈值边上抖动**。
+    # ⇒ 550 内容评分被拒也要重试，但退避要短（不是灰名单那套 60/120/240；0c1 步 timeout 只有 8 分钟）。
+    check("T517 ★ 550 内容评分被拒（Mail rejected score is N）也要重试 + 短退避（0c1 步 timeout 只有 8 分钟）",
+          "contentBackoffSec" in mail_txt and "$isContentReject" in mail_txt
+          and "MAIL_CONTENT_BACKOFF_SEC" in mail_txt
+          and r"(?i)Mail rejected|score is|content rejected" in mail_txt)
 
     # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
     # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，

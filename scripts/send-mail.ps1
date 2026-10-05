@@ -277,13 +277,26 @@ $maxAttempts = if ($env:MAIL_MAX_ATTEMPTS) { [int]$env:MAIL_MAX_ATTEMPTS } else 
 # 灰名单窗口通常是「几分钟」：首次发信 450 后，20s 就重连仍会被服务器掐断 TLS 握手。
 # 所以第一次退避至少 60s，逐级加长，避免在灰名单窗口内做无谓重连。
 $backoffSec  = if ($env:MAIL_BACKOFF_SEC) { @($env:MAIL_BACKOFF_SEC -split ',' | ForEach-Object { [int]$_.Trim() }) } else { @(60, 120, 240, 360) }
+# ★ 内容评分被拒（`550 … Mail rejected score is N`）也值得重试 —— 但退避要短。
+#   为什么：139 这个反垃圾是**阈值边上抖动**的，同一套内容时而收 250、时而收 550
+#   （真机实证：Mail Test #3 过 / #84 不过，都是同一份正文与编码），多试几次是有意义的。
+#   为什么不用灰名单那套 60/120/240：那不是灰名单，不需要等几分钟；而且 0c1 那步
+#   timeout 只有 8 分钟，用长退避会把整个 step 耗光、邮件反而发不出去。
+$contentBackoffSec = if ($env:MAIL_CONTENT_BACKOFF_SEC) { @($env:MAIL_CONTENT_BACKOFF_SEC -split ',' | ForEach-Object { [int]$_.Trim() }) } else { @(20, 45, 90) }
+$lastReject  = ''
 $attempt     = 0
 
 while ($true) {
     $attempt++
     if ($attempt -gt 1) {
-        $wait = $backoffSec[[Math]::Min($attempt - 2, $backoffSec.Count - 1)]
-        Write-MLog ("  → 临时性失败，{0}s 后重连重试（第 {1}/{2} 次）" -f $wait, $attempt, $maxAttempts)
+        $wait = if ($lastReject -eq 'content') {
+            $contentBackoffSec[[Math]::Min($attempt - 2, $contentBackoffSec.Count - 1)]
+        } else {
+            $backoffSec[[Math]::Min($attempt - 2, $backoffSec.Count - 1)]
+        }
+        Write-MLog ("  → {0}，{1}s 后重连重试（第 {2}/{3} 次）" -f `
+            $(if ($lastReject -eq 'content') { '内容被判垃圾（阈值边上抖动）' } else { '临时性失败' }), `
+            $wait, $attempt, $maxAttempts)
         Start-Sleep -Seconds $wait
     }
     $client = $null; $stream = $null; $reader = $null; $writer = $null
@@ -403,12 +416,20 @@ while ($true) {
         } elseif ($msg -match '(?i)ssl|tls|证书|certificate') {
             Write-MLog '  → TLS 协商失败：确认端口与加密方式匹配（465=隐式 SSL，587=STARTTLS）'
         }
-        # 值不值得重试：响应码 4xx，或超时 / 对端断连 / 连接被重置（5xx 与认证失败是永久错误）
+        # 值不值得重试：响应码 4xx，或超时 / 对端断连 / 连接被重置。
+        # 例外：`550 … Mail rejected score is N`（139 反垃圾「内容评分」超阈值）也**要重试** ——
+        #   它虽然报 5xx，但实测在阈值边上抖动（同内容时而 250 时而 550），重试有实际收益。
+        #   其余 5xx（含认证失败 535）仍是永久错误，直接失败，不白耗开机时间。
         $rc = 0
         if ($msg -match '实际\s+(\d{3})') { $rc = [int]$Matches[1] }
-        $transient = (($rc -ge 400) -and ($rc -lt 500)) -or `
+        $isContentReject = ($rc -eq 550) -and ($msg -match '(?i)Mail rejected|score is|content rejected')
+        if ($isContentReject) {
+            Write-MLog '  → 139 反垃圾「内容评分」超阈值（阈值边上抖动）—— 短退避重试；持续不过就精简正文'
+        }
+        $transient = (($rc -ge 400) -and ($rc -lt 500)) -or $isContentReject -or `
                      ($msg -match '(?i)timeout|超时|EOF|连接被对端关闭|forcibly|broken pipe|reset by peer|Unable to read data|failed to respond|connection attempt failed')
         if ($transient -and $attempt -lt $maxAttempts) {
+            $lastReject = if ($isContentReject) { 'content' } else { 'transient' }
             $retry = $true
         } else {
             if ($transient) { Write-MLog ("  → 临时性失败，但已重试 {0} 次，放弃" -f $maxAttempts) }
