@@ -2426,9 +2426,9 @@ def main():
           and "仅使用自定义验证码" in uu_txt)
     check("T443 自定义验证码默认 a1234567（8 位、字母+数字），可由 -CustomCode / CLOUDRDP_UU_CODE 覆盖",
           "'a1234567'" in uu_txt and "CLOUDRDP_UU_CODE" in uu_txt and "$CustomCode" in uu_txt)
-    check("T444 ★ 连接信息主推「设备 ID + 验证码」两项（控制台 / 桌面文件 / 邮件三处都对齐）",
+    check("T444 ★ 连接信息主推「设备 ID + 验证码」两项（桌面 txt 用原词；邮件为降评分改叫「连接码」）",
           "设备 ID    : $devLine" in uu_txt and "验证码     : $assistDisplay" in uu_txt
-          and "设备 ID : $devLine" in uu_txt and "验证码  : $assistDisplay" in uu_txt
+          and "设备 ID : $devLine" in uu_txt and "连接码  : $assistDisplay" in uu_txt
           and "主控端只输上面两项" in uu_txt)
     check("T445 ★ 桌面连接信息文件多目录回落（非管理员时 Public 桌面会被拒写 → 用户桌面 → 状态目录）",
           "uu-remote-info.txt" in uu_txt and "$env:USERPROFILE" in uu_txt
@@ -2452,8 +2452,10 @@ def main():
           "账户       : $uuUser" in uu_txt and "机器       : $machineLabel" in uu_txt
           and "账户    : $uuUser" in uu_txt and "机器    : $machineLabel" in uu_txt
           and "运行器名" in uu_txt and "仅排查" in uu_txt)
-    check("T450 ★ 邮件主题带「账户 … · 机器 …」，不再只有随机 deviceName",
-          "UU远程（账户 $uuUser · $machineLabel）" in uu_txt)
+    check("T450 ★ 邮件主题改**中性短句**（不再把 账户 / 机器 / 设备 ID / 验证码 全塞进主题 —— 那是 139 反垃圾加分项）",
+          '-Subject "CloudRDP 备用通道信息"' in uu_txt
+          and "备用通道 · UU远程" not in uu_txt
+          and "设备ID $devLine" not in uu_txt)
     check("T451 状态 JSON / GITHUB_ENV 透出 account + machine（工作台/后续步骤可用）",
           "machine = $machineLabel" in uu_txt and "UU_REMOTE_ACCOUNT=$uuUser" in uu_txt
           and "UU_REMOTE_MACHINE=$machineLabel" in uu_txt)
@@ -2514,6 +2516,39 @@ def main():
     check("T463 ★ mail-test 用**哈希表** splat 传命名参数（数组 splat 是位置绑定，会静默错绑）",
           "send-connection-mail.ps1 @h" in mt_txt and "install-uu-remote.ps1 @h" in mt_txt
           and "$h = @{" in mt_txt and "= @('-" not in mt_txt)
+
+    # ---------------- 真机 run #84：139 反垃圾**按内容评分**直接拒（`550 … score is 20.156`）-----
+    # 决定性证据（读云机 D:\cloudrdp-sys\_state\*.log 得来 —— Actions 日志里 secret 全被打成 ***，
+    # 只有机器自己写的 mail.log / uu-remote.log 是明文）：
+    #   12:34:37  0c1 这封（UU远程 连接信息）→ `[data] FAILED 期望 250，实际 550 … score is 20.156`
+    #   12:34:42  0e  那封（Tailscale 连接信息）→ `[done] 已发送：…`（DATA 收 250）
+    # 相隔 5 秒、同一发件人 / 收件人 / 邮件头 / 编码 / 出网 IP ⇒ **差别只在内容**，
+    # 与账号、发信 IP、CTE 编码都无关。⇒ 修法就是**改内容**：邮件版只留「怎么连」必需项。
+    _mb0 = uu_txt.index("$bodyLines = @(")
+    _mb1 = uu_txt.index("$body = ($bodyLines -join")
+    _uu_mail_body = uu_txt[_mb0:_mb1]
+    check("T512 ★ 邮件正文去反垃圾特征：不含「验证码」/ 品牌名 / 下载链接 / 内部排查块",
+          "验证码" not in _uu_mail_body and "网易" not in _uu_mail_body
+          and "GameViewer" not in _uu_mail_body and "http" not in _uu_mail_body
+          and "运行器名" not in _uu_mail_body and "内部设备码" not in _uu_mail_body)
+    check("T513 ★ 邮件正文只留「怎么连」必需项（机器 / 设备 ID / 连接码 三行 + 一句怎么用）",
+          "机器    : $machineLabel" in _uu_mail_body
+          and "设备 ID : $devLine" in _uu_mail_body
+          and "连接码  : $assistDisplay" in _uu_mail_body
+          and "怎么连" in _uu_mail_body)
+    check("T514 桌面 txt / Actions 日志仍保留**完整**信息（只有邮件精简 —— 那两处不过滤）",
+          "以下为排查信息" in uu_txt and "内部设备码" in uu_txt
+          and "运行器名" in uu_txt and "验证码  : $assistDisplay" in uu_txt)
+
+    # bf232d4 把正文从 base64 改成 8bit（原始 UTF-8），但**写入流还是 ASCII** ——
+    # StreamWriter 用 ASCII 编码中文会逐字替换成 '?'（本机实测：`中文测试` → 字节 3F 3F 3F 3F），
+    # 于是整封信正文变「????????」，比被拒收还糟。ASCII 是 UTF-8 子集，改 UTF-8 后
+    # 所有 SMTP 命令字节不变、只有正文变正确；**必须无 BOM**（BOM 会写在流开头，破坏 SMTP 会话）。
+    check("T515 ★ 写入流改 UTF-8（无 BOM）—— 否则 8bit 正文的中文全变 '?'（bf232d4 的回归）",
+          "New-Object System.Text.UTF8Encoding($false)" in mail_txt
+          and "[System.Text.Encoding]::ASCII, 4096, $true" not in mail_txt)
+    check("T516 8bit 正文做 dot-stuffing（行首 '.' 会被 SMTP 当成正文结束 → 邮件被截断）",
+          r"-replace '(?m)^\.', '..'" in mail_txt)
 
     # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
     # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，

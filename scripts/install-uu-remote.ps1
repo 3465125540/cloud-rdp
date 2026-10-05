@@ -646,33 +646,27 @@ try {
 # ---------------------------------------------------------------- 发信
 if ($NoMail -or $DryRun) { Say "已跳过发信（NoMail/DryRun）" }
 else {
+    # ★ 邮件正文刻意**精简** —— 139 的反垃圾是**按内容评分**的，超阈值直接拒
+    #   （真机 run #84：`550 … Mail rejected score is 20.156`）。
+    #   决定性证据：同一批发信、同一套邮件头 / 编码 / 发件人 / IP、相隔 5 秒，
+    #   0e 那封（结构相同、内容更素）当场收 250，只有这封被 550 —— **差别只在内容**，
+    #   与账号 / 发信 IP / CTE 编码无关。高判分特征全集中在这封：
+    #     ① 主题里塞了 IP + 设备 ID + 验证码（又长又像机器生成）；
+    #     ② 正文反复出现「验证码」（= 钓鱼邮件「您的验证码是 XXXX」的典型特征）；
+    #     ③ 品牌名（网易 / UU远程 / GameViewer）+ 下载链接（推广特征）；
+    #     ④ 一整段内部排查信息（运行器名 / 内部设备码 / 协助 id / 版本 …）。
+    #   ⇒ 邮件版只留「怎么连」必需的三行；品牌 / 链接 / 排查块一律不进邮件。
+    #   桌面 txt（$infoLines）与 Actions 日志仍然保留完整信息 —— 那两处不过滤。
     $bodyLines = @(
-        'CloudRDP 备用远程通道：UU远程（网易 GameViewer）'
+        'CloudRDP 备用通道已就绪，现在就能连。'
         ''
-        "  账户    : $uuUser（UU远程 连的就是它的控制台会话）"
         "  机器    : $machineLabel"
         "  设备 ID : $devLine"
-        "  验证码  : $assistDisplay"
+        "  连接码  : $assistDisplay"
         ''
-        '主控端只输上面两项：设备 ID + 验证码。'
+        '怎么连：安装「UU远程」客户端 -> 远程协助 -> 填上面的设备 ID 和连接码。'
         ''
-        '  ── 以下为排查信息，连接不需要 ──'
-        "  运行器名  : $($info.deviceName)（云机 = GitHub 托管运行器，每次开机都变，别记它）"
-        "  内部设备码: $($info.deviceId)"
-        "  协助 id   : $($info.assistId)"
-        "  版本      : $($info.version)"
-        "  安装      : $($install.note)"
-        "  自定义码  : $($codeSet.note)"
-        "  状态      : $state"
-        ''
-        '怎么连（备用通道）：'
-        '  1. 在手机 / 电脑装「网易UU远程」( https://uuyc.163.com/ )'
-        '  2. 打开 → 远程协助 → 输入「设备 ID + 验证码」'
-        '  3. 即可看到本机桌面（控制台会话）'
-        ''
-        '说明：验证码已由官方 CLI（uuyc-cli -c）固定为「仅使用自定义验证码」，不随刷新变化，可直接收藏设备。'
-        "注意：UU远程 连的是机器的控制台会话；若控制台不是 $uuUser，请在 $uuUser 桌面双击「切到 UU远程」。"
-        '（Tailscale 主通道见 0e 步那封邮件。）'
+        '这是主通道之外的备用方案；主通道信息见另一封邮件。'
         ''
         '-- 由 GitHub Actions 自动发送'
     )
@@ -681,7 +675,9 @@ else {
     if (Test-Path -LiteralPath $mailScript) {
         Say "发送 UU远程 连接信息到邮箱（日志：$LogPath）"
         try {
-            & $mailScript -Subject "CloudRDP 备用通道 · UU远程（账户 $uuUser · $machineLabel）设备ID $devLine · 验证码 $assistDisplay" -BodyText $body -MailTo $MailTo -LogPath $LogPath
+            # ★ 主题必须是**中性短句**：旧主题把 账户 / 机器 / 设备 ID / 验证码 全塞进去，
+            #   又长又像机器生成，是 139 反垃圾的加分项（真机 run #84 那封就栽在内容评分上）。
+            & $mailScript -Subject "CloudRDP 备用通道信息" -BodyText $body -MailTo $MailTo -LogPath $LogPath
             if ($LASTEXITCODE -eq 0) { Say "邮件已发送" }
             else { Warn "邮件发送失败（返回码 $LASTEXITCODE）—— 连接信息已明文打印在上方" }
         } catch { Warn "邮件发送异常：$($_.Exception.Message)" }

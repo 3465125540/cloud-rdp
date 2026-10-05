@@ -214,7 +214,14 @@ function New-SmtpReader([System.IO.Stream]$s) {
     return [System.IO.StreamReader]::new($s, [System.Text.Encoding]::ASCII, $false, 4096, $true)
 }
 function New-SmtpWriter([System.IO.Stream]$s) {
-    $w = [System.IO.StreamWriter]::new($s, [System.Text.Encoding]::ASCII, 4096, $true)
+    # ⚠️ 必须是 **UTF-8（无 BOM）**，不能用 ASCII ——
+    #   bf232d4 把正文改成 8bit（原始 UTF-8）后，写入流却还是 ASCII：
+    #   StreamWriter 用 ASCII 编码中文会**逐字替换成 '?'**（实测 `中文测试` → `3F 3F 3F 3F`），
+    #   于是整封信的正文变成「????????」，比被拒收还糟。ASCII 是 UTF-8 的子集，
+    #   所有 SMTP 命令（EHLO/AUTH/DATA…）走 UTF-8 后字节完全一致，不会影响协议。
+    #   必须无 BOM：带 BOM 会在**流的开头**（第一条命令前）写入 EF BB BF，直接破坏 SMTP 会话。
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $w = [System.IO.StreamWriter]::new($s, $utf8NoBom, 4096, $true)
     $w.NewLine = "`r`n"
     $w.AutoFlush = $true
     return $w
@@ -363,7 +370,11 @@ while ($true) {
 
         Set-MStage 'data'
         Invoke-SmtpCmd $writer $reader 'DATA' @(354) 'DATA' | Out-Null
-        $writer.Write($payload + "`r`n.`r`n")
+        # dot-stuffing（RFC 5321 §4.5.2）：8bit 正文是**原始文本**，可能整行以 '.' 开头 ——
+        # 而「单独一行的 .」在 SMTP 里是**正文结束**，不做转义就会把邮件截断。
+        # （旧的 base64 正文永远不含行首 '.'，所以以前不需要这一步。）
+        $wire = $payload -replace '(?m)^\.', '..'
+        $writer.Write($wire + "`r`n.`r`n")
         $writer.Flush()
         Invoke-SmtpCmd $writer $reader $null @(250) 'DATA end' | Out-Null
         Set-MStage 'quit'
