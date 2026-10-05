@@ -445,6 +445,25 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §24。
 
+### 机器运行实况「显示不同步」：实时纠偏扩到所有可读账号（v1.6.9）
+
+**现象**：池内机器行写着「运行中 · primary」，但那个 run 早已 `cancelled`、Tailscale 节点也离线。
+
+**根因**：实时纠偏**只认 hub 账号** —— `hub_live_probe()` / `live_runs_by_id()` 开头就是
+「owner 不是 `CONFIG["repo"]` 的 owner → 返回 None」，其余账号只能信协调器的 pool-state 快照
+（而协调器 cron 常被 GitHub 延迟数小时）。但**公开 fork 本机 token 明明读得到**，是被代码挡住了。
+
+**修法**：新增 `_account_runs()`（直查任意账号仓库的 runs，60s 缓存）+ `_account_live_rows()`
+（hub 走缓存、其余直查）；`hub_live_probe` 改名 `account_live_probe`；`live_runs_by_id` 同改。
+读不到的（私有 fork）仍退回快照，但池行新增 `state_age_human` / `state_stale`，
+前端把徽标降级成 **「运行中 · 未核实」**（黄）+ 详情行摊出「快照 N 小时前」，不再硬说「运行中」。
+
+> ⚠️ 快照阈值 `POOL_SNAPSHOT_STALE_SECS = 90 分钟`。协调器正常节奏约 3 小时，
+> 所以**私有账号**的池行通常会带「未核实」标记 —— 那是事实，不是 bug。
+> ⚠️ 本批改的是 server.py → **要重启工作台**才生效（前端改动刷新即可）。
+
+详见主 README 第四节 §25。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -657,7 +676,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（583 项）
+├── selftest.py           # 离线自测（594 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

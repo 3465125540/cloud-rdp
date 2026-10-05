@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（583 项）
+python workbench\selftest.py   :: 离线自测（594 项）
 ```
 
 | 面板 | 内容 |
@@ -1514,6 +1514,53 @@ acc-1（账号被停用）/ acc-4（Actions 被禁用）虽然永远派发失败
 > —— 这正是「其余机器都不可用」的情形。③ 本次**没动用户的 `enabled` 开关**：acc-1/acc-4 仍是启用状态，
 > 只是被 `-ExcludeOwners` 动态跳过（账号恢复即自动回归）。
 
+### 25. 机器运行实况「显示不同步」：实时纠偏扩到所有可读账号（v1.6.9）
+
+**现象**（瑀子 2026-10-05）：机器运行实况里 acc-5 那行写着
+
+```
+code19698fgh / 池内机器 · primary / 100.126.147.85 / 运行中
+Actions job 运行中 · run 37269211081 · 自 2026/10/5-13:45
+```
+
+可它的 run **早已 cancelled**（GitHub：`completed/cancelled`，14:24:38Z 结束），Tailscale 节点也早已离线。
+
+**根因**：实时纠偏**只认 hub 账号**。`hub_live_probe()` / `live_runs_by_id()` 第一件事就是
+`if owner != CONFIG["repo"] 的 owner: return None` —— 于是 acc-5 这种账号只能信协调器发布的
+**pool-state 快照**；而协调器 cron 常被 GitHub 延迟数小时（这次快照 6 小时前），
+快照里那个 run 当然还写着 `in_progress`。
+
+**关键点**：acc-5 的 fork 是**公开仓库**，工作台的 token（甚至匿名）本来就读得到它的 actions runs
+—— 也就是说这行**本来就能实时核对**，只是代码把它挡在了门外。
+
+**修法**：
+
+| 改动 | 说明 |
+|------|------|
+| 新增 `_account_runs(owner, repo)` | 直查**任意账号**仓库的 workflow runs（60 秒缓存）；读不到（私有 fork / 无权限 / 离线）返回 `None`，调用方退回 pool-state |
+| 新增 `_account_live_rows(owner, repo)` | hub 走已有的 runs 缓存（零额外请求）；其余账号走 `_account_runs` |
+| `hub_live_probe` → **`account_live_probe`** | 名字不再骗人：能读到的账号都实时探测（「账号面板」的在跑台数 / 最近 run 一起受益） |
+| `live_runs_by_id` 改走 `_account_live_rows` | 「机器运行实况」的池内机器行也按实时 run 纠偏 |
+| 池行新增 `state_age_human` / `state_stale` | 快照年龄（人话）+ 「是否已陈旧到不能当准」（> 90 分钟） |
+
+**兜底（读不到的账号）**：私有 fork / 无权限时仍然只能信快照 —— 但**不再硬说「运行中」**：
+快照超过 `POOL_SNAPSHOT_STALE_SECS`（90 分钟）就把徽标降级成 **「运行中 · 未核实」**（黄），
+详情行摊出「快照 6.0 小时前」，tooltip 说清「本机读不到该账号的 fork，无法实时核对」。
+
+**验证**：`selftest.py` **594 PASS / 0 FAIL**（本批 T504–T511）；另**导入改后的 server.py 跑真实代码路径**：
+
+| 检查 | 结果 |
+|------|------|
+| `account_live_probe('code19698fgh')` | `alive=0 running=0`，`last_run=37269211081 completed/cancelled` ← 实时读到了 |
+| `account_live_probe('3465125540')`（hub） | `alive=1 running=1`，`last_run=37310199415 in_progress` |
+| `account_live_probe('yc1966asgf')` / `('code1969sda')` | `None`（读不到 → 退回快照，前端标「未核实」） |
+| `pool_machine_rows(...)` 的 acc-5 行 | `machine_state=ended`、`run_source=live`、`stale=False` ← **不再是「运行中」** |
+| 前端 `poolOnlyRow()` 5 个场景 | 10 项断言全过（陈旧快照→未核实 / 新鲜快照→运行中 / live→不提快照 / live 已结束→已结束 / 陈旧已结束→已结束） |
+
+> **诚实边界**：① 私有 fork（如 acc-4）本机读不到 runs，仍只能信快照 —— 但界面会如实标「未核实 + 快照年龄」，
+> 不再假装知道。② 快照阈值取 90 分钟：协调器正常节奏约 3 小时，所以**私有账号**的池行通常会带「未核实」
+> 标记 —— 这是事实，不是 bug。③ 本批只改**显示与核对口径**，不改协调器、不改池状态。
+
 ## 五、目录结构
 
 ```
@@ -1521,7 +1568,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（583 项）
+│   ├── selftest.py                     #   离线自测（594 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1620,6 +1667,7 @@ cloud-rdp/
 | **账号「凭证」列显示「查询失败」+ 一串 .NET 异常（`403 (Forbidden)`）** | 该账号的 PAT（如 `POOL_TOKEN_1`）**失效**了 —— 协调器用它读 runs / 同步 fork / 派发机器全被 403 拒绝；面板原来把 .NET 异常原样摊出来 | **v1.6.6 起**：翻译成「凭证被拒 · 403」并给出行动建议（重新生成 PAT → 更新该 Secret）；401/404/429 各有对应文案，原始串降级到 tooltip。详见第四节 §22 |
 | **账号面板只显示 `403 (Forbidden)` / `422`，看不到原因** | `Invoke-RestMethod` 抛错时**响应体已被 dispose**，catch 里 `GetResponseStream()` 永远读到空串 → GitHub 的 `message` 永久丢失；且「派发失败」原来不写进池状态，面板根本看不到 | **v1.6.7 起**：`Invoke-GhApi` 改用 `-SkipHttpErrorCheck` 保住响应体并把 message 拼进异常；协调器把「派发失败」写进账号 note；面板识别「账号被停用 / Actions 被禁用 / 派发被拒 · 422」。详见第四节 §23 |
 | **想让某个账号少用点（当兜底）、或界面上一堆失效账号太吵** | 原来候选顺序就是 pool-config 里的账号顺序，hub 账号总被优先；失效账号既占候选位又占屏幕 | **v1.6.8 起**：账号项加 `"reserve": true` 即降为**兜底**（只在第一梯队全不可用时才派）；协调器同时排除「已知不可用」账号（凭证坏/派发失败），死账号不再占位。前端新增「**隐藏失效账号**」按钮，一键藏掉失效账号的账号表 + 运行日志。详见第四节 §24 |
+| **机器运行实况显示「运行中」，但机器其实早没了** | 池内机器行的状态来自协调器发布的 pool-state 快照，而实时纠偏原来**只认 hub 账号**；其余账号（哪怕 fork 是公开的、本机明明读得到）一律退回快照 —— 协调器 cron 又常被延迟数小时 | **v1.6.9 起**：实时纠偏扩到**所有读得到的账号**（`_account_runs` 直查各 fork 的 runs）；读不到的（私有 fork）把徽标降级成「运行中 · 未核实」并在详情行摊出快照年龄。详见第四节 §25 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

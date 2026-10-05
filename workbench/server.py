@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.8"
+VERSION = "1.6.9"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1142,6 +1142,14 @@ def pool_machine_rows(pool_state, machines):
     st = (pool_state or {}).get("state") or {}
     if not isinstance(st, dict):
         return []
+    # 快照年龄：pool-state 是协调器几小时前发的（cron 常被 GitHub 延迟数小时）。
+    # 行里带上年龄 → 前端在「没核对过实时 run」时能如实标「未核实」，而不是硬说「运行中」。
+    snap_age = None
+    _dt = parse_iso(st.get("updated_utc") or "")
+    if _dt:
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=timezone.utc)
+        snap_age = (datetime.now(timezone.utc) - _dt).total_seconds()
     # 有在线节点的账号集合：池状态里同一账号可能占多个槽位（primary + standby 各一条），
     # 只要该账号有在线机器就不补行 —— 否则会把「其实在线」的账号误报成「Tailscale 未上线」。
     online_accs = set()
@@ -1197,6 +1205,10 @@ def pool_machine_rows(pool_state, machines):
             "run_conclusion": run.get("conclusion") or "",
             "run_url": url,
             "run_source": run_source,   # live=已按实时 run 核对；pool-state=协调器快照（可能陈旧）
+            # 快照年龄（人话）与「是否已陈旧到不能当准」—— 前端据此把「运行中」降级成「未核实」
+            "state_age_human": human_age(st.get("updated_utc") or ""),
+            "state_stale": bool(run_source != "live" and snap_age
+                                and snap_age > POOL_SNAPSHOT_STALE_SECS),
             # 机器状态口径：job in_progress ⇒ running（机器确实在跑）。
             # 前端按它出徽标，避免「job 在跑却显示未上线」的自相矛盾。
             "machine_state": pool_run_state(run.get("status")),
@@ -1709,25 +1721,62 @@ def shape_last_run(r):
     }
 
 
-def hub_live_probe(owner, repo_name):
-    """hub 账号 = 工作台自己配的那个仓库。
+# 池状态快照超过这么久（秒）还没被实时核对过 → 前端把「运行中」降级成「运行中 · 未核实」。
+# 协调器的 cron 常被 GitHub 延迟数小时，所以这个阈值不能太小（否则正常的 3 小时节奏也会一直被标黄）。
+POOL_SNAPSHOT_STALE_SECS = 90 * 60
 
-    对 hub 账号可以拿本机 token 实时探测（复用已缓存的 runs，不额外发请求），
-    比协调器 10 分钟一次的结果新鲜得多。非 hub 账号返回 None（只能靠 pool-state）。
+
+def _account_runs(owner, repo_name, wf="windows-rdp.yml", ttl=60):
+    """查某个账号仓库的 workflow runs（带 60 秒缓存）；读不到返回 None（不抛）。
+
+    为什么工作台能查**别的账号**的仓库：公开 fork 用本机 token（甚至匿名）就能读 actions runs。
+    私有 fork 读不到 → None，调用方退回协调器发布的 pool-state 快照。
+    """
+    key = "acct-runs:%s/%s" % (owner, repo_name)
+
+    def probe():
+        if OFFLINE:
+            return {"ok": False, "runs": []}
+        try:
+            d = gh_api("/repos/%s/%s/actions/workflows/%s/runs" % (owner, repo_name, wf),
+                       params={"per_page": 20})
+        except Exception:
+            return {"ok": False, "runs": []}
+        return {"ok": True, "runs": [_shape_run(r) for r in (d.get("workflow_runs") or [])]}
+
+    r = cached(key, ttl, probe)
+    return r.get("runs") if r.get("ok") else None
+
+
+def _account_live_rows(owner, repo_name):
+    """某账号**实时**的 runs 列表（新→旧）；拿不到返回 None。
+
+    hub 账号复用已有的 runs 缓存（零额外请求）；其余账号直查它自己的仓库
+    —— 公开 fork 本机 token 就能读，不必非等协调器几小时一次的 pool-state。
     """
     cfg_repo = str(CONFIG.get("repo") or "")
-    if "/" not in cfg_repo:
+    if "/" in cfg_repo:
+        h_owner, h_repo = cfg_repo.split("/", 1)
+        if str(owner) == h_owner and str(repo_name) == h_repo:
+            try:
+                runs = get_runs(workflow_key="keepalive")
+            except Exception:
+                return None
+            return (runs.get("keepalive") or []) if runs.get("ok") else None
+    return _account_runs(owner, repo_name)
+
+
+def account_live_probe(owner, repo_name):
+    """实时探测某账号的在跑机 → {alive_count, running_count, queued_count, last_run}；查不到 None。
+
+    ⚠️ 老版本只认 hub 账号（原名 `hub_live_probe`），其余账号一律退回协调器几小时前的
+    pool-state 快照 —— 于是**公开 fork**（本机 token 明明读得到）也会一直显示「运行中」，
+    直到协调器下次跑。瑀子 2026-10-05 报「机器运行实况 显示不同步」就是这么来的
+    （acc-5 的 run 早已 cancelled，面板还在说「运行中 · primary」）。现在能读到的都实时读。
+    """
+    rows = _account_live_rows(owner, repo_name)
+    if rows is None:
         return None
-    h_owner, h_repo = cfg_repo.split("/", 1)
-    if str(owner) != h_owner or str(repo_name) != h_repo:
-        return None
-    try:
-        runs = get_runs(workflow_key="keepalive")
-    except Exception:
-        return None
-    if not runs.get("ok"):
-        return None
-    rows = runs.get("keepalive") or []
     # ⚠️ 字段名骗人：`_shape_run` 里的 "in_progress" 真实口径是「**未结束**」
     #    （含 pending / queued / waiting / requested），并不是 GitHub 的 status=="in_progress"。
     #    于是「在跑 N 台」会把「已派发但还在排队、机器根本没起来」的 run 也算进去 ——
@@ -1742,30 +1791,18 @@ def hub_live_probe(owner, repo_name):
 
 
 def live_runs_by_id(owner, repo_name):
-    """hub 账号（= 工作台自己配的那个仓库）→ {run_id(str): 实时 run}；非 hub → None。
-
-    与 hub_live_probe 同一思路：本机 token 能直接查 hub 的 runs（**走同一份缓存**，
-    几乎零成本），比协调器几小时一次的 pool-state 新鲜得多。
+    """{run_id(str): 实时 run}；拿不到返回 None（调用方退回 pool-state 快照）。
 
     为什么需要：`pool_machine_rows` 原来直接信 pool-state 的 `last_run`，于是
     「协调器抓快照时 run 还在 in_progress、之后 run 已结束、但协调器还没重跑」
     的窗口里，机器实况会一直显示「运行中」—— 而账号面板（走 live）早已显示「已结束」，
     两个面板打架。这里让机器实况也按实时 run 纠偏，两边口径一致。
     """
-    cfg_repo = str(CONFIG.get("repo") or "")
-    if "/" not in cfg_repo:
-        return None
-    h_owner, h_repo = cfg_repo.split("/", 1)
-    if str(owner) != h_owner or str(repo_name) != h_repo:
-        return None
-    try:
-        runs = get_runs(workflow_key="keepalive")
-    except Exception:
-        return None
-    if not runs.get("ok"):
+    rows = _account_live_rows(owner, repo_name)
+    if rows is None:
         return None
     m = {}
-    for r in (runs.get("keepalive") or []):
+    for r in rows:
         if r.get("id") is not None:
             m[str(r["id"])] = r
     return m
@@ -1817,7 +1854,7 @@ def get_accounts():
 
         # hub 账号：实时探测（复用缓存，几乎零成本）
         if enabled:
-            live = hub_live_probe(owner, repo_name)
+            live = account_live_probe(owner, repo_name)
             if live:
                 alive_count = live["alive_count"]
                 running_count = live.get("running_count")
@@ -2060,7 +2097,7 @@ def get_runs(limit=None, workflow_key=None, include_accounts=False):
     """拉两个 workflow 的最近 run。workflow_key 为 None 表示两个都要。
 
     include_accounts=True 时额外按账号拉各自 fork 的 run（「分账号」日志视图用）。
-    默认 False：hub_live_probe 每次巡检也会调这里，别让它顺带打一圈各账号的 API。
+    默认 False：account_live_probe 每次巡检也会调这里（hub 账号走这份缓存），别让它顺带打一圈各账号的 API。
     """
     # 注意：n 必须单独命名 —— 若在 probe() 里写 limit = ...，
     # 会让 limit 变成 probe 的局部变量，右侧读它即 UnboundLocalError。

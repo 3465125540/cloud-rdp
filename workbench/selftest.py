@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.8", server.VERSION == "1.6.8", server.VERSION)
+    check("T168 server.py 版本 1.6.9", server.VERSION == "1.6.9", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2723,6 +2723,40 @@ def main():
           "if (a.reserve) {" in app_txt and ">兜底</span>" in app_txt)
     check("T503 隐藏后统计里说明藏了几个（免得以为账号变少了）",
           '"已隐藏 " + deadRows.length + " 个失效账号"' in app_txt)
+
+    # ---------------- 机器实况「显示不同步」：实时纠偏扩到所有可读账号（v1.6.9） ----------------
+    # 需求（瑀子 2026-10-05）：机器运行实况显示不同步 —— acc-5 的池内行说「运行中 · primary」，
+    #   而它的 run 早已 cancelled、Tailscale 节点早已离线。
+    #   根因：实时纠偏只认 hub 账号（`hub_live_probe` / `live_runs_by_id` 都硬比 CONFIG["repo"]），
+    #   其余账号一律退回协调器几小时前的 pool-state 快照 —— 而**公开 fork** 本机 token 明明读得到。
+    print("[机器实况 实时纠偏 v1.6.9]")
+    srv_txt = open(os.path.join(repo_dir, "workbench", "server.py"), encoding="utf-8").read()
+    check("T504 ★ 实时探测不再只认 hub：新增 _account_runs（直查任意账号仓库的 runs）",
+          "def _account_runs(owner, repo_name" in srv_txt
+          and '"/repos/%s/%s/actions/workflows/%s/runs"' in srv_txt
+          and 'key = "acct-runs:%s/%s" % (owner, repo_name)' in srv_txt)
+    check("T505 ★ _account_live_rows：hub 走缓存、其余账号直查自己的仓库",
+          "def _account_live_rows(owner, repo_name)" in srv_txt
+          and "return _account_runs(owner, repo_name)" in srv_txt
+          and "return (runs.get(\"keepalive\") or []) if runs.get(\"ok\") else None" in srv_txt)
+    check("T506 ★ hub_live_probe → account_live_probe（名字不再骗人），get_accounts 跟着改",
+          "def account_live_probe(owner, repo_name)" in srv_txt
+          and "def hub_live_probe(" not in srv_txt
+          and "live = account_live_probe(owner, repo_name)" in srv_txt)
+    check("T507 ★ live_runs_by_id 也走 _account_live_rows（池内机器行才能实时纠偏）",
+          "def live_runs_by_id(owner, repo_name)" in srv_txt
+          and "rows = _account_live_rows(owner, repo_name)" in srv_txt)
+    check("T508 ★ 池内机器行带出「快照年龄 + 是否陈旧」",
+          "POOL_SNAPSHOT_STALE_SECS = 90 * 60" in srv_txt
+          and '"state_age_human": human_age(st.get("updated_utc") or ""),' in srv_txt
+          and '"state_stale": bool(run_source != "live" and snap_age' in srv_txt)
+    check("T509 ★ 前端：没实时核对过且快照陈旧 → 徽标降级「运行中 · 未核实」",
+          'badge("运行中 · 未核实", "warn")' in app_txt
+          and 'var unverified = m.run_source !== "live" && !!m.state_stale;' in app_txt)
+    check("T510 ★ 前端：池行详情里摊出快照年龄，tooltip 说清「无法实时核对」",
+          '" · 快照 " + esc(m.state_age_human)' in app_txt and "无法实时核对" in app_txt)
+    check("T511 已实时核对（live）的行不再提快照年龄（避免噪音）",
+          'm.run_source !== "live" && m.state_age_human ? " · 快照 "' in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

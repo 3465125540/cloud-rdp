@@ -516,18 +516,28 @@ function poolOnlyRow(m) {
   // 这个状态从哪来：live = 已按 GitHub 实时 run 核对；pool-state = 协调器快照（可能陈旧数小时）
   var liveNote = m.run_source === "live"
     ? "（已按 GitHub 实时 run 核对，非协调器快照）" : "";
+  // 「没核对过实时 run」且快照已陈旧 → 不能把「运行中」当准话说。
+  // 私有 fork / 无权限时本机读不到该账号的 run，只能信协调器快照；而协调器 cron 常被 GitHub
+  // 延迟数小时 —— 于是面板会一直说「运行中」，机器其实早就没了（瑀子 2026-10-05 报的不同步）。
+  var unverified = m.run_source !== "live" && !!m.state_stale;
+  var snapNote = (m.run_source !== "live" && m.state_age_human)
+    ? "　⚠️ 协调器快照是 " + m.state_age_human + "的，且本机读不到该账号的 fork" +
+      "（私有 / 无权限），无法实时核对 —— 这条状态可能早已过期。"
+    : "";
   var concl = m.run_conclusion || "";
   if (state === "running") {
     // 一次性 runner 的存在性 = job 的存在性：job 在跑 ⇒ 机器在跑。
-    badgeHtml = badge("运行中", "ok");
-    tip = "GitHub Actions 的 job 仍是 in_progress —— 这台机器确实在运行" + liveNote + "。" +
+    badgeHtml = unverified ? badge("运行中 · 未核实", "warn") : badge("运行中", "ok");
+    tip = (unverified
+        ? "协调器快照说这个 job 还在跑，但**本机无法实时核对**（读不到该账号 fork 的 runs）。"
+        : "GitHub Actions 的 job 仍是 in_progress —— 这台机器确实在运行" + liveNote + "。") +
       "本机 Tailscale 视图看不到它的节点（tailnet 状态同步滞后 / 节点掉线都可能），" +
       (ip ? "IP 是从它自己的 job 日志里读出来的。" : "IP 也读不到（job 日志拿不到）。") +
-      "点右侧「运行日志」可看实时进度。";
+      "点右侧「运行日志」可看实时进度。" + snapNote;
   } else if (state === "dispatched") {
-    badgeHtml = badge("已派发 · 排队中", "warn");
+    badgeHtml = unverified ? badge("已派发 · 未核实", "warn") : badge("已派发 · 排队中", "warn");
     tip = "账号池已把这台派出去，但 job 还没进入运行（排队 / 等待启动）" + liveNote + "。" +
-      "本机 Tailscale 视图也还没看到它的节点。" + (ip ? "IP 已从 job 日志读到。" : "");
+      "本机 Tailscale 视图也还没看到它的节点。" + (ip ? "IP 已从 job 日志读到。" : "") + snapNote;
   } else if (state === "ended") {
     badgeHtml = badge(concl === "success" ? "已结束 · 成功" : "已结束", "mute");
     tip = "这个池槽位对应的 run 已经结束（" + (concl || "无结论") + "）" + liveNote +
@@ -538,11 +548,13 @@ function poolOnlyRow(m) {
   } else {
     badgeHtml = badge("已派发 · 状态未知", "warn");
     tip = "账号池里这个槽位被占用，但拿不到对应 run 的状态（例如 fork 仓库不可读 / run_id 缺失）。" +
-      "本机 Tailscale 视图也看不到它的节点。";
+      "本机 Tailscale 视图也看不到它的节点。" + snapNote;
   }
   var detail = '<div class="uptime muted">' + esc(stText) +
     (m.run_id ? " · run " + esc(String(m.run_id)) : "") +
-    (since ? " · 自 " + esc(since) : "") + "</div>";
+    (since ? " · 自 " + esc(since) : "") +
+    // 没实时核对过就把快照年龄摊出来，让人自己判断这条状态还能不能信
+    (m.run_source !== "live" && m.state_age_human ? " · 快照 " + esc(m.state_age_human) : "") + "</div>";
   var st = statusCell(badgeHtml, detail, machineKey(m));
 
   // IP 列：有就显示真 IP（来源写进 tooltip），没有才留「—」并说明为什么。
