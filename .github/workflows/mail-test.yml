@@ -83,11 +83,13 @@ jobs:
           $sys = 'D:\cloudrdp-sys'
           New-Item -ItemType Directory -Force -Path "$sys\_state" | Out-Null
           $env:CLOUDRDP_SYS_DIR = $sys
-          $a = @('-Ip', '${{ inputs.conn_ip }}', '-LogPath', "$sys\_state\connmail.log")
-          if ('${{ inputs.conn_user }}' -ne '') { $a += @('-User', '${{ inputs.conn_user }}') }
-          if ('${{ inputs.conn_pass }}' -ne '') { $a += @('-Pass', '${{ inputs.conn_pass }}') }
-          if ('${{ inputs.dry_run }}' -eq 'true') { $a += '-DryRun' }
-          .\scripts\send-connection-mail.ps1 @a
+          # ⚠️ 必须用**哈希表** splat：数组 splat（@('-Ip','x')）是**按位置**绑定的，
+          #    '-Ip' 会被当成位置参数的值 —— 真机实测「A positional parameter cannot be found」。
+          $h = @{ Ip = '${{ inputs.conn_ip }}'; LogPath = "$sys\_state\connmail.log" }
+          if ('${{ inputs.conn_user }}' -ne '') { $h.User = '${{ inputs.conn_user }}' }
+          if ('${{ inputs.conn_pass }}' -ne '') { $h.Pass = '${{ inputs.conn_pass }}' }
+          if ('${{ inputs.dry_run }}' -eq 'true') { $h.DryRun = $true }
+          .\scripts\send-connection-mail.ps1 @h
 
       - name: 0c1 连接信息 + 发信（单跑）
         if: ${{ inputs.conn_ip == '' }}
@@ -96,10 +98,11 @@ jobs:
           $sys = 'D:\cloudrdp-sys'
           New-Item -ItemType Directory -Force -Path "$sys\_state" | Out-Null
           $env:CLOUDRDP_SYS_DIR = $sys
-          $a = @('-LogPath', "$sys\_state\uu-remote.log")
-          if ('${{ inputs.install_uu }}' -ne 'true') { $a += '-SkipInstall' }
-          if ('${{ inputs.dry_run }}' -eq 'true')    { $a += '-DryRun' }
-          .\scripts\install-uu-remote.ps1 @a
+          # ⚠️ 同上：哈希表 splat，别用数组 splat（数组是位置绑定 → -LogPath 会被当位置值）。
+          $h = @{ LogPath = "$sys\_state\uu-remote.log" }
+          if ('${{ inputs.install_uu }}' -ne 'true') { $h.SkipInstall = $true }
+          if ('${{ inputs.dry_run }}' -eq 'true')    { $h.DryRun = $true }
+          .\scripts\install-uu-remote.ps1 @h
 
       - name: 回显状态与 SMTP 对话（Actions 日志里直接看）
         if: always()

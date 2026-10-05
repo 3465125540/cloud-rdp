@@ -2504,6 +2504,12 @@ def main():
           "Reply-To: <" in mail_txt and "Sender: <" in mail_txt)
     check("T462 mail-test 支持「重发连接信息」：conn_ip/conn_user/conn_pass → send-connection-mail.ps1",
           "conn_ip" in mt_txt and "send-connection-mail.ps1" in mt_txt and "connmail.log" in mt_txt)
+    # ★ 数组 splat（@('-Ip','x')）是**按位置**绑定的 —— '-Ip' 会被当成位置参数的值，
+    #   真机实测报「A positional parameter cannot be found that accepts argument 'a'」。
+    #   必须用哈希表 splat（@h / $h = @{...}）。旧 0c1 步也踩了这个坑（静默错绑 InstallDir/DataDir）。
+    check("T463 ★ mail-test 用**哈希表** splat 传命名参数（数组 splat 是位置绑定，会静默错绑）",
+          "send-connection-mail.ps1 @h" in mt_txt and "install-uu-remote.ps1 @h" in mt_txt
+          and "$h = @{" in mt_txt and "= @('-" not in mt_txt)
 
     # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
     # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，
