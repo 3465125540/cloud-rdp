@@ -155,14 +155,30 @@ for ($i = 0; $i -lt $b64.Length; $i += 76) {
 }
 $bodyB64 = $sb.ToString().TrimEnd()
 
+# Message-ID 的域必须是**真实 FQDN**。原来写死 `@cloudrdp`（无点）——
+# 真机 2026-10-05：139 邮箱（smtp.139.com → 19955650119@139.com + milkyaizj@139.com）
+# SMTP 全绿收 250，两个收件箱都收不到；这种「域名不合法」的邮件头正是被判垃圾/静默丢弃的典型。
+# 取发件人域（如 139.com），最稳。
+$midDomain = 'cloudrdp.local'
+try {
+    $at = ([string]$MailFrom).LastIndexOf('@')
+    if ($at -gt 0) {
+        $d = ([string]$MailFrom).Substring($at + 1).Trim()
+        if ($d -match '\.') { $midDomain = $d }
+    }
+} catch { }
+
 $hdr = [System.Text.StringBuilder]::new()
 [void]$hdr.Append('From: ' + (Format-AddrHeader $FromName $MailFrom) + "`r`n")
+# Reply-To / Sender 与 From 对齐 —— 部分服务器会校验「From 域 == Sender 域」，缺了会降信誉
+[void]$hdr.Append('Reply-To: <' + $MailFrom + '>' + "`r`n")
+[void]$hdr.Append('Sender: <' + $MailFrom + '>' + "`r`n")
 [void]$hdr.Append('To: ' + ($toList -join ', ') + "`r`n")
 if ($ccList.Count -gt 0) { [void]$hdr.Append('Cc: ' + ($ccList -join ', ') + "`r`n") }
 [void]$hdr.Append('Subject: ' + (Format-Rfc2047 $Subject) + "`r`n")
 # 必须 ToUniversalTime()：'r' 只格式化本地时间再拼字面量 "GMT"，直接用会差一个时区
 [void]$hdr.Append('Date: ' + (Get-Date).ToUniversalTime().ToString('r') + "`r`n")
-[void]$hdr.Append('Message-ID: <' + [guid]::NewGuid().ToString('N') + '@cloudrdp>' + "`r`n")
+[void]$hdr.Append('Message-ID: <' + [guid]::NewGuid().ToString('N') + '@' + $midDomain + '>' + "`r`n")
 [void]$hdr.Append("MIME-Version: 1.0`r`n")
 [void]$hdr.Append("Content-Type: text/plain; charset=utf-8`r`n")
 [void]$hdr.Append("Content-Transfer-Encoding: base64`r`n")

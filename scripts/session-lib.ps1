@@ -252,6 +252,23 @@ function Invoke-RdpSessionHandover {
     }
 }
 
+# ── 复制脚本到持久目录 —— ⚠️ 源 == 目标时必须跳过 ─────────────────────────────
+# 真机 2026-10-05（run #82/#84）：0b2 / connmail 调 Install-RdpSessionHandoverTask 时，
+# ① 先把脚本拷进 D:\cloudrdp-sys\scripts，再把**已部署的那个路径**传给 ③；
+# ③ 于是 Copy-Item 源=目标 → PS7 报「Cannot overwrite the item … with itself.」→ **③ 永远装不上**。
+# 修法：源和目标解析成绝对路径后相等就直接返回（幂等，不报错）。
+function Copy-RdpFileIfDifferent {
+    [CmdletBinding()]
+    param([string]$Src, [string]$Dst)
+    try {
+        if ([string]::IsNullOrWhiteSpace($Src) -or [string]::IsNullOrWhiteSpace($Dst)) { return $false }
+        if (-not (Test-Path -LiteralPath $Src)) { return $false }
+        if ([System.IO.Path]::GetFullPath($Src) -ieq [System.IO.Path]::GetFullPath($Dst)) { return $false }
+        Copy-Item -LiteralPath $Src -Destination $Dst -Force
+        return $true
+    } catch { return $false }
+}
+
 function Install-RdpSessionHandoverShortcut {
     [CmdletBinding()]
     param([string]$RdpUser = 'a', [string]$ScriptPath)
@@ -318,9 +335,9 @@ function Install-RdpSessionHandoverTask {
 
         $srcDir = Split-Path -Parent $ScriptPath
         $dstScript = Join-Path $dstDir 'session-handover.ps1'
-        Copy-Item -LiteralPath $ScriptPath -Destination $dstScript -Force
+        Copy-RdpFileIfDifferent $ScriptPath $dstScript | Out-Null
         $libSrc = Join-Path $srcDir 'session-lib.ps1'
-        if (Test-Path -LiteralPath $libSrc) { Copy-Item -LiteralPath $libSrc -Destination (Join-Path $dstDir 'session-lib.ps1') -Force }
+        Copy-RdpFileIfDifferent $libSrc (Join-Path $dstDir 'session-lib.ps1') | Out-Null
         $res.script = $dstScript
 
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -383,9 +400,9 @@ function Install-RdpSessionAutoHandoverTask {
 
         $srcDir = Split-Path -Parent $ScriptPath
         $dstScript = Join-Path $dstDir 'session-handover.ps1'
-        Copy-Item -LiteralPath $ScriptPath -Destination $dstScript -Force
+        Copy-RdpFileIfDifferent $ScriptPath $dstScript | Out-Null
         $libSrc = Join-Path $srcDir 'session-lib.ps1'
-        if (Test-Path -LiteralPath $libSrc) { Copy-Item -LiteralPath $libSrc -Destination (Join-Path $dstDir 'session-lib.ps1') -Force }
+        Copy-RdpFileIfDifferent $libSrc (Join-Path $dstDir 'session-lib.ps1') | Out-Null
         $res.script = $dstScript
 
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -494,18 +511,23 @@ function New-RdpUserSession {
         $out.note = "写 .rdp 失败：$($_.Exception.Message)"; $out.steps = $steps; return [pscustomobject]$out
     }
 
+    # 诊断：本进程在哪个会话（session 0 = 无交互桌面 → mstsc 起不来 / 连不上）
+    try { $steps.Add("本进程会话 ID=$((Get-Process -Id $PID).SessionId) SESSIONNAME=$env:SESSIONNAME") } catch { }
+
     # ③ 起 mstsc —— 必须在**交互会话**里才有桌面（workflow 步就跑在 runneradmin 的交互会话）
     $proc = $null
     try {
         $proc = Start-Process -FilePath $mstsc -ArgumentList ('"' + $rdp + '"') -PassThru -ErrorAction Stop
-        $steps.Add("已起 mstsc pid=$($proc.Id)")
+        $steps.Add("已起 mstsc pid=$($proc.Id)（.rdp）")
     } catch {
         $out.note = "起 mstsc 失败：$($_.Exception.Message)"; $out.steps = $steps; return [pscustomobject]$out
     }
 
-    # ④ 等 $RdpUser 的会话出现
+    # ④ 等 $RdpUser 的会话出现。
+    #    若 mstsc 自己退了（说明 .rdp 那一路没连上）→ 换 `mstsc /v:127.0.0.1` 再试一次。
     $sid = $null
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $retriedCli = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
         $r2 = Get-RdpSessionReport -RdpUser $RdpUser
@@ -514,7 +536,28 @@ function New-RdpUserSession {
             $steps.Add("$RdpUser 会话出现：sid=$sid state=$($r2.aState) name=$($r2.aSessionName)")
             break
         }
+        $exited = $false
+        try { $exited = [bool]($proc -and $proc.HasExited) } catch { $exited = $true }
+        if (-not $retriedCli -and $exited) {
+            $ec = ''
+            try { $ec = $proc.ExitCode } catch { }
+            $steps.Add("mstsc(.rdp) 已退出 exit=$ec 但没建出会话 → 改 /v:127.0.0.1 再试一次")
+            try {
+                $proc = Start-Process -FilePath $mstsc -ArgumentList '/v:127.0.0.1' -PassThru -ErrorAction Stop
+                $steps.Add("已起 mstsc pid=$($proc.Id)（/v:）")
+            } catch { $steps.Add("mstsc(/v:) 起不来：$($_.Exception.Message)") }
+            $retriedCli = $true
+        }
     }
+
+    # 诊断：抄一份当时的会话布局（定位「为什么没建出会话」）
+    try {
+        $qw = Join-Path $env:SystemRoot 'System32\qwinsta.exe'
+        if (Test-Path -LiteralPath $qw) {
+            $snap = (& $qw 2>&1 | Out-String).Trim()
+            foreach ($l in ($snap -split "`r?`n")) { if ($l.Trim()) { $steps.Add('qwinsta | ' + $l.TrimEnd()) } }
+        }
+    } catch { }
 
     # ⑤ 断开 mstsc（会话转 Disc → 交给 ③ 自动交接）
     try {

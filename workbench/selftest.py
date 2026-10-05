@@ -2187,7 +2187,7 @@ def main():
           "Install-RdpSessionHandoverTask" in cmsg_txt and "session-lib.ps1" in cmsg_txt)
     check("T410 脚本落到持久目录（job 结束清 workspace，任务目标必须留盘）",
           "cloudrdp-sys" in sess_lib_txt
-          and "Copy-Item -LiteralPath $ScriptPath -Destination $dstScript" in sess_lib_txt)
+          and "Copy-RdpFileIfDifferent $ScriptPath $dstScript" in sess_lib_txt)
 
     # ★ 行为护栏：真的用 pwsh 跑一遍状态锚定解析（拿到 pwsh 才跑，拿不到跳过不误判）。
     _parse_ok = None
@@ -2486,6 +2486,22 @@ def main():
     check("T458 ★ 仍然不碰 AutoAdminLogon（改了会打死 runner）—— 只在注释里说明原因，无写入代码",
           "AutoAdminLogon" in sess_lib_txt and "HostedComputeAgent" in sess_lib_txt
           and "Set-ItemProperty" not in sess_lib_txt)
+
+    # ---------------- 真机 2026-10-05（run #82/#84）：③ 装不上 + 邮件静默丢 ------------------
+    # ① ③ 永远装不上：0b2/connmail 调 Install-RdpSessionHandoverTask → ① 把脚本拷进持久目录后
+    #    又把**已部署路径**传给 ③ → ③ Copy-Item 源==目标 → PS7 报
+    #    「Cannot overwrite the item D:\cloudrdp-sys\scripts\session-handover.ps1 with itself.」
+    check("T459 ★ 修掉「Copy-Item 源==目标」—— ③ 自动交接永远装不上的 bug（真机 2026-10-05）",
+          "function Copy-RdpFileIfDifferent" in sess_lib_txt
+          and "Copy-RdpFileIfDifferent $ScriptPath $dstScript" in sess_lib_txt
+          and "GetFullPath" in sess_lib_txt)
+    # ② 邮件：SMTP 收 250 但 139 收不到 —— 邮件头 Message-ID 的域写死 `@cloudrdp`（无点，非法）
+    mail_txt = open(os.path.join(repo_dir, "scripts", "send-mail.ps1"), encoding="utf-8-sig").read()
+    check("T460 ★ Message-ID 用发件人真实域（不再写死 @cloudrdp）—— 非法域会被 139/QQ 静默丢弃",
+          "Message-ID" in mail_txt and "'@' + $midDomain" in mail_txt
+          and "@cloudrdp>" not in mail_txt and "$midDomain" in mail_txt)
+    check("T461 发信头补 Reply-To / Sender（与 From 域对齐，降垃圾评分）",
+          "Reply-To: <" in mail_txt and "Sender: <" in mail_txt)
 
     # ---------------- 自动接力：运行时长 ≥ N 小时 → 自动派发 1 台新机器（v1.6.4） ----------------
     # 需求（瑀子 2026-10-02）：「机器运行实况」列表里只要有**任一台在跑机器**运行时长 ≥ 4 小时，
