@@ -1,24 +1,16 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-06T00:10:20.8550134Z",
+  "updated_utc": "2026-10-06T06:31:52.3701987Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-5",
     "owner": "code19698fgh",
     "repo": "cloud-rdp",
-    "run_id": 37354875121,
-    "since": "2026-10-05T18:17:50Z"
+    "run_id": null,
+    "since": "2026-10-06T06:31:47.5359597Z"
   },
-  "standby": [
-    {
-      "account": "acc-3",
-      "owner": "3465125540",
-      "repo": "cloud-rdp",
-      "run_id": null,
-      "since": "2026-10-06T00:10:15.5076285Z"
-    }
-  ],
+  "standby": [],
   "accounts": [
     {
       "id": "acc-1",
@@ -47,15 +39,15 @@
       "queued_count": 0,
       "total": 20,
       "last_run": {
-        "run_id": 37310199415,
+        "run_id": 37392569941,
         "status": "completed",
-        "conclusion": "cancelled",
-        "created_at": "2026-10-05T12:32:09Z",
-        "event": "schedule",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/37310199415"
+        "conclusion": "success",
+        "created_at": "2026-10-06T00:10:20Z",
+        "event": "workflow_dispatch",
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/37392569941"
       },
       "note": "",
-      "role": "standby"
+      "role": ""
     },
     {
       "id": "acc-4",
@@ -69,7 +61,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "",
+      "note": "派发失败（fill）：HTTP 422 UnprocessableEntity [/repos/code1969sda/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches] Actions has been disabled for this user.",
       "role": ""
     },
     {
@@ -79,14 +71,14 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_5",
       "token_state": "ok",
-      "alive_count": 1,
-      "running_count": 1,
+      "alive_count": 0,
+      "running_count": 0,
       "queued_count": 0,
       "total": 20,
       "last_run": {
         "run_id": 37354875121,
-        "status": "in_progress",
-        "conclusion": "",
+        "status": "completed",
+        "conclusion": "success",
         "created_at": "2026-10-05T18:17:50Z",
         "event": "workflow_dispatch",
         "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/37354875121"
@@ -96,11 +88,11 @@
     }
   ],
   "recent_dispatches": {
-    "3465125540": "2026-10-06T00:10:15.5076285Z",
-    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
-    "code1969sda": "2026-10-05T15:00:53.7416181Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "code19698fgh": "2026-10-05T18:17:43.8508957Z"
+    "code19698fgh": "2026-10-06T06:31:47.5359597Z",
+    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "3465125540": "2026-10-06T00:10:15.5076285Z",
+    "code1969sda": "2026-10-05T15:00:53.7416181Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z"
   }
 }
