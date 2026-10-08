@@ -49,27 +49,41 @@
       "owner": "code1969sda",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_4",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "acc-5",
       "owner": "code19698fgh",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_5",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "acc-2",
       "owner": "code09101",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_2",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "acc-6",
       "owner": "code10081",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_6",
+      "enabled": true
+    },
+    {
+      "id": "acc-7",
+      "owner": "code1420",
+      "repo": "cloud-rdp",
+      "token_secret": "POOL_TOKEN_7",
+      "enabled": true
+    },
+    {
+      "id": "acc-8",
+      "owner": "code14201",
+      "repo": "cloud-rdp",
+      "token_secret": "POOL_TOKEN_8",
       "enabled": true
     }
   ]
