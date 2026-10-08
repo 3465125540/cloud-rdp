@@ -64,6 +64,10 @@ param(
     [switch]$SkipInstall,
     [switch]$NoSetCode,
     [switch]$NoMail,
+    # ★ 默认**不发信** —— 由 0e 步那封「连接信息」邮件把 UU 段并进去（139 对近乎同时的
+    #   近似重复邮件只投一封，真机 2026-10-07 实测：这封 250 通过却没到）。
+    #   单独测这封邮件时加 -Mail（mail-test.yml 就是这么干的）。
+    [switch]$Mail,
     [switch]$DryRun
 )
 
@@ -644,7 +648,11 @@ try {
 } catch { Warn "写连接信息文件异常：$($_.Exception.Message)" }
 
 # ---------------------------------------------------------------- 发信
-if ($NoMail -or $DryRun) { Say "已跳过发信（NoMail/DryRun）" }
+# ★ 默认**不发** —— UU 段已并进 0e 那封「连接信息」邮件（见 send-connection-mail.ps1）。
+#   要单独发这封（如 mail-test 单测），加 -Mail。
+if ($NoMail -or $DryRun -or -not $Mail) {
+    Say $(if ($Mail) { '已跳过发信（NoMail/DryRun）' } else { '未单独发信（默认不发 —— UU 段已并进 0e 的连接信息邮件；要单独发请加 -Mail）' })
+}
 else {
     # ★ 邮件正文刻意**精简** —— 139 的反垃圾是**按内容评分**的，超阈值直接拒
     #   （真机 run #84：`550 … Mail rejected score is 20.156`）。

@@ -2509,6 +2509,13 @@ def main():
     check("T464 ★ 正文改 8bit（去掉 MIME_BASE64_TEXT 反垃圾特征）+ 去掉自定义 X-Mailer；不支持 8BITMIME 才退回 base64",
           "Build-MailPayload '8bit'" in mail_txt and "8BITMIME" in mail_txt
           and "Build-MailPayload 'base64'" in mail_txt and "X-Mailer: CloudRDP" not in mail_txt)
+    # ★ 真机 2026-10-07：0c1 那封（250 通过）没到，0e 那封（550 拒后重试）到了 ⇒
+    #   139 对**近乎同时的近似重复邮件只投一封**。修法：UU 段并进 0e 那一封，0c1 默认不发。
+    check("T523 ★ UU 段并进 0e 那封「连接信息」邮件（读 _state\\uu-remote.json）",
+          "备用通道（UU远程" in cmsg_txt and "uu-remote.json" in cmsg_txt
+          and "+ $uuLines +" in cmsg_txt)
+    check("T524 ★ 0c1 默认不再单独发信（要发得加 -Mail；mail-test 单测显式加）",
+          "[switch]$Mail" in uu_txt and "-not $Mail" in uu_txt and "Mail = $true" in mt_txt)
     check("T462 mail-test 支持「重发连接信息」：conn_ip/conn_user/conn_pass → send-connection-mail.ps1",
           "conn_ip" in mt_txt and "send-connection-mail.ps1" in mt_txt and "connmail.log" in mt_txt)
     # ★ 数组 splat（@('-Ip','x')）是**按位置**绑定的 —— '-Ip' 会被当成位置参数的值，

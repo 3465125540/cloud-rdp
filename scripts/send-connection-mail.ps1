@@ -41,6 +41,32 @@ if (-not $Ip) { $Ip = '(未取到，见 Tailscale 后台 github-rdp-server*)' }
 if (-not $User) { $User = 'a' }
 if (-not $Pass) { $Pass = '(未取到，见公共桌面 _CloudRDP_*.txt)' }
 
+# ── 备用通道（UU远程）：并进**同一封**邮件 ────────────────────────────────────
+# 为什么合并：0c1 与 0e 会在几秒内各发一封「同发件人 / 同收件人 / 同前缀主题」的邮件 ——
+# 真机 2026-10-07 实测：0c1 那封 250 通过却没到，0e 那封（被 550 拒后重试）到了 ⇒
+# 139 对**近乎同时的近似重复邮件只投一封**。合并成一封最稳。
+$uuLines = @()
+try {
+    $uuStateDir = if ($env:CLOUDRDP_SYS_DIR) { [string]$env:CLOUDRDP_SYS_DIR }
+                  elseif (Test-Path 'D:\') { 'D:\cloudrdp-sys' } else { 'C:\cloudrdp-sys' }
+    $uuJson = Join-Path (Join-Path $uuStateDir '_state') 'uu-remote.json'
+    if (Test-Path -LiteralPath $uuJson) {
+        $u = Get-Content -LiteralPath $uuJson -Raw -Encoding UTF8 | ConvertFrom-Json
+        $uuCode = if ($u.customCode) { [string]$u.customCode } elseif ($u.assistCode) { [string]$u.assistCode } else { '' }
+        if ($u.deviceId -or $uuCode) {
+            $uuLines = @(
+                ''
+                '备用通道（UU远程，主通道连不上时用）：'
+                "  机器     : $($u.machine)"
+                "  设备 ID  : $($u.deviceId)"
+                "  连接码   : $uuCode"
+                ''
+                '怎么用：手机/电脑装「网易UU远程」→ 远程协助 → 填「设备 ID + 连接码」。'
+            )
+        }
+    }
+} catch { }
+
 $lines = @(
     'CloudRDP 已开机，现在就能连。'
     ''
@@ -55,6 +81,7 @@ $lines = @(
     '  * 看不到 IP 时，到 https://login.tailscale.com/admin/machines 找 github-rdp-server*'
     '  * 此刻后台仍在初始化（C盘瘦身 / 数据恢复 / 中文环境 / 软件重装），预计 30~60 分钟。'
     '    想用满血环境，等 Actions 日志出现【ENV READY】再登录更稳妥。'
+) + $uuLines + @(
     ''
     '-- 由 GitHub Actions 自动发送'
 )

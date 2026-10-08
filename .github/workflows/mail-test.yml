@@ -99,7 +99,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$sys\_state" | Out-Null
           $env:CLOUDRDP_SYS_DIR = $sys
           # ⚠️ 同上：哈希表 splat，别用数组 splat（数组是位置绑定 → -LogPath 会被当位置值）。
-          $h = @{ LogPath = "$sys\_state\uu-remote.log" }
+          $h = @{ LogPath = "$sys\_state\uu-remote.log"; Mail = $true }   # -Mail：默认不发，单测要发
           if ('${{ inputs.install_uu }}' -ne 'true') { $h.SkipInstall = $true }
           if ('${{ inputs.dry_run }}' -eq 'true')    { $h.DryRun = $true }
           .\scripts\install-uu-remote.ps1 @h
