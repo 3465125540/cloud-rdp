@@ -57,6 +57,13 @@
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_5",
       "enabled": true
+    },
+    {
+      "id": "acc-2",
+      "owner": "code09101",
+      "repo": "cloud-rdp",
+      "token_secret": "POOL_TOKEN_2",
+      "enabled": true
     }
   ]
 }
