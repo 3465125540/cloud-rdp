@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（613 项）
+python workbench\selftest.py   :: 离线自测（614 项）
 ```
 
 | 面板 | 内容 |
@@ -1589,6 +1589,8 @@ Actions job 运行中 · run 37269211081 · 自 2026/10/5-13:45
 | `pool-coordinator.ps1` | 「已知不可用」新增一条：上一轮 `last_run.conclusion == 'startup_failure'` → 本轮不参与候选 |
 | `pool-coordinator.ps1` | 同时把原因写进该账号本轮的巡检 `note`（面板才看得见「为什么出不了机器」） |
 | `app.js` `runStateKind()` | `startup_failure` → **红色**（原来落进 `mute` 灰，看着像没事） |
+| `app.js` `isAccountDead()` | 也认 `last_run.state == 'startup_failure'`（v1.6.12 补）—— 否则「隐藏失效账号」按钮**藏不掉它**：
+v1.6.10 只把原因写进 note，而 note 文案里没有「派发失败」四个字，按钮的判定条件匹配不上 |
 
 **验证**：`selftest.py` **607 PASS / 0 FAIL**（本批 T512–T515）；另**用真文件跑了一次真实 dry-run**
 （`pool-coordinator.ps1 -DryRun` + 构造的上一轮状态）：
@@ -1655,7 +1657,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（613 项）
+│   ├── selftest.py                     #   离线自测（614 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

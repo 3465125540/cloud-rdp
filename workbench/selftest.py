@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.11", server.VERSION == "1.6.11", server.VERSION)
+    check("T168 server.py 版本 1.6.12", server.VERSION == "1.6.12", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2858,6 +2858,10 @@ def main():
           'var monTop = [tokenStateBadge(a.token_state, a.report_note)];' in app_txt
           and 'var monBot = [];' in app_txt
           and "'<td class=\"mon-cell\"><div class=\"mon-line\">' + monTop.join(\" \") + \"</div>\" +" in app_txt)
+
+    check("T522 ★ isAccountDead 也认「派发成功但机器起不来」（startup_failure）—— 否则「隐藏失效账号」藏不掉它",
+          'String(a.last_run.state || "") === "startup_failure"' in app_txt
+          and "启动失败" in idx_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

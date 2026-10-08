@@ -34,7 +34,7 @@
 
 ```bash
 # 1) 把整个 zip 解压到服务器任意目录（zip 顶层就是 cloud-rdp/）
-unzip cloud-rdp-workbench-linux-v1.6.11.zip -d /tmp/cloud-rdp-src
+unzip cloud-rdp-workbench-linux-v1.6.12.zip -d /tmp/cloud-rdp-src
 cd /tmp/cloud-rdp-src/cloud-rdp
 
 # 2) 跑安装脚本（默认装到 /opt/cloud-rdp，端口 8899）
@@ -269,7 +269,7 @@ systemctl status  cloud-rdp-workbench         # 状态
 
 ```bash
 cd /opt/cloud-rdp && python3 workbench/selftest.py
-# 期望输出： 结果：613 PASS / 0 FAIL
+# 期望输出： 结果：614 PASS / 0 FAIL
 ```
 
 ---

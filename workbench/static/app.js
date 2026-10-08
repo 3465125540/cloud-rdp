@@ -92,6 +92,10 @@ function isAccountDead(a) {
   var ts = String(a.token_state || "");
   if (ts === "query_failed" || ts === "missing") return true;   // 凭证坏 / 缺 Secret
   if (String(a.report_note || "").indexOf("派发失败") >= 0) return true;  // 派发不出去（如 422）
+  // 派发「成功」但机器起不来：GitHub 建了 run 却没建出 job（邮箱未验证 / Actions 被禁用 / 账单）。
+  // v1.6.10 只把它写进了 note，但 note 文案里没有「派发失败」四个字 → 这个按钮一直藏不掉它
+  // （2026-10-08 复检 acc-5 时发现）。直接看 run 状态更可靠，不依赖文案。
+  if (a.last_run && String(a.last_run.state || "") === "startup_failure") return true;
   return false;
 }
 // 按 owner 反查是否失效（运行日志的分组只有 owner，没有 token_state）
