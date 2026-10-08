@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.9", server.VERSION == "1.6.9", server.VERSION)
+    check("T168 server.py 版本 1.6.10", server.VERSION == "1.6.10", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2811,6 +2811,24 @@ def main():
           '" · 快照 " + esc(m.state_age_human)' in app_txt and "无法实时核对" in app_txt)
     check("T511 已实时核对（live）的行不再提快照年龄（避免噪音）",
           'm.run_source !== "live" && m.state_age_human ? " · 快照 "' in app_txt)
+
+    # ---------------- startup_failure 也要算「已知不可用」（v1.6.10） ----------------
+    # 起因（2026-10-08 查 acc-4/acc-5 健康）：acc-5 的 dispatch 返回 **204（成功）**，
+    #   但 GitHub 建的 run 是 `startup_failure`（**0 个 job**，1 秒结束）—— 连续 8 次。
+    #   run 页面 Annotations 写明：`Please verify your email address to run GitHub Actions workflows.`
+    #   ⇒ 「派发成功但机器起不来」这类故障**不留「派发失败」痕迹**，v1.6.8 的 blocked 逻辑看不见它，
+    #     协调器每轮都会白派一次。这里把 startup_failure 也纳入「已知不可用」，并写进巡检 note。
+    print("[startup_failure 纳入已知不可用 v1.6.10]")
+    check("T512 ★ 协调器把上一轮 last_run.conclusion=startup_failure 的账号也判为「已知不可用」",
+          "[string]$lr.conclusion -eq 'startup_failure'" in pcp_txt
+          and "$blocked += $own" in pcp_txt)
+    check("T513 ★ 并把原因写进该账号本轮巡检 note（面板才看得见「为什么出不了机器」）",
+          "最近一次 run 启动失败（startup_failure）" in pcp_txt
+          and "$rep.note = $tag" in pcp_txt)
+    check("T514 ★ 前端把 startup_failure 渲染成红色（原来落在 mute 灰，看着像没事）",
+          '|| state === "startup_failure") return "bad";' in app_txt)
+    check("T515 note 里点明去 run 页面看 Annotations（那里才有 GitHub 的原话）",
+          "run 页面会有 Annotations 写明原因" in pcp_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

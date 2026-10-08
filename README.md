@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（594 项）
+python workbench\selftest.py   :: 离线自测（607 项）
 ```
 
 | 面板 | 内容 |
@@ -1561,6 +1561,59 @@ Actions job 运行中 · run 37269211081 · 自 2026/10/5-13:45
 > 不再假装知道。② 快照阈值取 90 分钟：协调器正常节奏约 3 小时，所以**私有账号**的池行通常会带「未核实」
 > 标记 —— 这是事实，不是 bug。③ 本批只改**显示与核对口径**，不改协调器、不改池状态。
 
+### 26. `startup_failure`：派发「成功」但机器起不来 —— 也要算「已知不可用」（v1.6.10）
+
+**现象**（2026-10-08 查 acc-4/acc-5 健康时发现）：acc-5 的账号面板显示「**凭证正常** · 在跑 0 台」，
+看着像个好账号 —— 实际上它从 **2026-10-06T06:31Z 起连续 8 次**都没起来过机器。
+
+**真机取证**：
+
+| 观察 | 值 |
+|------|-----|
+| acc-5 的 run `37712372578` | `status=completed`、**`conclusion=startup_failure`**、`jobs=0`、created→updated 只差 **1 秒** |
+| 协调器派发 acc-5 的返回 | **HTTP 204（成功）** —— 所以协调器记的是「已派发」 |
+| 同一个 commit（`6e268a4`）派给 acc-2 | `in_progress` —— **真的起来了** |
+| run 页面的 Annotations | `Error: Please verify your email address to run GitHub Actions workflows.` |
+
+**根因**：acc-5 **账号的邮箱未验证** → GitHub 收下 dispatch、也建了 run，但**拒绝构建 job**（0 jobs），
+1 秒内以 `startup_failure` 结束。**这是账号级故障，跟 PAT / 仓库 / workflow 文件都无关。**
+
+**为什么之前看不见**：`startup_failure` **不留「派发失败」痕迹**（dispatch 是 204），
+而 v1.6.8 的「已知不可用」只认 `token_state` 坏 + note 里的「派发失败」→ 它逃过了检测，
+协调器每轮都白派一次；前端 `runStateKind()` 也没把它算进 `bad`，面板渲染成灰色「无结论」。
+
+**修法**：
+
+| 改动 | 说明 |
+|------|------|
+| `pool-coordinator.ps1` | 「已知不可用」新增一条：上一轮 `last_run.conclusion == 'startup_failure'` → 本轮不参与候选 |
+| `pool-coordinator.ps1` | 同时把原因写进该账号本轮的巡检 `note`（面板才看得见「为什么出不了机器」） |
+| `app.js` `runStateKind()` | `startup_failure` → **红色**（原来落进 `mute` 灰，看着像没事） |
+
+**验证**：`selftest.py` **607 PASS / 0 FAIL**（本批 T512–T515）；另**用真文件跑了一次真实 dry-run**
+（`pool-coordinator.ps1 -DryRun` + 构造的上一轮状态）：
+
+```
+[pool] 已知不可用（本轮不参与候选）：yc1966asgf, code1969sda, code19698fgh   ← 三类故障全被识别
+[pool] 决策：alive=0/2 plan=2  primary候选=code09101
+[pool] [dry-run] 派发 → acc-2 (code09101)  role=primary  reason=fill        ← 正确跳过 acc-5
+[pool] [dry-run] 派发 → acc-3 (3465125540)  role=standby  reason=fill
+```
+输出状态里 acc-5 的 note 也确实带上了「最近一次 run 启动失败（startup_failure）…」。
+
+**本次 4 个账号的健康结论**（顺带记录，方法见 §22/§23）：
+
+| 账号 | 状态 | 原因 |
+|------|------|------|
+| acc-1 `yc1966asgf` | 🔴 已停用（`enabled: false`） | 账号被 GitHub 停用（`Sorry. Your account was suspended`） |
+| acc-2 `code09101` | 🟢 **健康** | 新加账号；dispatch 204 → run **`in_progress`**（真起来了） |
+| acc-3 `3465125540` | 🟢 健康（兜底 reserve） | hub 账号 |
+| acc-4 `code1969sda` | 🔴 不能用 | dispatch **422**：`Actions has been disabled for this user.`；历史 run **0 条** |
+| acc-5 `code19698fgh` | 🔴 不能用 | **邮箱未验证** → `startup_failure`（见上） |
+
+> **acc-5 的修法（1 分钟）**：用该账号登录 → `https://github.com/settings/emails` 完成邮箱验证 → Actions 立刻恢复。
+> **acc-4 的修法**：GitHub 在**账号级**禁用了它的 Actions，需去该账号的 Billing/设置排查或联系 GitHub 支持。
+
 ## 五、目录结构
 
 ```
@@ -1568,7 +1621,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（594 项）
+│   ├── selftest.py                     #   离线自测（607 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1668,6 +1721,7 @@ cloud-rdp/
 | **账号面板只显示 `403 (Forbidden)` / `422`，看不到原因** | `Invoke-RestMethod` 抛错时**响应体已被 dispose**，catch 里 `GetResponseStream()` 永远读到空串 → GitHub 的 `message` 永久丢失；且「派发失败」原来不写进池状态，面板根本看不到 | **v1.6.7 起**：`Invoke-GhApi` 改用 `-SkipHttpErrorCheck` 保住响应体并把 message 拼进异常；协调器把「派发失败」写进账号 note；面板识别「账号被停用 / Actions 被禁用 / 派发被拒 · 422」。详见第四节 §23 |
 | **想让某个账号少用点（当兜底）、或界面上一堆失效账号太吵** | 原来候选顺序就是 pool-config 里的账号顺序，hub 账号总被优先；失效账号既占候选位又占屏幕 | **v1.6.8 起**：账号项加 `"reserve": true` 即降为**兜底**（只在第一梯队全不可用时才派）；协调器同时排除「已知不可用」账号（凭证坏/派发失败），死账号不再占位。前端新增「**隐藏失效账号**」按钮，一键藏掉失效账号的账号表 + 运行日志。详见第四节 §24 |
 | **机器运行实况显示「运行中」，但机器其实早没了** | 池内机器行的状态来自协调器发布的 pool-state 快照，而实时纠偏原来**只认 hub 账号**；其余账号（哪怕 fork 是公开的、本机明明读得到）一律退回快照 —— 协调器 cron 又常被延迟数小时 | **v1.6.9 起**：实时纠偏扩到**所有读得到的账号**（`_account_runs` 直查各 fork 的 runs）；读不到的（私有 fork）把徽标降级成「运行中 · 未核实」并在详情行摊出快照年龄。详见第四节 §25 |
+| **账号「凭证正常」但机器一直起不来（run 显示 `startup_failure`）** | GitHub 收下了 dispatch（返回 204）但**没建出 job** —— 常见于**该账号邮箱未验证**、该账号 Actions 被禁用、账单/额度问题。这类故障不留「派发失败」痕迹，原来的「已知不可用」检测看不见 | **v1.6.10 起**：`last_run.conclusion == startup_failure` 也纳入「已知不可用」（协调器不再白派），并把原因写进账号巡检 note；前端把 `startup_failure` 渲染成红色。**修法**：去该账号 `github.com/settings/emails` 验证邮箱（run 页面的 Annotations 会写明原因）。详见第四节 §26 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

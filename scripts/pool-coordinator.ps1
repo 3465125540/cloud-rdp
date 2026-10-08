@@ -148,9 +148,37 @@ if ($prev -and $prev.accounts) {
         if ([string]::IsNullOrWhiteSpace($own)) { continue }
         $ts = [string]$pa.token_state
         if ($ts -eq 'query_failed' -or $ts -eq 'missing') { $blocked += $own; continue }
-        if ([string]$pa.note -like '*派发失败*') { $blocked += $own }
+        if ([string]$pa.note -like '*派发失败*') { $blocked += $own; continue }
+        # ⚠️ 还有一类「派发成功但机器起不来」：GitHub 收下 dispatch（204）、run 也建出来了，
+        #    但 job 根本没建（0 jobs）→ conclusion = startup_failure。
+        #    典型原因：账号邮箱未验证 / 该账号 Actions 被禁用 / 账单或额度问题。
+        #    这种**不会**留下「派发失败」的痕迹，只看 dispatch 结果永远发现不了 ——
+        #    不排掉的话协调器每轮都会白派一次（acc-5 于 2026-10-06 起连续 8 次 startup_failure）。
+        $lr = $pa.last_run
+        if ($lr -and [string]$lr.conclusion -eq 'startup_failure') { $blocked += $own }
     }
     $blocked = @($blocked | Select-Object -Unique)
+}
+
+# 把「最近一次 run 启动失败」写进该账号本轮的巡检 note —— 否则面板只显示「凭证正常」，
+# 看不出这个账号其实出不了机器（用户 2026-10-08 就是看着 acc-5「凭证正常」来问的）。
+if ($prev -and $prev.accounts) {
+    foreach ($rep in $reports) {
+        $own = [string]$rep.owner
+        if ([string]::IsNullOrWhiteSpace($own)) { continue }
+        foreach ($pa in @($prev.accounts)) {
+            if (-not $pa -or [string]$pa.owner -ne $own) { continue }
+            $lr = $pa.last_run
+            if ($lr -and [string]$lr.conclusion -eq 'startup_failure') {
+                $tag = '最近一次 run 启动失败（startup_failure）：GitHub 没建出 job —— 常见于' +
+                       '「账号邮箱未验证」/「该账号 Actions 被禁用」/「账单或额度问题」，' +
+                       '去该账号的 GitHub 设置里查（run 页面会有 Annotations 写明原因）'
+                if ([string]::IsNullOrWhiteSpace([string]$rep.note)) { $rep.note = $tag }
+                else { $rep.note = "$([string]$rep.note)　$tag" }
+            }
+            break
+        }
+    }
 }
 if ($blocked.Count -gt 0) { Say "已知不可用（本轮不参与候选）：$($blocked -join ', ')" }
 

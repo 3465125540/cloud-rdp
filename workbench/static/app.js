@@ -832,7 +832,10 @@ function tokenStateBadge(ts, note) {
 function runStateKind(state) {
   if (state === "success") return "ok";
   if (state === "in_progress" || state === "queued") return "info";
-  if (state === "failure" || state === "cancelled" || state === "timed_out") return "bad";
+  // startup_failure = GitHub 收下了 run 但**没建出 job**（如账号邮箱未验证 / Actions 被禁用）——
+  // 之前不在 bad 列表里，面板把它渲染成灰色「无结论」，看着像没事，实际是硬故障。
+  if (state === "failure" || state === "cancelled" || state === "timed_out"
+      || state === "startup_failure") return "bad";
   return "mute";
 }
 

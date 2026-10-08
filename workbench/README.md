@@ -464,6 +464,25 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §25。
 
+### `startup_failure` 也要算「已知不可用」（v1.6.10）
+
+**现象**：账号显示「凭证正常」，但机器一直起不来 —— run 的 `conclusion = startup_failure`、**0 个 job**。
+协调器派发时拿到的是 **HTTP 204（成功）**，所以它记的是「已派发」。
+
+**根因**：GitHub 收下 dispatch、也建了 run，但**拒绝构建 job**。典型原因：
+**该账号邮箱未验证**（run 页面 Annotations 会写 `Please verify your email address to run GitHub Actions workflows.`）、
+该账号 Actions 被禁用、账单或额度问题。**与 PAT / 仓库 / workflow 文件无关。**
+
+**为什么之前看不见**：它不留「派发失败」痕迹 → v1.6.8 的「已知不可用」检测漏掉它，协调器每轮白派一次；
+前端 `runStateKind()` 也没把它算进 `bad`，面板渲染成灰色「无结论」。
+
+**修法**：`pool-coordinator.ps1` 把 `last_run.conclusion == 'startup_failure'` 也纳入「已知不可用」，
+并把原因写进该账号本轮巡检 note；`app.js` 把 `startup_failure` 渲染成红色。
+
+> **修法（账号侧）**：去 `https://github.com/settings/emails` 验证邮箱即可恢复。
+
+详见主 README 第四节 §26。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -676,7 +695,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（594 项）
+├── selftest.py           # 离线自测（607 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
