@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.10", server.VERSION == "1.6.10", server.VERSION)
+    check("T168 server.py 版本 1.6.11", server.VERSION == "1.6.11", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -1147,8 +1147,9 @@ def main():
     check("T206 styles.css 机器表改 table-layout:fixed（列宽不再随内容/行数抖动）",
           ".tbl-machines { table-layout: fixed" in css_txt and "min-width: 820px" in css_txt)
     check("T207 index.html 机器表带 <colgroup> + 8 个 c-* 列（写死列宽的载体）",
-          "<colgroup>" in idx_txt and idx_txt.count('class="c-') == 8,
-          "c-* 列 %d 个" % idx_txt.count('class="c-'))
+          '<col class="c-host" /><col class="c-ip" /><col class="c-state" /><col class="c-role" />' in idx_txt
+          and '<col class="c-restore" /><col class="c-snap" /><col class="c-seen" /><col class="c-ops" />' in idx_txt,
+          "c-* 列共 %d 个（机器表 8 + 账号表 5）" % idx_txt.count('class="c-'))
     check("T208 styles.css 八列宽度全部显式定义（c-host…c-ops 各一条）",
           all((".tbl-machines .c-%s" % c) in css_txt
               for c in ("host", "ip", "state", "role", "restore", "snap", "seen", "ops")),
@@ -2680,7 +2681,7 @@ def main():
           app_txt.count("accLabel(m.account_id, m.pool_owner)") >= 2
           and "[m.account_id, m.pool_owner].filter" not in app_txt)
     check("T477 ★ 账号管理表：主显示真实名（owner），代号降级成「代号 acc-N」小字",
-          "esc(accLabel(a.id, a.owner))" in app_txt and 'mono">代号 ' in app_txt)
+          "esc(accLabel(a.id, a.owner))" in app_txt and 'mono muted">代号 ' in app_txt)
     check("T478 代号仍留在 tooltip（accTip）里，便于与 pool-config 的 acc-N 对照",
           '"代号 " + code' in app_txt)
 
@@ -2829,6 +2830,34 @@ def main():
           '|| state === "startup_failure") return "bad";' in app_txt)
     check("T515 note 里点明去 run 页面看 Annotations（那里才有 GitHub 的原话）",
           "run 页面会有 Annotations 写明原因" in pcp_txt)
+
+    # ---------------- 「GitHub 账号管理」排版优化（v1.6.11） ----------------
+    # 起因（2026-10-08 截图）：标题被挤成「账号管 / 理」、「＋ 新增」被挤到第二行；
+    #   「实时监测」列忽宽忽窄、内容一行挤成两行乱跳；账号名后面的「兜底」徽标一窄就换行。
+    print("[账号卡排版 v1.6.11]")
+    check("T516 ★ 概览从 head-right 挪到独占一行的 .card-sub（与「机器运行实况」同一节奏）",
+          '<div class="card-sub"><span class="muted" id="accounts-meta"></span></div>' in idx_txt
+          and '<span class="muted" id="accounts-meta"></span>\n          <button class="btn btn-mini" id="btn-hide-dead"' not in idx_txt)
+    check("T517 ★ 账号表列宽写死：tbl-accounts + colgroup（5 列）",
+          'class="tbl tbl-accounts" id="tbl-accounts"' in idx_txt
+          and '<col class="c-acc" /><col class="c-secret" /><col class="c-role" /><col class="c-mon" /><col class="c-on" />' in idx_txt)
+    check("T518 ★ CSS：标题 nowrap（不再被挤成「账号管 / 理」）+ 表格固定布局 + 列宽合计 100%",
+          ".card-accounts .card-head h2 { white-space: nowrap; }" in css_txt
+          and ".tbl-accounts { table-layout: fixed; }" in css_txt
+          and ".tbl-accounts .c-acc    { width: 23%; }" in css_txt
+          and ".tbl-accounts .c-mon    { width: 35%; }" in css_txt
+          and ".tbl-accounts .c-on     { width: 12%; }" in css_txt)
+    check("T519 ★ CSS：「实时监测」列改块级两行（.mon-cell 不再 flex-wrap）+ 账号列第二行 .acc-sub",
+          ".mon-cell { display: block; }" in css_txt and ".mon-line { display: flex;" in css_txt
+          and ".mon-line + .mon-line { margin-top: 5px; }" in css_txt
+          and ".acc-sub { display: flex;" in css_txt)
+    check("T520 ★ app.js：账号名独占第一行（.nowrap），代号 + 兜底徽标挪到第二行（.acc-sub）",
+          "'<td class=\"strong\"><div class=\"nowrap\">' + name + '</div><div class=\"acc-sub\">' + sub + \"</div></td>\"" in app_txt
+          and 'var sub = \'<span class="mono muted">代号 \'' in app_txt)
+    check("T521 ★ app.js：实时监测列渲染两个 .mon-line（上=凭证+在跑，下=run+来源）",
+          'var monTop = [tokenStateBadge(a.token_state, a.report_note)];' in app_txt
+          and 'var monBot = [];' in app_txt
+          and "'<td class=\"mon-cell\"><div class=\"mon-line\">' + monTop.join(\" \") + \"</div>\" +" in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

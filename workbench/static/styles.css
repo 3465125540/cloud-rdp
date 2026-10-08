@@ -190,6 +190,27 @@ html, body {
   .card-machines, .card-accounts { grid-column: span 12; }
 }
 
+/* ---------------- 「GitHub 账号管理」：标题不换行 + 固定列宽 + 两行节奏 ----------------
+   这张卡是 span-5（宽屏下约 700px），5 列挤在里面，2026-10-08 截图暴露三个问题：
+     ① 标题被挤成「账号管 / 理」、「＋ 新增」被挤到第二行 —— 概览文案太长，全塞在 head-right 里；
+     ② auto 布局下列宽随内容抖动（「实时监测」列忽宽忽窄，同一列在不同行之间还会上下跳）；
+     ③ 账号名后面的「兜底」徽标一窄就换行，把一行拆成三行。
+   修法：① 概览挪到 .card-sub 独占一行（与「机器运行实况」同一节奏）+ 标题 nowrap；
+        ② 列宽写死（配合 index.html 的 <colgroup>），「实时监测」拿 35%；
+        ③ 账号列 / 实时监测列都改成**块级两行**结构，行高稳定、不随文案长短跳。 */
+.card-accounts .card-head h2 { white-space: nowrap; }
+.tbl-accounts { table-layout: fixed; }
+.tbl-accounts .c-acc    { width: 23%; }
+.tbl-accounts .c-secret { width: 17%; }
+.tbl-accounts .c-role   { width: 13%; }
+.tbl-accounts .c-mon    { width: 35%; }
+.tbl-accounts .c-on     { width: 12%; }
+.tbl-accounts td { vertical-align: top; padding: 10px 9px; }
+.tbl-accounts tbody tr { height: 62px; }
+/* 账号列第二行：代号 + 「兜底」徽标（都是元信息，放一起，别去挤第一行的账号名） */
+.acc-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; margin-top: 3px; }
+.acc-sub .mono { font-size: 11px; }
+
 /* ---------------- 徽章 ---------------- */
 .badge {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
@@ -278,12 +299,17 @@ html, body {
 .prov-steps li.run .ps-ico { color: var(--info); }
 .prov-steps .ps-ts { margin-left: auto; flex: 0 0 auto; color: var(--fg-dim); font-size: 10px; font-family: var(--mono); }
 
-.mon-cell { display: flex; flex-wrap: wrap; gap: 5px 7px; align-items: center; }
+/* 「实时监测」列：块级两行 —— ① 凭证 + 在跑/排队；② 最近 run + 数据来源（实时/快照）。
+   以前是一行 flex-wrap 流式排布，「凭证 + 在跑 N 台 + run 徽标 + 时间 + 实时」全挤一条，
+   窄卡下同一列在不同行之间忽上忽下。改成两行后每行的内容固定、节奏一致。 */
+.mon-cell { display: block; }
+.mon-line { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 7px; }
+.mon-line + .mon-line { margin-top: 5px; }
 .mon-num { font-size: 11.5px; color: var(--fg); }
 /* 「排队中」用琥珀色，和「真在跑」的常规色区分开（排队 ≠ 在跑，别混为一谈） */
 .mon-queued { font-size: 11.5px; color: var(--warn); }
 .mon-run { display: inline-flex; align-items: center; gap: 5px; }
-.mon-note { flex-basis: 100%; font-size: 10.5px; line-height: 1.4; }
+.mon-note { font-size: 10.5px; line-height: 1.4; margin-top: 5px; }
 .src-tag {
   font-size: 10px; color: #9dc6ff; border: 1px solid rgba(88,166,255,.4);
   background: rgba(88,166,255,.1); border-radius: 999px; padding: 1px 7px;

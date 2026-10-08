@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（607 项）
+python workbench\selftest.py   :: 离线自测（613 项）
 ```
 
 | 面板 | 内容 |
@@ -1614,6 +1614,40 @@ Actions job 运行中 · run 37269211081 · 自 2026/10/5-13:45
 > **acc-5 的修法（1 分钟）**：用该账号登录 → `https://github.com/settings/emails` 完成邮箱验证 → Actions 立刻恢复。
 > **acc-4 的修法**：GitHub 在**账号级**禁用了它的 Actions，需去该账号的 Billing/设置排查或联系 GitHub 支持。
 
+### 27. 「GitHub 账号管理」排版优化：标题不换行 + 列宽写死 + 两行节奏（v1.6.11）
+
+**现象**（2026-10-08 截图）：这张卡在宽屏下是 `span-5`（约 700px），5 列挤在里面，露出三个毛病：
+
+| 毛病 | 原因 |
+|------|------|
+| 标题被挤成「账号管 / 理」 | `.card-head h2` 没 `nowrap`，被同行的概览文案挤窄 |
+| 「＋ 新增」被挤到第二行 | 概览文案（「5 个账号 · 已隐藏 1 个失效账号 · 监测数据 2026/10/8-09:15 北京（raw）」）跟两个按钮一起塞在 `head-right` 里，`flex-wrap` 只好换行 |
+| 「实时监测」列忽宽忽窄、同一列在不同行之间上下跳 | `auto` 表格布局，列宽随内容抖动；该列内容「凭证 + 在跑 N 台 + run 徽标 + 时间 + 实时」又是一行流式排布 |
+
+**修法**（三处，都是「让它别挤」）：
+
+| 改动 | 说明 |
+|------|------|
+| `index.html` | 概览从 `head-right` 挪到**独占一行的 `.card-sub`**（与「机器运行实况」同一节奏）—— 头部只剩标题 + 两个按钮 |
+| `index.html` | 账号表加 `class="tbl tbl-accounts"` + `<colgroup>`：账号 23% / Secret 17% / 角色 13% / **实时监测 35%** / 启用 12% |
+| `styles.css` | `.card-accounts .card-head h2 { white-space: nowrap; }` + `.tbl-accounts { table-layout: fixed; }` + 上表列宽 + `.tbl-accounts tbody tr { height: 62px; }` |
+| `styles.css` | 「实时监测」列由 `flex-wrap` 一行流改成**块级两行**（`.mon-cell{display:block}` + `.mon-line`）：① 凭证 + 在跑/排队　② 最近 run + 数据来源 |
+| `app.js` | 账号列也改成两行：① 真实账号名（`nowrap`，不再被徽标挤成两行）② `代号 acc-N` + 「兜底」徽标（`.acc-sub`） |
+
+**验证**：`selftest.py` **613 PASS / 0 FAIL**（本批 T516–T521，另修了两条因标记变化而过期的旧断言 T207/T477）；
+另用 Node 跑**真实** `renderAccounts()`（真实 `/api/accounts` 数据 + 桩 DOM），逐行检查产出的 HTML：
+
+```
+行1 账号=yc1966asgf    代号 acc-1                    mon-line 数=2
+行2 账号=3465125540    代号 acc-3 兜底                mon-line 数=2
+行3 账号=code1969sda   代号 acc-4                    mon-line 数=2
+行4 账号=code19698fgh  代号 acc-5                    mon-line 数=2
+行5 账号=code09101     代号 acc-2                    mon-line 数=2
+```
+断言全过：账号名在 `.nowrap` 里 / 代号+兜底在 `.acc-sub` 里 / 「兜底」只出现在 reserve 那一行 / 每行 2 个 `.mon-line`。
+
+> **只改排版**：数据口径、字段、交互一律没动；`.card-accounts` 的 `span-5 → span-12` 断点（≤1720px 占整行）保持不变。
+
 ## 五、目录结构
 
 ```
@@ -1621,7 +1655,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（607 项）
+│   ├── selftest.py                     #   离线自测（613 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js

@@ -483,6 +483,23 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §26。
 
+### 「GitHub 账号管理」排版优化（v1.6.11）
+
+这张卡宽屏下是 `span-5`（约 700px），5 列挤在里面。2026-10-08 截图暴露：标题被挤成「账号管 / 理」、
+「＋ 新增」被挤到第二行、「实时监测」列忽宽忽窄还上下跳。修法：
+
+* 概览（`#accounts-meta`）从 `head-right` 挪到**独占一行的 `.card-sub`**（与「机器运行实况」同一节奏），
+  头部只剩标题 + 两个按钮 → 标题加 `white-space: nowrap`。
+* 账号表加 `tbl-accounts` + `<colgroup>`（账号 23% / Secret 17% / 角色 13% / **实时监测 35%** / 启用 12%），
+  `table-layout: fixed`，行高固定 62px。
+* 「实时监测」列由 `flex-wrap` 一行流改成**块级两行**（`.mon-cell` + `.mon-line`）：
+  ① 凭证 + 在跑/排队　② 最近 run + 数据来源（实时/快照）。
+* 账号列同样两行：① 真实账号名（`nowrap`）　② `代号 acc-N` + 「兜底」徽标（`.acc-sub`）。
+
+> 只改排版 —— 数据口径、字段、交互一律没动；`span-5 → span-12` 的断点（≤1720px）保持不变。
+
+详见主 README 第四节 §27。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -695,7 +712,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（607 项）
+├── selftest.py           # 离线自测（613 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

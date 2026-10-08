@@ -140,11 +140,13 @@
       <div class="card-head">
         <h2>&#128273; GitHub 账号管理</h2>
         <div class="head-right">
-          <span class="muted" id="accounts-meta"></span>
           <button class="btn btn-mini" id="btn-hide-dead" data-tip="隐藏「失效账号」（凭证坏 / 派发失败 / 已停用 / 模板占位）—— 账号表与运行日志一起隐藏；开关记在本机浏览器，刷新后保持">隐藏失效账号</button>
           <button class="btn btn-mini" id="btn-add-account" title="新增一个账号（写回 scripts/pool-config.json）">＋ 新增</button>
         </div>
       </div>
+      <!-- 概览独占一行（与「机器运行实况」同一节奏）：以前塞在 head-right 里，
+           文案一长就把标题挤成「账号管 / 理」、把「＋ 新增」挤到第二行（2026-10-08 截图）。 -->
+      <div class="card-sub"><span class="muted" id="accounts-meta"></span></div>
       <div class="card-body">
         <form class="add-acc" id="form-add-account" hidden autocomplete="off">
           <div class="add-acc-grid">
@@ -179,7 +181,13 @@
           </div>
           <ol class="prov-steps" id="prov-steps"></ol>
         </div>
-        <table class="tbl" id="tbl-accounts">
+        <!-- 列宽写死（配合 styles.css 的 table-layout:fixed）：
+             账号卡是 span-5（宽屏下约 700px），auto 布局下列宽会随内容抖动，
+             「实时监测」列还会被挤到换行。写死后「实时监测」拿最大的一份，各行两行节奏一致。 -->
+        <table class="tbl tbl-accounts" id="tbl-accounts">
+          <colgroup>
+            <col class="c-acc" /><col class="c-secret" /><col class="c-role" /><col class="c-mon" /><col class="c-on" />
+          </colgroup>
           <thead>
             <tr>
               <th data-tip="GitHub 账号（owner）与它在账号池里的 id（acc-N）">账号</th>

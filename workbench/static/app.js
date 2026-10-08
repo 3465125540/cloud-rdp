@@ -883,8 +883,11 @@ function renderAccounts() {
       secret = '<span class="muted">未知</span>';
     }
 
-    // ---- 实时监测列：凭证状态 + 在跑机数 + 最近一次 run ----
-    var mon = [tokenStateBadge(a.token_state, a.report_note)];
+    // ---- 实时监测列：**块级两行** —— ① 凭证 + 在跑/排队；② 最近 run + 数据来源 ----
+    // 以前是一行 flex-wrap 流式排布，「凭证 + 在跑 N 台 + run 徽标 + 时间 + 实时」全挤一条，
+    // 窄卡（span-5 ≈700px）下同一列在不同行之间忽上忽下。拆成两行后节奏固定。
+    var monTop = [tokenStateBadge(a.token_state, a.report_note)];
+    var monBot = [];
     // 「在跑」必须分清「真在跑」和「排队中」——
     // 老的 alive_count 口径是「**未结束**的 run 数」，把 pending / queued 也算进去；
     // 但排队中的 run 还没分到 runner、机器根本没起来，Tailscale 上没有节点，
@@ -899,20 +902,20 @@ function renderAccounts() {
           '（本仓库 windows-rdp.yml 配了 concurrency，同仓库串行，第二次派发会排队）">排队 ' +
           esc(a.queued_count) + " 台</span>";
       }
-      mon.push(monRun);
+      monTop.push(monRun);
     } else if (a.alive_count !== null && a.alive_count !== undefined) {
-      mon.push('<span class="mon-num" title="未结束的 run 数（含排队中）—— 旧版协调器未区分「真在跑 / 排队中」">' +
+      monTop.push('<span class="mon-num" title="未结束的 run 数（含排队中）—— 旧版协调器未区分「真在跑 / 排队中」">' +
         "在跑 " + esc(a.alive_count) + " 台</span>");
     }
     if (a.last_run) {
       var lrj = bjTime(a.last_run.created_at) || a.last_run.created_beijing || "";
-      mon.push('<span class="mon-run">' + badge(a.last_run.state || "-", runStateKind(a.last_run.state)) +
+      monBot.push('<span class="mon-run">' + badge(a.last_run.state || "-", runStateKind(a.last_run.state)) +
         (lrj ? ' <span class="muted" title="北京时间（UTC+8）；原始 UTC：' +
           esc(a.last_run.created_at || "?") + '">' + esc(lrj) + "</span>" : "") + "</span>");
     } else if (a.source && a.source !== "none") {
-      mon.push('<span class="muted">无运行记录</span>');
+      monBot.push('<span class="muted">无运行记录</span>');
     }
-    if (a.source === "live") mon.push('<span class="src-tag" title="工作台用本机 Token 实时探测">实时</span>');
+    if (a.source === "live") monBot.push('<span class="src-tag" title="工作台用本机 Token 实时探测">实时</span>');
     var note = "";
     if (a.report_note) {
       // 备注不再只在「凭证异常」时显示 —— 协调器现在会把「派发失败」也写进 note
@@ -923,21 +926,23 @@ function renderAccounts() {
         esc("原始报错：" + a.report_note) + '">' + esc(te.hint) + "</div>";
     }
 
-    // 账号列主显示 = 真实账号名（owner）；名称缺失时 accLabel 会兜底到代号 / 「未命名账号」。
-    // 代号 acc-N 降级为第二行小字并显式标注「代号」——它是 pool-config 里的 id，仍有对照价值。
+    // 账号列两行：第一行 = 真实账号名（nowrap，别让徽标/代号把它挤成两行）；
+    // 第二行 = 代号 acc-N + 「兜底」徽标（都是元信息，放一起，不再去挤第一行）。
     var name = esc(accLabel(a.id, a.owner));
     if (a.placeholder) name += ' <span class="muted">(待填)</span>';
+    var sub = '<span class="mono muted">代号 ' + esc(a.id || "-") + "</span>";
     if (a.reserve) {
       // 兜底账号（pool-config 里 reserve: true）：协调器只在第一梯队全都用不了时才派它。
-      name += ' <span class="badge mute" data-tip="兜底账号：只在第一梯队（其余所有账号）都用不了时' +
+      sub += ' <span class="badge mute" data-tip="兜底账号：只在第一梯队（其余所有账号）都用不了时' +
         '才被派发 —— 用来降低它的使用频率。见 pool-config.json 的 reserve 字段。">兜底</span>';
     }
 
     return "<tr>" +
-      '<td class="strong">' + name + '<div class="muted mono">代号 ' + esc(a.id || "-") + "</div></td>" +
+      '<td class="strong"><div class="nowrap">' + name + '</div><div class="acc-sub">' + sub + "</div></td>" +
       "<td>" + secret + '<div class="muted mono">' + esc(a.token_secret || "") + "</div></td>" +
       "<td>" + roleBadge(a.role) + "</td>" +
-      '<td class="mon-cell">' + mon.join(" ") + note + "</td>" +
+      '<td class="mon-cell"><div class="mon-line">' + monTop.join(" ") + "</div>" +
+        (monBot.length ? '<div class="mon-line">' + monBot.join(" ") + "</div>" : "") + note + "</td>" +
       '<td class="right"><label class="toggle"><input type="checkbox" data-acc="' + esc(a.id) + '"' +
         (a.enabled ? " checked" : "") + '><span class="slider"></span></label></td>' +
       "</tr>";
