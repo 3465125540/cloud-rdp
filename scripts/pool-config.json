@@ -33,7 +33,7 @@
       "owner": "yc1966asgf",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_1",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "acc-3",
