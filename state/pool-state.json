@@ -1,7 +1,7 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-08T06:29:33.0855043Z",
+  "updated_utc": "2026-10-08T07:30:54.0846790Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
@@ -76,7 +76,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "账号已停用　最近一次 run 启动失败（startup_failure）：GitHub 没建出 job —— 常见于「账号邮箱未验证」/「该账号 Actions 被禁用」/「账单或额度问题」，去该账号的 GitHub 设置里查（run 页面会有 Annotations 写明原因）",
+      "note": "账号已停用",
       "role": ""
     },
     {
@@ -106,22 +106,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "HTTP 403 Forbidden [/repos/code10081/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=20] Sorry. Your account was suspended　派发失败（fill）：HTTP 403 Forbidden [/repos/code10081/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches] Sorry. Your account was suspended",
-      "role": ""
-    },
-    {
-      "id": "acc-7",
-      "owner": "code1420",
-      "repo": "cloud-rdp",
-      "enabled": true,
-      "secret_name": "POOL_TOKEN_7",
-      "token_state": "missing",
-      "alive_count": 0,
-      "running_count": 0,
-      "queued_count": 0,
-      "total": 0,
-      "last_run": null,
-      "note": "Secret POOL_TOKEN_7 未配置",
+      "note": "HTTP 403 Forbidden [/repos/code10081/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=20] Sorry. Your account was suspended",
       "role": ""
     },
     {
@@ -130,22 +115,22 @@
       "repo": "cloud-rdp",
       "enabled": true,
       "secret_name": "POOL_TOKEN_8",
-      "token_state": "missing",
+      "token_state": "ok",
       "alive_count": 0,
       "running_count": 0,
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "Secret POOL_TOKEN_8 未配置",
+      "note": "",
       "role": ""
     }
   ],
   "recent_dispatches": {
-    "code1969sda": "2026-10-05T15:00:53.7416181Z",
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
     "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
+    "code1969sda": "2026-10-05T15:00:53.7416181Z",
     "3465125540": "2026-10-07T21:24:32.6792531Z",
-    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z"
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z"
   }
 }
