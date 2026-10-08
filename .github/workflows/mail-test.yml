@@ -43,6 +43,18 @@ on:
         description: 'conn_ip 非空时：密码（默认 a）'
         required: false
         default: 'a'
+      uu_device:
+        description: '可选：UU远程 设备 ID —— 填了就并进同一封邮件（备用通道段）'
+        required: false
+        default: ''
+      uu_code:
+        description: '可选：UU远程 连接码'
+        required: false
+        default: ''
+      uu_machine:
+        description: '可选：UU远程 机器标识，如 github-rdp-server (100.x)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -85,6 +97,11 @@ jobs:
           $env:CLOUDRDP_SYS_DIR = $sys
           # ⚠️ 必须用**哈希表** splat：数组 splat（@('-Ip','x')）是**按位置**绑定的，
           #    '-Ip' 会被当成位置参数的值 —— 真机实测「A positional parameter cannot be found」。
+          # 可选：把 UU 段写进 _state\uu-remote.json，让这封「连接信息」邮件带上备用通道
+          if ('${{ inputs.uu_device }}' -ne '') {
+            @{ machine = '${{ inputs.uu_machine }}'; deviceId = '${{ inputs.uu_device }}'; customCode = '${{ inputs.uu_code }}' } |
+              ConvertTo-Json | Set-Content -LiteralPath "$sys\_state\uu-remote.json" -Encoding UTF8
+          }
           $h = @{ Ip = '${{ inputs.conn_ip }}'; LogPath = "$sys\_state\connmail.log" }
           if ('${{ inputs.conn_user }}' -ne '') { $h.User = '${{ inputs.conn_user }}' }
           if ('${{ inputs.conn_pass }}' -ne '') { $h.Pass = '${{ inputs.conn_pass }}' }
