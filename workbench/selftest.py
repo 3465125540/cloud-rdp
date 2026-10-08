@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.12", server.VERSION == "1.6.12", server.VERSION)
+    check("T168 server.py 版本 1.6.13", server.VERSION == "1.6.13", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2703,8 +2703,9 @@ def main():
           'short: "凭证被拒 · 403"' in app_txt and 'short: "凭证无效 · 401"' in app_txt
           and 'short: "仓库不可见 · 404"' in app_txt and 'short: "被限流 · 429"' in app_txt)
     check("T481 ★ 「凭证」列徽标走 explainTokenError（不再写死「查询失败」）",
-          "function tokenStateBadge(ts, note)" in app_txt and "explainTokenError(note)" in app_txt
-          and "tokenStateBadge(a.token_state, a.report_note)" in app_txt)
+          "function tokenStateBadge(ts, note, secretPresent)" in app_txt
+          and "explainTokenError(note)" in app_txt
+          and "tokenStateBadge(a.token_state, a.report_note, a.secret_present)" in app_txt)
     check("T482 ★ 账号表备注行显示人话提示，原始 .NET 串降级到 tooltip",
           "explainTokenError(a.report_note)" in app_txt
           and 'esc(a.report_note) + "</div>"' not in app_txt)
@@ -2862,13 +2863,34 @@ def main():
           "'<td class=\"strong\"><div class=\"nowrap\">' + name + '</div><div class=\"acc-sub\">' + sub + \"</div></td>\"" in app_txt
           and 'var sub = \'<span class="mono muted">代号 \'' in app_txt)
     check("T521 ★ app.js：实时监测列渲染两个 .mon-line（上=凭证+在跑，下=run+来源）",
-          'var monTop = [tokenStateBadge(a.token_state, a.report_note)];' in app_txt
+          'var monTop = [tokenStateBadge(a.token_state, a.report_note, a.secret_present)];' in app_txt
           and 'var monBot = [];' in app_txt
           and "'<td class=\"mon-cell\"><div class=\"mon-line\">' + monTop.join(\" \") + \"</div>\" +" in app_txt)
 
     check("T522 ★ isAccountDead 也认「派发成功但机器起不来」（startup_failure）—— 否则「隐藏失效账号」藏不掉它",
           'String(a.last_run.state || "") === "startup_failure"' in app_txt
           and "启动失败" in idx_txt)
+
+    # ---------------- 新账号「Secret 未生效」：协调器 env 漏列（v1.6.13） ----------------
+    # 起因（2026-10-08 用户贴 acc-8 那行）：Secret 列显示「已配置」、实时监测却显示「缺 Secret」。
+    #   真因：pool-coordinator.yml 的 env: 只列到 POOL_TOKEN_6 → 新账号的 Secret 名没传进协调器，
+    #   脚本只能看到空值，于是报「Secret POOL_TOKEN_8 未配置」（其实 Secret 存在、fork 也正常）。
+    print("[协调器 env 必须覆盖全部账号 Secret v1.6.13]")
+    _coord_yml = open(os.path.join(repo_dir, ".github", "workflows", "pool-coordinator.yml"),
+                      encoding="utf-8").read()
+    _missing = [a.get("token_secret") for a in _pc["accounts"]
+                if a.get("token_secret") and (str(a["token_secret"]) + ": ${{ secrets.") not in _coord_yml]
+    check("T523 ★ pool-coordinator.yml 的 env 覆盖 pool-config 里**每一个** token_secret（漏列=等于没配）",
+          not _missing, "漏列：%s" % _missing)
+    check("T524 env 余量列到 POOL_TOKEN_12（以后加账号不必再改 workflow）",
+          "POOL_TOKEN_12: ${{ secrets.POOL_TOKEN_12 }}" in _coord_yml)
+    check("T525 pool-config 里已无 acc-7（owner code1420 是笔误，code1420/cloud-rdp 是 404）",
+          not [a for a in _pc["accounts"] if a.get("id") == "acc-7"])
+    check("T526 ★ 面板能说清「Secret 名存在、但协调器取不到值」这个自相矛盾",
+          "function tokenStateBadge(ts, note, secretPresent)" in app_txt
+          and 'badge("Secret 未生效", "bad")' in app_txt
+          and "tokenStateBadge(a.token_state, a.report_note, a.secret_present)" in app_txt
+          and "没有列这个 Secret 名" in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

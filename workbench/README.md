@@ -500,6 +500,22 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §27。
 
+### 新账号「Secret 已配置却报缺 Secret」：协调器 env 漏列（v1.6.13）
+
+`pool-coordinator.yml` 的 `env:` 是一份**写死的 Secret 名单**。新账号的 Secret 建好了、fork 也正常，
+但只要那个名字**没列进 env**，GitHub 就不会把它注入 job → 脚本只看到空值 → 报「Secret POOL_TOKEN_N 未配置」。
+**漏列 = 等于没配**，而界面完全看不出（Secret 列表里它确实在）。
+
+* `pool-coordinator.yml`：env 从 `POOL_TOKEN_1..6` 补到 `..12`（不存在的 secret 引用给空串、不报错 → 多列是安全的余量）。
+* `tokenStateBadge()` 收 `secretPresent`：Secret 名**存在**但协调器取不到值 → 徽标「**Secret 未生效**」+ tooltip 指向 `pool-coordinator.yml`；
+  备注也直接写出「把 POOL_TOKEN_N 加进那份 env 列表即可」。
+* `selftest.py` 新增断言：**env 必须覆盖 pool-config 里每一个 `token_secret`** —— 防回归。
+
+> 另：acc-7 (`code1420`) 的 owner 是笔误（`code1420/cloud-rdp` = 404，与 acc-8 的 `code14201` 撞车）→ 已从 pool-config 移除。
+> 工作台目前**没有「删除账号」入口**，这次是直接改 `scripts/pool-config.json`。
+
+详见主 README 第四节 §28。
+
 ### 「状态详情」可折叠 —— 机器一多不撑表
 
 「状态」列 = 徽标（在线 / 运行中 / 已结束…）+ 一行**详情**
@@ -712,7 +728,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（614 项）
+├── selftest.py           # 离线自测（620 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

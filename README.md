@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（614 项）
+python workbench\selftest.py   :: 离线自测（620 项）
 ```
 
 | 面板 | 内容 |
@@ -1650,6 +1650,47 @@ v1.6.10 只把原因写进 note，而 note 文案里没有「派发失败」四�
 
 > **只改排版**：数据口径、字段、交互一律没动；`.card-accounts` 的 `span-5 → span-12` 断点（≤1720px 占整行）保持不变。
 
+### 28. 新账号「Secret 已配置却报缺 Secret」：协调器 env 漏列（v1.6.13）
+
+**现象**（2026-10-08 用户贴 acc-8 那行）：同一行里两个口径打架 ——
+
+```
+账号 code14201 (acc-8)   Secret 列：已配置 POOL_TOKEN_8   实时监测列：缺 Secret
+                        备注：Secret POOL_TOKEN_8 未配置
+```
+
+**真机取证**：Secret 列没错、实时监测也没错，**是协调器根本没拿到那个 Secret 的值**：
+
+| 检查 | 结果 |
+|------|------|
+| hub 的 Secret 列表 | `POOL_TOKEN_8` **存在**（2026-10-08T06:28:39Z 建的） |
+| `code14201/cloud-rdp` | **存在**（public fork，02:42 推过） |
+| 协调器日志 | `账号 acc-8 (code14201)：跳过（Secret POOL_TOKEN_8 未配置）` |
+| **`pool-coordinator.yml` 的 `env:`** | **只列到 `POOL_TOKEN_6`** ← **元凶** |
+
+`Get-PoolAccountToken` 先读 `$env:POOL_TOKEN_8`、再读 `POOL_TOKENS`（JSON）。env 里没列这个 Secret 名，
+**GitHub 就不会把它注入 job 环境** → 脚本只看到空值 → 报「未配置」。
+**漏列 = 等于没配** —— 而界面看不出这一点（Secret 列表里它确实在）。
+
+**修法**：
+
+| 改动 | 说明 |
+|------|------|
+| `pool-coordinator.yml` | `env:` 从 `POOL_TOKEN_1..6` **补到 `POOL_TOKEN_1..12`**（对**不存在**的 secret 引用，GitHub 给空串、不报错 → 多列是安全的余量，以后加账号不必再改 workflow） |
+| `app.js` | `tokenStateBadge()` 收 `secretPresent`：Secret 名**存在**但协调器取不到值 → 徽标「**Secret 未生效**」（不再是笼统的「缺 Secret」）+ tooltip 指向 `pool-coordinator.yml` |
+| `app.js` | 备注给准确指引：`Secret「POOL_TOKEN_8」在 hub 里存在，但协调器取不到它的值 —— 最常见是 pool-coordinator.yml 的 env: 没列这个 Secret 名` |
+| `selftest.py` | **新增防回归断言 T523**：`pool-coordinator.yml` 的 env **必须覆盖 pool-config 里每一个 `token_secret`** —— 这类 bug 从此不可能再溜过去 |
+
+**顺带处理**：`acc-7 (code1420)` **owner 写错了**（`code1420/cloud-rdp` = 404，与 acc-8 的 `code14201` 撞车，
+疑似笔误留下的幽灵账号）→ **已从 pool-config 移除**（本仓库工作台没有「删除账号」入口，直接改的 `scripts/pool-config.json`）。
+
+**验证**：`selftest.py` **620 PASS / 0 FAIL**（本批 T523–T526，另修两条因函数签名变化而过期的旧断言 T481/T521）；
+`pool-coordinator.yml` 过 `yaml.safe_load` 校验；Node 跑**真实** `renderAccounts()`（真实 `/api/accounts`）：
+acc-8 徽标 = 「Secret 未生效」+ 备注含 `pool-coordinator.yml`，acc-3 仍是「凭证正常」且不误标。
+
+> **生效**：`pool-coordinator.yml` 是 GitHub 侧 → **下一轮协调器 run 生效**（之后 acc-8 应变成 `token_state=ok`）；
+> 前端改动 → **浏览器刷新即生效**。
+
 ## 五、目录结构
 
 ```
@@ -1657,7 +1698,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（614 项）
+│   ├── selftest.py                     #   离线自测（620 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1758,6 +1799,7 @@ cloud-rdp/
 | **想让某个账号少用点（当兜底）、或界面上一堆失效账号太吵** | 原来候选顺序就是 pool-config 里的账号顺序，hub 账号总被优先；失效账号既占候选位又占屏幕 | **v1.6.8 起**：账号项加 `"reserve": true` 即降为**兜底**（只在第一梯队全不可用时才派）；协调器同时排除「已知不可用」账号（凭证坏/派发失败），死账号不再占位。前端新增「**隐藏失效账号**」按钮，一键藏掉失效账号的账号表 + 运行日志。详见第四节 §24 |
 | **机器运行实况显示「运行中」，但机器其实早没了** | 池内机器行的状态来自协调器发布的 pool-state 快照，而实时纠偏原来**只认 hub 账号**；其余账号（哪怕 fork 是公开的、本机明明读得到）一律退回快照 —— 协调器 cron 又常被延迟数小时 | **v1.6.9 起**：实时纠偏扩到**所有读得到的账号**（`_account_runs` 直查各 fork 的 runs）；读不到的（私有 fork）把徽标降级成「运行中 · 未核实」并在详情行摊出快照年龄。详见第四节 §25 |
 | **账号「凭证正常」但机器一直起不来（run 显示 `startup_failure`）** | GitHub 收下了 dispatch（返回 204）但**没建出 job** —— 常见于**该账号邮箱未验证**、该账号 Actions 被禁用、账单/额度问题。这类故障不留「派发失败」痕迹，原来的「已知不可用」检测看不见 | **v1.6.10 起**：`last_run.conclusion == startup_failure` 也纳入「已知不可用」（协调器不再白派），并把原因写进账号巡检 note；前端把 `startup_failure` 渲染成红色。**修法**：去该账号 `github.com/settings/emails` 验证邮箱（run 页面的 Annotations 会写明原因）。详见第四节 §26 |
+| **新加的账号显示「缺 Secret」，但 Secret 列明明写着「已配置」** | `pool-coordinator.yml` 的 `env:` 是一份**写死的 Secret 名单**（原来只到 `POOL_TOKEN_6`）—— 新账号的 Secret 名没列进去，GitHub 就不注入，脚本只看到空值 → 报「未配置」。**漏列 = 等于没配** | **v1.6.13 起**：env 补到 `POOL_TOKEN_12`（对不存在的 secret 引用给空串、不报错）；面板改说「**Secret 未生效**」并直接指向 `pool-coordinator.yml`；selftest 新增断言，**要求 env 覆盖 pool-config 里每一个 token_secret**。详见第四节 §28 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

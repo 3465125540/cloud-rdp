@@ -813,7 +813,7 @@ function explainTokenError(note) {
   return { short: "查询失败", kind: "warn", hint: s || "协调器巡检该账号时失败（原因未知）。" };
 }
 
-function tokenStateBadge(ts, note) {
+function tokenStateBadge(ts, note, secretPresent) {
   if (ts === "ok") {
     // 凭证没问题，但本轮「派发失败」（如 422 Actions 被禁用）—— 不显出来就会被误判成「这账号是好的」。
     if (String(note || "").indexOf("派发失败") >= 0) {
@@ -823,7 +823,16 @@ function tokenStateBadge(ts, note) {
     }
     return badge("凭证正常", "ok");
   }
-  if (ts === "missing") return badge("缺 Secret", "bad");
+  if (ts === "missing") {
+    // 「Secret 名在 hub 里存在、但协调器取不到值」和「压根没建 Secret」是两回事，徽标要说清。
+    // acc-8 事故（2026-10-08）：Secret 建了、fork 也正常，只因为 pool-coordinator.yml 的 env 漏列了它。
+    if (secretPresent === true) {
+      return '<span data-tip="hub 里**有**这个 Secret 名，但协调器取不到它的值 —— ' +
+        '最常见的原因是 .github/workflows/pool-coordinator.yml 的 env: 列表里漏列了它' +
+        '（漏列 = 等于没配，脚本只能看到空值）。">' + badge("Secret 未生效", "bad") + "</span>";
+    }
+    return badge("缺 Secret", "bad");
+  }
   if (ts === "query_failed") {
     var te = explainTokenError(note);
     return '<span data-tip="' + esc(te.hint + "　原始报错：" + (note || "")) + '">' +
@@ -890,7 +899,7 @@ function renderAccounts() {
     // ---- 实时监测列：**块级两行** —— ① 凭证 + 在跑/排队；② 最近 run + 数据来源 ----
     // 以前是一行 flex-wrap 流式排布，「凭证 + 在跑 N 台 + run 徽标 + 时间 + 实时」全挤一条，
     // 窄卡（span-5 ≈700px）下同一列在不同行之间忽上忽下。拆成两行后节奏固定。
-    var monTop = [tokenStateBadge(a.token_state, a.report_note)];
+    var monTop = [tokenStateBadge(a.token_state, a.report_note, a.secret_present)];
     var monBot = [];
     // 「在跑」必须分清「真在跑」和「排队中」——
     // 老的 alive_count 口径是「**未结束**的 run 数」，把 pending / queued 也算进去；
@@ -926,8 +935,17 @@ function renderAccounts() {
       // （token_state 可能仍是 ok，如 acc-4 的 422 Actions 被禁用）。
       // 原始报错多是 .NET 异常串 / GitHub message → 翻译成「人话 + 该怎么办」，原始串留 tooltip 备查。
       var te = explainTokenError(a.report_note);
+      var hint = te.hint;
+      // 只有工作台看得见的自相矛盾：Secret 列说「已配置」、实时监测却说「缺 Secret」。
+      // 真因是 Secret 名在 hub 里存在、但协调器取不到值 —— 最常见是 pool-coordinator.yml 的 env 漏列。
+      if (a.token_state === "missing" && a.secret_present === true) {
+        hint = "Secret「" + (a.token_secret || "?") + "」在 hub 里**存在**，但协调器取不到它的值。" +
+          "最常见的原因是 .github/workflows/pool-coordinator.yml 的 env: 列表里**没有列这个 Secret 名**" +
+          "（漏列 = 等于没配，脚本只能看到空值）。把 " + (a.token_secret || "?") +
+          " 加进那份 env 列表即可（本仓库 v1.6.13 已补到 POOL_TOKEN_12）。";
+      }
       note = '<div class="muted mon-note" title="' +
-        esc("原始报错：" + a.report_note) + '">' + esc(te.hint) + "</div>";
+        esc("原始报错：" + a.report_note) + '">' + esc(hint) + "</div>";
     }
 
     // 账号列两行：第一行 = 真实账号名（nowrap，别让徽标/代号把它挤成两行）；

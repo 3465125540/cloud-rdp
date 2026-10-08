@@ -73,13 +73,6 @@
       "enabled": true
     },
     {
-      "id": "acc-7",
-      "owner": "code1420",
-      "repo": "cloud-rdp",
-      "token_secret": "POOL_TOKEN_7",
-      "enabled": true
-    },
-    {
       "id": "acc-8",
       "owner": "code14201",
       "repo": "cloud-rdp",

@@ -76,12 +76,22 @@ jobs:
           # 加账号只需改这个 Secret，不用动本文件。
           POOL_TOKENS: ${{ secrets.POOL_TOKENS }}
           # 兜底：也可给每个账号单独建 Secret，名字与 pool-config.json 里的 token_secret 对应。
+          # ⚠️ 这份列表**必须覆盖 pool-config.json 里所有账号的 token_secret** —— 漏列等于没配：
+          #    脚本读不到 env 变量，只会看到空值，然后报「Secret POOL_TOKEN_N 未配置」（其实 Secret 存在）。
+          #    2026-10-08 acc-8 就栽在这（Secret 建了、fork 也正常，只因为这里只列到 _6）。
+          #    GitHub 对**不存在**的 secret 引用给空串、不报错，所以这里多列几个是无害的余量。
           POOL_TOKEN_1: ${{ secrets.POOL_TOKEN_1 }}
           POOL_TOKEN_2: ${{ secrets.POOL_TOKEN_2 }}
           POOL_TOKEN_3: ${{ secrets.POOL_TOKEN_3 }}
           POOL_TOKEN_4: ${{ secrets.POOL_TOKEN_4 }}
           POOL_TOKEN_5: ${{ secrets.POOL_TOKEN_5 }}
           POOL_TOKEN_6: ${{ secrets.POOL_TOKEN_6 }}
+          POOL_TOKEN_7: ${{ secrets.POOL_TOKEN_7 }}
+          POOL_TOKEN_8: ${{ secrets.POOL_TOKEN_8 }}
+          POOL_TOKEN_9: ${{ secrets.POOL_TOKEN_9 }}
+          POOL_TOKEN_10: ${{ secrets.POOL_TOKEN_10 }}
+          POOL_TOKEN_11: ${{ secrets.POOL_TOKEN_11 }}
+          POOL_TOKEN_12: ${{ secrets.POOL_TOKEN_12 }}
         run: |
           # 输出写到仓库工作区之外（/tmp）——否则这份未跟踪的 state/pool-state.json
           # 会挡住第 3 步 `git checkout pool-state`（该分支跟踪同一路径）而报
