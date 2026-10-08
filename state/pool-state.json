@@ -1,7 +1,7 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-08T01:15:44.9830774Z",
+  "updated_utc": "2026-10-08T02:02:30.6523762Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
@@ -10,29 +10,21 @@
     "run_id": 37689189974,
     "since": "2026-10-07T21:24:39Z"
   },
-  "standby": [
-    {
-      "account": "acc-5",
-      "owner": "code19698fgh",
-      "repo": "cloud-rdp",
-      "run_id": null,
-      "since": "2026-10-08T01:15:37.5195272Z"
-    }
-  ],
+  "standby": [],
   "accounts": [
     {
       "id": "acc-1",
       "owner": "yc1966asgf",
       "repo": "cloud-rdp",
-      "enabled": true,
+      "enabled": false,
       "secret_name": "POOL_TOKEN_1",
-      "token_state": "query_failed",
+      "token_state": "disabled",
       "alive_count": 0,
       "running_count": 0,
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "HTTP 403 Forbidden [/repos/yc1966asgf/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=20] Sorry. Your account was suspended",
+      "note": "账号已停用",
       "role": ""
     },
     {
@@ -69,7 +61,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "",
+      "note": "派发失败（fill）：HTTP 422 UnprocessableEntity [/repos/code1969sda/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches] Actions has been disabled for this user.",
       "role": ""
     },
     {
@@ -84,15 +76,15 @@
       "queued_count": 0,
       "total": 20,
       "last_run": {
-        "run_id": 37689187118,
+        "run_id": 37714445785,
         "status": "completed",
         "conclusion": "startup_failure",
-        "created_at": "2026-10-07T21:24:38Z",
+        "created_at": "2026-10-08T01:44:47Z",
         "event": "workflow_dispatch",
-        "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/37689187118"
+        "url": "https://github.com/code19698fgh/cloud-rdp/actions/runs/37714445785"
       },
-      "note": "",
-      "role": "standby"
+      "note": "最近一次 run 启动失败（startup_failure）：GitHub 没建出 job —— 常见于「账号邮箱未验证」/「该账号 Actions 被禁用」/「账单或额度问题」，去该账号的 GitHub 设置里查（run 页面会有 Annotations 写明原因）",
+      "role": ""
     },
     {
       "id": "acc-2",
@@ -100,6 +92,21 @@
       "repo": "cloud-rdp",
       "enabled": true,
       "secret_name": "POOL_TOKEN_2",
+      "token_state": "query_failed",
+      "alive_count": 0,
+      "running_count": 0,
+      "queued_count": 0,
+      "total": 0,
+      "last_run": null,
+      "note": "HTTP 403 Forbidden [/repos/code09101/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=20] Sorry. Your account was suspended",
+      "role": ""
+    },
+    {
+      "id": "acc-6",
+      "owner": "code10081",
+      "repo": "cloud-rdp",
+      "enabled": true,
+      "secret_name": "POOL_TOKEN_6",
       "token_state": "ok",
       "alive_count": 0,
       "running_count": 0,
@@ -111,11 +118,11 @@
     }
   ],
   "recent_dispatches": {
-    "3465125540": "2026-10-07T21:24:32.6792531Z",
-    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
-    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
     "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
+    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
     "code1969sda": "2026-10-05T15:00:53.7416181Z",
-    "yc1966asgf": "2026-10-03T05:54:54.6571663Z"
+    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "3465125540": "2026-10-07T21:24:32.6792531Z"
   }
 }
