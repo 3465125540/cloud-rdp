@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.13", server.VERSION == "1.6.13", server.VERSION)
+    check("T168 server.py 版本 1.6.14", server.VERSION == "1.6.14", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2891,6 +2891,18 @@ def main():
           and 'badge("Secret 未生效", "bad")' in app_txt
           and "tokenStateBadge(a.token_state, a.report_note, a.secret_present)" in app_txt
           and "没有列这个 Secret 名" in app_txt)
+
+    # ---------------- 启用/停用 开关必须推 hub（v1.6.14） ----------------
+    # 起因（2026-10-12）：瑀子把 acc-1/2/4/5 启用，协调器却毫无变化 ——
+    #   api_accounts_toggle 只写本地 pool-config、从不推 hub，而协调器读的是 hub 那份
+    #   ⇒ 这个开关是「假开关」：界面提示「已启用」，池子那边一点没动。
+    print("[启用开关必须推 hub v1.6.14]")
+    check("T527 ★ api_accounts_toggle 保存后会把配置推到 hub，并回报 pushed / push_detail",
+          "pushed, push_detail = push_pool_config_to_hub(cfg)" in srv_txt
+          and '"pushed": pushed, "push_detail": push_detail' in srv_txt)
+    check("T528 ★ 前端在推送失败时如实告警（不再一律提示「已启用」）",
+          "res.pushed === false" in app_txt and "推送到 hub 失败" in app_txt
+          and "（已同步到池子）" in app_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

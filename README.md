@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（620 项）
+python workbench\selftest.py   :: 离线自测（622 项）
 ```
 
 | 面板 | 内容 |
@@ -1691,6 +1691,29 @@ acc-8 徽标 = 「Secret 未生效」+ 备注含 `pool-coordinator.yml`，acc-3 
 > **生效**：`pool-coordinator.yml` 是 GitHub 侧 → **下一轮协调器 run 生效**（之后 acc-8 应变成 `token_state=ok`）；
 > 前端改动 → **浏览器刷新即生效**。
 
+### 29. 「启用/停用」是个假开关：只写本地、不推 hub（v1.6.14）
+
+**现象**（2026-10-12）：把 acc-1 / acc-2 / acc-4 / acc-5 的「启用」打开，界面提示「已启用」，
+**协调器那边毫无变化** —— 池子依旧按旧状态跑。
+
+**根因**：协调器读的是 **hub 仓库里**的 `scripts/pool-config.json`（`pool-coordinator.yml` 会 checkout 它），
+而 `POST /api/accounts/toggle` **只调 `save_pool_config()` 写本地文件**，从不推送；
+`push_pool_config_to_hub()` 此前只在「新增账号」的自动部署 job 里被调用。
+⇒ 开关是「假开关」：界面绿了，池子没动。（同一个坑对「新增」不存在 —— 那条路会推。）
+
+**修法**：
+
+| 文件 | 改动 |
+|------|------|
+| `workbench/server.py` | `api_accounts_toggle` 保存后**同步调 `push_pool_config_to_hub(cfg)`**，响应里加 `pushed` / `push_detail` |
+| `workbench/static/app.js` | 开关回调读 `pushed`：为 `false` 时**如实告警**「已启用（本地），但推送到 hub 失败：X —— 池子那边还看不到这次改动」；成功才提示「已同步到池子」 |
+
+**验证**：`selftest.py` **622 PASS / 0 FAIL**（本批 T527–T528）。
+另：本次先把瑀子已经点好的本地状态**手工推了一次**（`push_pool_config_to_hub` → `已提交到 3465125540/cloud-rdp@main`），
+所以这次的启用已经生效；代码修复保证**以后点开关就自动推**。
+
+> ⚠️ 改的是 `server.py` → **要重启工作台**才生效（在重启前，开关仍是「只写本地」）。
+
 ## 五、目录结构
 
 ```
@@ -1698,7 +1721,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（620 项）
+│   ├── selftest.py                     #   离线自测（622 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1800,6 +1823,7 @@ cloud-rdp/
 | **机器运行实况显示「运行中」，但机器其实早没了** | 池内机器行的状态来自协调器发布的 pool-state 快照，而实时纠偏原来**只认 hub 账号**；其余账号（哪怕 fork 是公开的、本机明明读得到）一律退回快照 —— 协调器 cron 又常被延迟数小时 | **v1.6.9 起**：实时纠偏扩到**所有读得到的账号**（`_account_runs` 直查各 fork 的 runs）；读不到的（私有 fork）把徽标降级成「运行中 · 未核实」并在详情行摊出快照年龄。详见第四节 §25 |
 | **账号「凭证正常」但机器一直起不来（run 显示 `startup_failure`）** | GitHub 收下了 dispatch（返回 204）但**没建出 job** —— 常见于**该账号邮箱未验证**、该账号 Actions 被禁用、账单/额度问题。这类故障不留「派发失败」痕迹，原来的「已知不可用」检测看不见 | **v1.6.10 起**：`last_run.conclusion == startup_failure` 也纳入「已知不可用」（协调器不再白派），并把原因写进账号巡检 note；前端把 `startup_failure` 渲染成红色。**修法**：去该账号 `github.com/settings/emails` 验证邮箱（run 页面的 Annotations 会写明原因）。详见第四节 §26 |
 | **新加的账号显示「缺 Secret」，但 Secret 列明明写着「已配置」** | `pool-coordinator.yml` 的 `env:` 是一份**写死的 Secret 名单**（原来只到 `POOL_TOKEN_6`）—— 新账号的 Secret 名没列进去，GitHub 就不注入，脚本只看到空值 → 报「未配置」。**漏列 = 等于没配** | **v1.6.13 起**：env 补到 `POOL_TOKEN_12`（对不存在的 secret 引用给空串、不报错）；面板改说「**Secret 未生效**」并直接指向 `pool-coordinator.yml`；selftest 新增断言，**要求 env 覆盖 pool-config 里每一个 token_secret**。详见第四节 §28 |
+| **账号「启用/停用」开关点了没反应** | 协调器读的是 **hub 仓库里**的 `pool-config.json`，而该开关原来**只写本地文件、不推送** | **v1.6.14 起**：`api_accounts_toggle` 保存后同步推 hub，响应带 `pushed`；前端在推送失败时如实告警。⚠️ 需重启工作台生效。详见第四节 §29 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

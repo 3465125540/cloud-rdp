@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.13"
+VERSION = "1.6.14"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -3251,9 +3251,17 @@ def api_accounts_toggle(h, params):
         save_pool_config(cfg)
     except Exception as e:
         return h._json(500, {"ok": False, "error": "写回失败：%s" % e})
+    # ⚠️ 协调器读的是 **hub 仓库里**那份 pool-config —— 只写本地等于没改。
+    # 不推的话这个开关就是「假开关」：界面提示「已启用」，池子那边毫无变化
+    # （2026-10-12 瑀子把 acc-1/2/4/5 启用后，协调器一直看不到，就是这么来的）。
+    pushed, push_detail = False, ''
+    try:
+        pushed, push_detail = push_pool_config_to_hub(cfg)
+    except Exception as e:
+        push_detail = "%s: %s" % (type(e).__name__, e)
     clear_cache()
     return h._json(200, {"ok": True, "id": acc_id, "enabled": bool(enabled),
-                         "path": pc["path"]})
+                         "path": pc["path"], "pushed": pushed, "push_detail": push_detail})
 
 
 _RE_OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")

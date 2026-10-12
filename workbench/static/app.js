@@ -1617,8 +1617,15 @@ function bind() {
     var id = cb.dataset.acc, on = cb.checked;
     cb.disabled = true;
     api("/api/accounts/toggle", { method: "POST", body: JSON.stringify({ id: id, enabled: on }) })
-      .then(function () {
-        toast("账号 " + esc(id) + " 已" + (on ? "启用" : "停用"), "ok");
+      .then(function (res) {
+        // 开关要「推 hub」才算真生效 —— 协调器读的是 hub 那份 pool-config。
+        // 推送失败必须如实说，否则又是一次「界面说已启用、池子毫无变化」（2026-10-12 踩过）。
+        if (res && res.pushed === false) {
+          toast("账号 " + esc(id) + " 已" + (on ? "启用" : "停用") + "（本地），但推送到 hub 失败：" +
+                esc(res.push_detail || "未知原因") + " —— 池子那边还看不到这次改动", "warn", 12000);
+        } else {
+          toast("账号 " + esc(id) + " 已" + (on ? "启用" : "停用") + "（已同步到池子）", "ok");
+        }
         load(true);
       })
       .catch(function (err) {

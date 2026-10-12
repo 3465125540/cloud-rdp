@@ -445,6 +445,18 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §24。
 
+### 「启用/停用」原来是假开关（v1.6.14）
+
+协调器读的是 **hub 仓库里**的 `scripts/pool-config.json`，而 `POST /api/accounts/toggle` 原来**只写本地文件、不推送**
+—— 界面提示「已启用」，池子那边毫无变化。
+
+* `server.py`：`api_accounts_toggle` 保存后**同步推 hub**，响应带 `pushed` / `push_detail`。
+* `app.js`：`pushed === false` 时**如实告警**（「已启用（本地），但推送 hub 失败：X」），成功才提示「已同步到池子」。
+
+> ⚠️ 改的是 `server.py` → **要重启工作台**才生效。
+
+详见主 README 第四节 §29。
+
 ### 机器运行实况「显示不同步」：实时纠偏扩到所有可读账号（v1.6.9）
 
 **现象**：池内机器行写着「运行中 · primary」，但那个 run 早已 `cancelled`、Tailscale 节点也离线。
@@ -728,7 +740,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（620 项）
+├── selftest.py           # 离线自测（622 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII
