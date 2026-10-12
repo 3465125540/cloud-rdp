@@ -207,6 +207,10 @@ html, body {
 .tbl-accounts .c-on     { width: 12%; }
 .tbl-accounts td { vertical-align: top; padding: 10px 9px; }
 .tbl-accounts tbody tr { height: 62px; }
+/* 开关在「写本地 + 推 hub」期间的状态：小字提示（放在开关上方，不挤列宽） */
+.tbl-accounts .sync-tag {
+  display: block; font-size: 10.5px; color: var(--warn); margin-bottom: 2px; white-space: nowrap;
+}
 /* 账号列第二行：代号 + 「兜底」徽标（都是元信息，放一起，别去挤第一行的账号名） */
 .acc-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; margin-top: 3px; }
 .acc-sub .mono { font-size: 11px; }

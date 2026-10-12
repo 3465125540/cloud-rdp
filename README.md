@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（622 项）
+python workbench\selftest.py   :: 离线自测（626 项）
 ```
 
 | 面板 | 内容 |
@@ -1714,6 +1714,31 @@ acc-8 徽标 = 「Secret 未生效」+ 备注含 `pool-coordinator.yml`，acc-3 
 
 > ⚠️ 改的是 `server.py` → **要重启工作台**才生效（在重启前，开关仍是「只写本地」）。
 
+### 30. 「启用/停用」点一下像卡死：前端在等整页重刷（v1.6.15）
+
+**现象**（2026-10-12 瑀子）：「前端按钮响应异常」—— 点一下账号的启用/停用开关，开关像卡住、面板顶部开始转圈，
+还可能过一会儿弹一句**跟开关毫无关系**的「已刷新到最新数据」。
+
+**根因**：toggle 处理器末尾调了 `load(true)` —— 那是「**整页重采**（Tailscale + GitHub + 逐机 SMB 探测）+
+顶部转圈 + 失败时最多重试到约 150 秒」的重活。而 `enabled` **只影响协调器**（下一轮巡检才用到），
+跟机器列表 / 运行日志 / 顶部状态**毫无关系** —— 为一个开关去重采全网，纯属浪费。
+
+**修法**（`workbench/static/app.js` + `styles.css`）：
+
+| 改动 | 说明 |
+|------|------|
+| 乐观更新 | 点下去**先本地翻转** `DATA.accounts[].enabled` 并立刻 `renderAccounts()` —— 开关跟手、不弹回、不转圈 |
+| 只重画账号表 | 不再 `load(true)`；同步完成后再 `renderAccounts()` 一次（去掉「同步中」标记） |
+| 「同步中」可见 | 该行开关上方显示黄色小字「同步中」，并**禁用这一个开关**（防连点）；其它账号不受影响 |
+| 失败回滚 | POST 失败 → 状态**翻回去** + 红色 toast（不让界面骗人） |
+
+**验证**：`selftest.py` **626 PASS / 0 FAIL**（本批 T529–T532）；另用 Node **驱动真实的事件处理器**
+（桩 DOM + 桩 api/toast）跑了 **12 项断言**：点击瞬间开关已翻转 / 打上「同步中」/ **没有调 `load()`** /
+POST 内容正确 / 返回后清标记并提示「已同步到池子」/ 失败回滚 + bad toast / 同步中的开关被忽略（防连点）；
+再验表格渲染：`sync-tag` 小字 + `disabled`，其它行不受影响。
+
+> ⚠️ 改的是 `app.js`（静态文件）→ **浏览器刷新即生效**；但「推 hub」那半在 `server.py` → **仍需重启工作台**。
+
 ## 五、目录结构
 
 ```
@@ -1721,7 +1746,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（622 项）
+│   ├── selftest.py                     #   离线自测（626 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1824,6 +1849,7 @@ cloud-rdp/
 | **账号「凭证正常」但机器一直起不来（run 显示 `startup_failure`）** | GitHub 收下了 dispatch（返回 204）但**没建出 job** —— 常见于**该账号邮箱未验证**、该账号 Actions 被禁用、账单/额度问题。这类故障不留「派发失败」痕迹，原来的「已知不可用」检测看不见 | **v1.6.10 起**：`last_run.conclusion == startup_failure` 也纳入「已知不可用」（协调器不再白派），并把原因写进账号巡检 note；前端把 `startup_failure` 渲染成红色。**修法**：去该账号 `github.com/settings/emails` 验证邮箱（run 页面的 Annotations 会写明原因）。详见第四节 §26 |
 | **新加的账号显示「缺 Secret」，但 Secret 列明明写着「已配置」** | `pool-coordinator.yml` 的 `env:` 是一份**写死的 Secret 名单**（原来只到 `POOL_TOKEN_6`）—— 新账号的 Secret 名没列进去，GitHub 就不注入，脚本只看到空值 → 报「未配置」。**漏列 = 等于没配** | **v1.6.13 起**：env 补到 `POOL_TOKEN_12`（对不存在的 secret 引用给空串、不报错）；面板改说「**Secret 未生效**」并直接指向 `pool-coordinator.yml`；selftest 新增断言，**要求 env 覆盖 pool-config 里每一个 token_secret**。详见第四节 §28 |
 | **账号「启用/停用」开关点了没反应** | 协调器读的是 **hub 仓库里**的 `pool-config.json`，而该开关原来**只写本地文件、不推送** | **v1.6.14 起**：`api_accounts_toggle` 保存后同步推 hub，响应带 `pushed`；前端在推送失败时如实告警。⚠️ 需重启工作台生效。详见第四节 §29 |
+| **点账号的「启用/停用」像卡死、面板还转圈** | 该开关原来在末尾调 `load(true)` —— 整页重采（Tailscale + GitHub + 逐机 SMB）的重活；而 `enabled` 只影响协调器，跟其它面板无关 | **v1.6.15 起**：乐观更新（本地先翻转 + 只重画账号表），该开关显示「同步中」并防连点，失败回滚。详见第四节 §30 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

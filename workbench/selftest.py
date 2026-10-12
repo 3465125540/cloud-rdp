@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.14", server.VERSION == "1.6.14", server.VERSION)
+    check("T168 server.py 版本 1.6.15", server.VERSION == "1.6.15", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2903,6 +2903,24 @@ def main():
     check("T528 ★ 前端在推送失败时如实告警（不再一律提示「已启用」）",
           "res.pushed === false" in app_txt and "推送到 hub 失败" in app_txt
           and "（已同步到池子）" in app_txt)
+
+    # ---------------- 启用开关：乐观更新 + 不触发整页重刷（v1.6.15） ----------------
+    # 起因（2026-10-12 瑀子）：「前端按钮响应异常」—— 点一下开关要等「整页重采 + 顶部转圈」，
+    #   还可能 150 秒后才弹「已刷新到最新数据」（跟开关毫无关系）。根因：toggle 处理器末尾调了 load(true)。
+    print("[启用开关 乐观更新 v1.6.15]")
+    _tog = app_txt.split("// 账号启用/停用")[1].split("// 一键登录")[0]
+    # 只看代码行：注释里为了说明根因**故意提到了** load(true)，别把注释算进去
+    _tog_code = "\n".join(l for l in _tog.splitlines() if not l.strip().startswith("//"))
+    check("T529 ★ toggle 处理器不再调 load(true)（那是整页重采 + 转圈 + 无关 toast）",
+          "load(" not in _tog_code)
+    check("T530 ★ 先本地乐观翻转、立刻只重画账号表（开关不弹回、不转圈）",
+          "if (!setAccountEnabled(id, on)) return;" in _tog
+          and "renderAccounts();                            // 立刻跟手" in _tog)
+    check("T531 ★ 失败回滚 + 清掉「同步中」+ 再重画一次",
+          "setAccountEnabled(id, !on);" in _tog and "setAccountSyncing(id, false);" in _tog)
+    check("T532 ★ 表格渲染「同步中」小字并禁用该开关（防连点）",
+          'class="sync-tag"' in app_txt and '(a._syncing ? " disabled" : "")' in app_txt
+          and ".tbl-accounts .sync-tag {" in css_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

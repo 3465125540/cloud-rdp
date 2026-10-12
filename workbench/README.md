@@ -445,6 +445,21 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §24。
 
+### 「启用/停用」点一下像卡死：前端在等整页重刷（v1.6.15）
+
+`enabled` **只影响协调器**，跟机器列表/运行日志/顶部状态毫无关系。而该开关原来在末尾调 `load(true)`
+—— 那是「整页重采（Tailscale + GitHub + 逐机 SMB 探测）+ 顶部转圈 + 最多重试到约 150 秒」的重活，
+于是点一下像卡住，还可能过一会儿弹一句跟开关无关的「已刷新到最新数据」。
+
+* **乐观更新**：点下去先本地翻转 `DATA.accounts[].enabled` 并立刻 `renderAccounts()` —— 跟手、不弹回、不转圈。
+* **只重画账号表**：不再 `load(true)`；同步完成后再重画一次（去掉「同步中」标记）。
+* **「同步中」可见**：该行开关上方黄色小字「同步中」+ 禁用这一个开关（防连点），其它账号不受影响。
+* **失败回滚**：POST 失败 → 状态翻回去 + 红色 toast。
+
+> `app.js`/`styles.css` 是静态文件 → 浏览器刷新即生效；「推 hub」那半在 `server.py` → 需重启工作台。
+
+详见主 README 第四节 §30。
+
 ### 「启用/停用」原来是假开关（v1.6.14）
 
 协调器读的是 **hub 仓库里**的 `scripts/pool-config.json`，而 `POST /api/accounts/toggle` 原来**只写本地文件、不推送**
@@ -740,7 +755,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（622 项）
+├── selftest.py           # 离线自测（626 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

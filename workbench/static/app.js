@@ -965,8 +965,11 @@ function renderAccounts() {
       "<td>" + roleBadge(a.role) + "</td>" +
       '<td class="mon-cell"><div class="mon-line">' + monTop.join(" ") + "</div>" +
         (monBot.length ? '<div class="mon-line">' + monBot.join(" ") + "</div>" : "") + note + "</td>" +
-      '<td class="right"><label class="toggle"><input type="checkbox" data-acc="' + esc(a.id) + '"' +
-        (a.enabled ? " checked" : "") + '><span class="slider"></span></label></td>' +
+      '<td class="right">' +
+        (a._syncing ? '<span class="sync-tag" title="正在写本地配置并推送到 hub（推完才算真生效）">同步中</span>' : "") +
+        '<label class="toggle"><input type="checkbox" data-acc="' + esc(a.id) + '"' +
+        (a.enabled ? " checked" : "") + (a._syncing ? " disabled" : "") +
+        '><span class="slider"></span></label></td>' +
       "</tr>";
   }).join("");
 }
@@ -1610,12 +1613,16 @@ function bind() {
     pollProvision(jobId);
   }
 
-  // 账号启用/停用
+  // 账号启用/停用：**乐观更新 + 只重画账号表**
+  // 以前这里调 load(true) —— 那是「整页重采（Tailscale + GitHub + 逐机 SMB 探测）+ 顶部转圈 +
+  // 可能 150 秒后才弹『已刷新到最新数据』」的重活，于是点一下开关像卡住（2026-10-12 报的「按钮响应异常」）。
+  // 而 enabled 只影响协调器（下一轮巡检才用到），不影响面板其它数据 ⇒ 本地翻一下 + 重画这张表就够。
   $("#tbl-accounts").addEventListener("change", function (e) {
     var cb = e.target.closest("input[data-acc]");
-    if (!cb) return;
+    if (!cb || cb.disabled) return;              // 同步中的那一个不再接受点击（防连点）
     var id = cb.dataset.acc, on = cb.checked;
-    cb.disabled = true;
+    if (!setAccountEnabled(id, on)) return;      // 乐观翻转；没命中就什么都不做
+    renderAccounts();                            // 立刻跟手：开关不弹回、不转圈
     api("/api/accounts/toggle", { method: "POST", body: JSON.stringify({ id: id, enabled: on }) })
       .then(function (res) {
         // 开关要「推 hub」才算真生效 —— 协调器读的是 hub 那份 pool-config。
@@ -1626,14 +1633,35 @@ function bind() {
         } else {
           toast("账号 " + esc(id) + " 已" + (on ? "启用" : "停用") + "（已同步到池子）", "ok");
         }
-        load(true);
       })
       .catch(function (err) {
-        cb.checked = !on;
+        setAccountEnabled(id, !on);              // 回滚：别让界面骗人
         toast("改账号状态失败：" + esc(err.message), "bad");
       })
-      .then(function () { cb.disabled = false; });
+      .then(function () {
+        setAccountSyncing(id, false);
+        renderAccounts();                        // 只重画账号表（不碰机器/日志/顶部状态）
+      });
   });
+
+  // 乐观更新 DATA 里某账号的启用状态（顺带打上「同步中」标记）；返回是否命中
+  function setAccountEnabled(id, on) {
+    var list = (DATA && DATA.accounts && DATA.accounts.accounts) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].id) === String(id)) {
+        list[i].enabled = !!on;
+        list[i]._syncing = true;
+        return true;
+      }
+    }
+    return false;
+  }
+  function setAccountSyncing(id, on) {
+    var list = (DATA && DATA.accounts && DATA.accounts.accounts) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].id) === String(id)) { list[i]._syncing = !!on; return; }
+    }
+  }
 
   // 一键登录 / 查看连接信息
   $("#tbl-machines").addEventListener("click", function (e) {
