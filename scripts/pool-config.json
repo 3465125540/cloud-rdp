@@ -78,6 +78,13 @@
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_8",
       "enabled": true
+    },
+    {
+      "id": "acc-9",
+      "owner": "2gj2y3gf4",
+      "repo": "cloud-rdp",
+      "token_secret": "POOL_TOKEN_9",
+      "enabled": true
     }
   ]
 }
