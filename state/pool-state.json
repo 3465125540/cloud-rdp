@@ -1,14 +1,14 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-12T09:25:05.9141830Z",
+  "updated_utc": "2026-10-12T19:14:24.9596331Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
     "owner": "3465125540",
     "repo": "cloud-rdp",
-    "run_id": 38211832389,
-    "since": "2026-10-12T06:17:48Z"
+    "run_id": 38255624205,
+    "since": "2026-10-12T13:25:45Z"
   },
   "standby": [],
   "accounts": [
@@ -24,7 +24,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "HTTP 403 Forbidden [/repos/yc1966asgf/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=20] Sorry. Your account was suspended　派发失败（fill）：HTTP 403 Forbidden [/repos/yc1966asgf/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches] Sorry. Your account was suspended",
+      "note": "HTTP 403 Forbidden [/repos/yc1966asgf/cloud-rdp/actions/workflows/windows-rdp.yml/runs?per_page=20] Sorry. Your account was suspended",
       "role": "",
       "repo_visibility": "",
       "private_minutes": null
@@ -41,12 +41,12 @@
       "queued_count": 0,
       "total": 20,
       "last_run": {
-        "run_id": 38211832389,
+        "run_id": 38255624205,
         "status": "in_progress",
         "conclusion": "",
-        "created_at": "2026-10-12T06:17:48Z",
+        "created_at": "2026-10-12T13:25:45Z",
         "event": "schedule",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/38211832389"
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/38255624205"
       },
       "note": "",
       "role": "primary",
@@ -65,7 +65,7 @@
       "queued_count": 0,
       "total": 0,
       "last_run": null,
-      "note": "",
+      "note": "派发失败（fill）：HTTP 422 UnprocessableEntity [/repos/code1969sda/cloud-rdp/actions/workflows/windows-rdp.yml/dispatches] Actions has been disabled for this user.",
       "role": "",
       "repo_visibility": "public",
       "private_minutes": null
@@ -164,12 +164,12 @@
     }
   ],
   "recent_dispatches": {
-    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
     "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
-    "3465125540": "2026-10-12T01:16:13.6446902Z",
     "code1969sda": "2026-10-05T15:00:53.7416181Z",
-    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
     "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "2gj2y3gf4": "2026-10-12T01:16:13.6446902Z"
+    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
+    "2gj2y3gf4": "2026-10-12T01:16:13.6446902Z",
+    "3465125540": "2026-10-12T01:16:13.6446902Z"
   }
 }
