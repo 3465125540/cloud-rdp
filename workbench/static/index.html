@@ -161,8 +161,10 @@
           </div>
           <div class="add-acc-foot">
             <label class="chk"><input type="checkbox" id="acc-enabled" checked /> 启用</label>
-            <label class="chk" data-tip="勾选后自动：建 fork → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器">
+            <label class="chk" data-tip="勾选后自动：建仓库 → 开 Actions → 复制机器密钥 → 写 hub Secret → 推送配置 → 触发协调器">
               <input type="checkbox" id="acc-autodeploy" checked /> 新增后自动部署仓库 + 接入账号池</label>
+            <label class="chk" data-tip="勾选后建**独立私有仓库**（不是 fork —— GitHub 不允许把公开仓库 fork 成私有）。私有仓库跑 Actions 按分钟计费（Free 号 2000 分钟/月、Windows runner 2x 倍率），额度用尽后协调器会**自动把仓库转公开**（公开仓库 Actions 免费），无缝续跑。">
+              <input type="checkbox" id="acc-private" checked /> 先建私有仓库（额度用尽自动转公开）</label>
             <span class="add-acc-msg" id="acc-add-msg"></span>
             <span class="spacer"></span>
             <button type="button" class="btn btn-ghost btn-mini" id="btn-add-cancel">取消</button>

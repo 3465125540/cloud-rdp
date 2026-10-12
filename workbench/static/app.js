@@ -929,6 +929,17 @@ function renderAccounts() {
       monBot.push('<span class="muted">无运行记录</span>');
     }
     if (a.source === "live") monBot.push('<span class="src-tag" title="工作台用本机 Token 实时探测">实时</span>');
+    // 仓库可见性（协调器实测）：私有仓库模式的账号，私有额度用尽会被协调器自动转公开
+    if (a.repo_visibility) {
+      var isPriv = a.repo_visibility === "private";
+      var pm = (a.private_minutes === null || a.private_minutes === undefined) ? null : Number(a.private_minutes);
+      monBot.push('<span class="vis-tag ' + (isPriv ? "priv" : "pub") + '" title="' +
+        (isPriv
+          ? "私有仓库：Actions 按分钟计费（Free 号 2000 分钟/月，Windows runner 2x 倍率）；" +
+            "到阈值协调器会自动把仓库转公开（公开仓库 Actions 免费）"
+          : "公开仓库：Actions 免费（无分钟额度限制）") + '">' +
+        (isPriv ? "私有" : "公开") + (isPriv && pm !== null ? " · 本月 " + pm + " 分" : "") + "</span>");
+    }
     var note = "";
     if (a.report_note) {
       // 备注不再只在「凭证异常」时显示 —— 协调器现在会把「派发失败」也写进 note
@@ -1513,6 +1524,8 @@ function bind() {
     var pat = ($("#acc-pat").value || "").trim();
     var enabled = $("#acc-enabled").checked;
     var autoDeploy = $("#acc-autodeploy").checked;
+    // 私有仓库模式：先建独立私有仓库跑，私有 Actions 额度用尽后由协调器自动转公开
+    var privateMode = $("#acc-private") ? $("#acc-private").checked : true;
     var msg = $("#acc-add-msg");
     if (!owner || !repo) {
       msg.textContent = "owner / repo 要填";
@@ -1528,7 +1541,8 @@ function bind() {
     api("/api/accounts/add", {
       method: "POST",
       body: JSON.stringify({ owner: owner, repo: repo, token_secret: secret, id: id,
-                             enabled: enabled, pat: pat, auto_deploy: autoDeploy })
+                             enabled: enabled, pat: pat, auto_deploy: autoDeploy,
+                             repo_private: privateMode })
     }).then(function (res) {
       toast("已添加账号 " + esc(owner) + "（" + esc(res.id) + "）", "ok");
       if (res.secret_auto) toast("Secret 名已自动分配：" + esc(res.token_secret), "info", 8000);
@@ -1537,6 +1551,7 @@ function bind() {
       $("#acc-repo").value = "cloud-rdp";
       $("#acc-enabled").checked = true;
       $("#acc-autodeploy").checked = true;
+      if ($("#acc-private")) $("#acc-private").checked = true;
       msg.textContent = "";
       $("#form-add-account").hidden = true;
       load(true);

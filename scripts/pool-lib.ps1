@@ -199,6 +199,82 @@ function Invoke-WorkflowDispatch {
 # 策略：只在「严格落后」（ahead_by=0）时快进到 hub；fork 一旦有自己的提交（diverged）
 #   就只报告、绝不强推（避免把 fork 上的本地改动冲掉）。
 # 返回：@{ ok; action = 'uptodate'|'synced'|'self'|'no-token'|'diverged'|'error'; note }
+# ---------------------------------------------------------------- 私有仓库额度 / 可见性
+# 读仓库可见性与是否 fork（协调器据此决定：要不要统计私有额度 / 能不能用 merge-upstream）
+function Get-RepoInfo {
+    param(
+        [string]$Owner, [string]$Repo, [string]$Token,
+        [string]$ApiBaseUri = 'https://api.github.com'
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return @{ ok = $false; error = 'no-token'; visibility = ''; is_fork = $false; default_branch = '' }
+    }
+    try {
+        $d = Invoke-GhApi -Token $Token -Path "/repos/$Owner/$Repo" -ApiBaseUri $ApiBaseUri
+        return @{ ok = $true; error = '';
+                  visibility = $(if ($d.private) { 'private' } else { 'public' });
+                  is_fork = [bool]$d.fork; default_branch = [string]$d.default_branch }
+    } catch {
+        return @{ ok = $false; error = $_.Exception.Message; visibility = ''; is_fork = $false; default_branch = '' }
+    }
+}
+
+# 本月该仓库的**计费分钟**（近似）= Σ(run 时长) × 倍率（Windows runner = 2x）。
+# 为什么不查 billing API：fine-grained PAT 没有 billing 权限（实测 404），
+# 而 runs 接口每个账号都读得到 —— 用「已跑的时长」反推最省事且每个账号都可用。
+function Get-RepoBillableMinutes {
+    param(
+        [string]$Owner, [string]$Repo, [string]$Token,
+        [string]$ApiBaseUri = 'https://api.github.com',
+        [int]$Multiplier = 2,
+        [int]$MaxPages = 4
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) { return @{ ok = $false; minutes = 0; runs = 0 } }
+    $utcNow = (Get-Date).ToUniversalTime()
+    $monthStart = $utcNow.AddDays(-1 * ($utcNow.Day - 1)).Date
+    $sum = 0.0; $n = 0
+    for ($page = 1; $page -le $MaxPages; $page++) {
+        try {
+            $d = Invoke-GhApi -Token $Token -ApiBaseUri $ApiBaseUri `
+                -Path "/repos/$Owner/$Repo/actions/runs?per_page=100&page=$page"
+        } catch { break }
+        $runs = @($d.workflow_runs)
+        if ($runs.Count -eq 0) { break }
+        $older = $false
+        foreach ($r in $runs) {
+            $c = $null
+            try { $c = ([datetime]$r.created_at).ToUniversalTime() } catch { }
+            if (-not $c) { continue }
+            if ($c -lt $monthStart) { $older = $true; continue }
+            $a = $null; $b = $null
+            try { $a = ([datetime]$r.run_started_at).ToUniversalTime() } catch { }
+            try { $b = ([datetime]$r.updated_at).ToUniversalTime() } catch { }
+            if (-not $a -or -not $b) { continue }
+            $mins = ($b - $a).TotalMinutes
+            if ($mins -gt 0) { $sum += $mins; $n++ }
+        }
+        if ($older -or $runs.Count -lt 100) { break }
+    }
+    return @{ ok = $true; minutes = [int][math]::Ceiling($sum * $Multiplier); runs = $n }
+}
+
+# 切换仓库可见性（私有额度用尽 → 转公开）。幂等：目标状态已是当前状态时 GitHub 也接受。
+function Set-RepoVisibility {
+    param(
+        [string]$Owner, [string]$Repo, [string]$Token,
+        [bool]$Private = $false,
+        [string]$ApiBaseUri = 'https://api.github.com'
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) { return @{ ok = $false; note = 'no-token' } }
+    try {
+        Invoke-GhApi -Token $Token -Method 'PATCH' -Path "/repos/$Owner/$Repo" `
+            -Body @{ private = $Private } -ApiBaseUri $ApiBaseUri | Out-Null
+        return @{ ok = $true; note = "已把 $Owner/$Repo 设为$(if ($Private) { '私有' } else { '公开' })" }
+    } catch {
+        return @{ ok = $false; note = "切换可见性失败：$($_.Exception.Message)" }
+    }
+}
+
 function Sync-PoolFork {
     param(
         $Account,
@@ -215,6 +291,43 @@ function Sync-PoolFork {
     $repo  = [string]$Account.repo
     if ($owner -ieq $HubOwner -and $repo -ieq $HubRepo) {
         return @{ ok = $true; action = 'self'; note = '本仓库即 hub' }
+    }
+
+    # ⓪ 不是 fork（独立仓库，如私有模式新建的）→ merge-upstream 用不了，改成直接推 workflow 文件。
+    #    只推 .github/workflows/ —— scripts/ 由 windows-rdp.yml 启动时运行时自愈（[upstream] 步骤），
+    #    不需要仓库级同步；workflow 本身同步不了才是真问题（内联的保命参数/新步骤不会生效）。
+    $info = Get-RepoInfo -Owner $owner -Repo $repo -Token $Token -ApiBaseUri $ApiBaseUri
+    if ($info.ok -and -not $info.is_fork) {
+        $pushed = @(); $bad = @()
+        foreach ($path in @('.github/workflows/windows-rdp.yml', '.github/workflows/mail-test.yml')) {
+            try {
+                $hubFile = Invoke-GhApi -Token $Token -ApiBaseUri $ApiBaseUri `
+                    -Path "/repos/$HubOwner/$HubRepo/contents/$path`?ref=$Branch"
+            } catch { continue }
+            $hubSha = [string]$hubFile.sha
+            $mineSha = ''
+            try {
+                $mine = Invoke-GhApi -Token $Token -ApiBaseUri $ApiBaseUri `
+                    -Path "/repos/$owner/$repo/contents/$path`?ref=$Branch"
+                $mineSha = [string]$mine.sha
+            } catch { }
+            if ($hubSha -and $hubSha -eq $mineSha) { continue }
+            $body = @{ message = "chore(pool): 同步 workflow $path"
+                       content = [string]$hubFile.content; branch = $Branch }
+            if ($mineSha) { $body['sha'] = $mineSha }
+            try {
+                Invoke-GhApi -Token $Token -Method 'PUT' -ApiBaseUri $ApiBaseUri `
+                    -Path "/repos/$owner/$repo/contents/$path" -Body $body | Out-Null
+                $pushed += $path.Split('/')[-1]
+            } catch { $bad += "$path($($_.Exception.Message))" }
+        }
+        if ($pushed.Count -gt 0) {
+            return @{ ok = $true; action = 'synced'; note = "独立仓库（非 fork）：已同步 workflow —— $($pushed -join '、')" }
+        }
+        if ($bad.Count -gt 0) {
+            return @{ ok = $false; action = 'error'; note = "独立仓库（非 fork）workflow 同步失败：$($bad -join '；')" }
+        }
+        return @{ ok = $true; action = 'uptodate'; note = '独立仓库（非 fork）：workflow 已与 hub 一致' }
     }
 
     # ① 跨仓比较 hub:branch 与 fork:branch（用 fork 自己的 token 查）
@@ -308,6 +421,9 @@ function Build-PoolState {
                 last_run    = $rep.last_run
                 note        = [string]$rep.note
                 role        = [string]$roleByOwner[[string]$rep.owner]
+                # 仓库可见性 + 本月私有计费分钟（协调器实测；私有额度用尽会自动转公开）
+                repo_visibility = [string]$rep.repo_visibility
+                private_minutes = $rep.private_minutes
             }
         }
     }

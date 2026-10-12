@@ -39,6 +39,10 @@ $ref = $(if ($hub.ref) { [string]$hub.ref } else { 'main' })
 
 $now = (Get-Date).ToUniversalTime()
 
+# 私有仓库额度阈值（计费分钟）：Free 号私有仓库 2000 分钟/月，Windows runner 2x 倍率。
+# 留 10% 余量，到阈值就转公开，避免撞上「额度用尽 → job 直接起不来」。
+$privateQuota = [int]$(if ($cfg.private_quota_minutes) { $cfg.private_quota_minutes } else { 1800 })
+
 Say "池 = $($cfg.pool_id)  目标 = $($cfg.target_machines) 台  模式 = $(if ($DryRun) { 'DRY-RUN' } else { 'LIVE' })"
 Say "hub = $($hub.owner)/$($hub.repo)  状态分支 = $($hub.state_branch)  触发 ref = $ref"
 
@@ -69,6 +73,9 @@ foreach ($acc in $accounts) {
         enabled     = ($acc.enabled -ne $false)
         secret_name = [string]$acc.token_secret
         token_state = 'ok'        # ok | missing | query_failed | disabled
+        # 仓库可见性 + 本月私有计费分钟（私有仓库模式用；下面巡检时实测填入）
+        repo_visibility = ''
+        private_minutes = $null
         alive_count = 0
         # 「在跑」拆两档：真在跑（in_progress）/ 排队中（pending/queued/…，机器还没起）。
         # alive_count 仍 = 未结束的 run 总数（Get-PoolPlan 用它做防抖，别改口径），
@@ -109,6 +116,29 @@ foreach ($acc in $accounts) {
     $rep.total       = [int]$r.total
     $rep.last_run    = $r.last_run
     Say "账号 $($acc.id) ($($acc.owner))：在跑 $($rep.running_count) 台 / 排队 $($rep.queued_count) 台（未结束 $($r.runs.Count)，历史 $($r.total) 条）"
+
+    # 私有仓库模式：私有仓库跑 Actions 是**计费**的（Free 号 2000 分钟/月，Windows runner 2x 倍率）。
+    # 额度用尽 → 自动把仓库转公开（公开仓库 Actions 免费），无缝续跑 —— 不用人工盯着。
+    $ri = Get-RepoInfo -Owner $acc.owner -Repo $acc.repo -Token $tok -ApiBaseUri $ApiBaseUri
+    if ($ri.ok) {
+        $rep.repo_visibility = [string]$ri.visibility
+        if ($ri.visibility -eq 'private') {
+            $bm = Get-RepoBillableMinutes -Owner $acc.owner -Repo $acc.repo -Token $tok -ApiBaseUri $ApiBaseUri
+            if ($bm.ok) { $rep.private_minutes = [int]$bm.minutes }
+            Say "私有额度：$($acc.id) ($($acc.owner)) 本月已计费 $($bm.minutes) 分钟 / 阈值 $privateQuota"
+            if ($bm.ok -and $bm.minutes -ge $privateQuota) {
+                $sw = Set-RepoVisibility -Owner $acc.owner -Repo $acc.repo -Token $tok -Private $false -ApiBaseUri $ApiBaseUri
+                if ($sw.ok) {
+                    $rep.repo_visibility = 'public'
+                    $rep.note = "私有额度用尽（本月 $($bm.minutes) 分钟 ≥ $privateQuota）→ 已自动转公开"
+                    Say "私有额度：$($acc.id) ($($acc.owner)) 额度用尽 → $($sw.note)"
+                } else {
+                    Say "私有额度：$($acc.id) ($($acc.owner)) 额度用尽但转公开失败 —— $($sw.note)"
+                }
+            }
+        }
+    }
+
     $alive += $r.runs
     $reports += $rep
 }

@@ -692,7 +692,7 @@ env:
 
 ```bat
 workbench\start.cmd            :: 双击启动，自动开浏览器 http://127.0.0.1:8899
-python workbench\selftest.py   :: 离线自测（626 项）
+python workbench\selftest.py   :: 离线自测（632 项）
 ```
 
 | 面板 | 内容 |
@@ -1739,6 +1739,42 @@ POST 内容正确 / 返回后清标记并提示「已同步到池子」/ 失败�
 
 > ⚠️ 改的是 `app.js`（静态文件）→ **浏览器刷新即生效**；但「推 hub」那半在 `server.py` → **仍需重启工作台**。
 
+### 31. 新增账号「先私有仓库跑 → 额度用尽自动转公开」（v1.6.16）
+
+**需求**（2026-10-12 瑀子）：「新增账号先跑私有仓库方式；私有仓库时长用完后转公开仓库」。
+
+动机很清楚：**公开仓库太显眼** —— 这批小号被封得极快（acc-9 `2gj2y3gf4` 早上刚加、**一小时后就** `Sorry. Your account was suspended`）。
+私有仓库低调，但**按分钟计费**（Free 号 2000 分钟/月、Windows runner **2x** 倍率）；公开仓库 Actions **免费**。
+所以策略是：**先私有（低调）→ 额度用尽自动转公开（免费续跑）**。
+
+#### ⚠️ 一个硬约束（决定了实现方式）
+**GitHub 不允许把公开仓库 fork 成私有**（fork 与上游同可见性）。
+所以「私有方式」**不是 fork**，而是**建独立私有仓库 + 把 workflow 拷进去**。
+好在机器侧不需要 `scripts/`：`windows-rdp.yml` 启动时会把 hub 的 `scripts/` **运行时自愈**进工作区
+（该 workflow 的 `[upstream]` 步骤），所以私有仓库只要带上 workflow 文件即可。
+
+#### 实现（四层）
+
+| 层 | 改动 |
+|---|---|
+| **建仓** `workbench/server.py` | 新增 `ensure_private_repo()`：`POST /user/repos {private:true}` + 用 Contents API 把 hub 的 `.github/workflows/*.yml` 拷进新仓库（**不依赖本机 git / github.com**）。provision 第 4 步按 `repo_private` 分流（私有 → 建仓；公开 → 原 fork） |
+| **额度统计** `scripts/pool-lib.ps1` | `Get-RepoBillableMinutes()`：Σ（**本月** run 的 `run_started_at→updated_at`）× **2**（Windows 倍率）。为什么不查 billing API：fine-grained PAT **没有 billing 权限**（实测 404），而 runs 接口每个账号都读得到 |
+| **自动转公开** `scripts/pool-coordinator.ps1` | 巡检每个账号时读仓库可见性（`Get-RepoInfo`）；**私有且本月计费分钟 ≥ `private_quota_minutes`（默认 1800，留 10% 余量）→ `Set-RepoVisibility -Private $false` 转公开**，并把实测可见性/分钟写进池状态 |
+| **非 fork 同步** `Sync-PoolFork` | 独立仓库用不了 `merge-upstream` → 新增分支：**直接把 hub 的 workflow 文件推过去**（`scripts/` 靠运行时自愈，不需要仓库级同步） |
+
+**界面**：新增账号表单多了「**先建私有仓库（额度用尽自动转公开）**」（默认勾选）；
+账号表「实时监测」列多了 **私有/公开** 徽标（私有还显示「本月 N 分」）。
+
+#### 验证
+- `selftest.py` **632 PASS / 0 FAIL**（本批 T533–T538）
+- `pool-lib.ps1` / `pool-coordinator.ps1` 过 `[Parser]::ParseFile` 语法校验 + 四个新函数确认可加载
+- **额度算法用真实数据核对**：hub 本月 114 条 run、Σ12793 分钟 → ×2 = **25586 计费分钟**（> 阈值 1800 ✅）
+- **可见性徽标**用真实 `/api/accounts` 跑 `renderAccounts()`：私有 → 「私有 · 本月 1234 分」（黄）、公开 → 「公开」，4 项断言全过
+
+> ⚠️ **生效**：`pool-*.ps1` 是 GitHub 侧 → **下一轮协调器 run 生效**；`server.py` 要**重启工作台**；
+> `app.js`/`index.html`/`styles.css` **刷新即生效**。
+> ⚠️ **存量账号不受影响**（仍是公开 fork）—— 只有新加的账号走私有。
+
 ## 五、目录结构
 
 ```
@@ -1746,7 +1782,7 @@ cloud-rdp/
 ├── .github/workflows/windows-rdp.yml   # 主工作流（26 步，见下表）
 ├── workbench/                          # 【新】GitHub 虚拟机管理工作台（本机仪表盘，Python 标准库零依赖）
 │   ├── server.py                       #   后端：HTTP 服务 + 全部 API
-│   ├── selftest.py                     #   离线自测（626 项）
+│   ├── selftest.py                     #   离线自测（632 项）
 │   ├── start.cmd                       #   双击启动（※纯 ASCII，见 workbench/README.md）
 │   ├── config.example.json             #   配置样例（复制成 config.json）
 │   └── static/                         #   前端：index.html / styles.css / app.js
@@ -1850,6 +1886,7 @@ cloud-rdp/
 | **新加的账号显示「缺 Secret」，但 Secret 列明明写着「已配置」** | `pool-coordinator.yml` 的 `env:` 是一份**写死的 Secret 名单**（原来只到 `POOL_TOKEN_6`）—— 新账号的 Secret 名没列进去，GitHub 就不注入，脚本只看到空值 → 报「未配置」。**漏列 = 等于没配** | **v1.6.13 起**：env 补到 `POOL_TOKEN_12`（对不存在的 secret 引用给空串、不报错）；面板改说「**Secret 未生效**」并直接指向 `pool-coordinator.yml`；selftest 新增断言，**要求 env 覆盖 pool-config 里每一个 token_secret**。详见第四节 §28 |
 | **账号「启用/停用」开关点了没反应** | 协调器读的是 **hub 仓库里**的 `pool-config.json`，而该开关原来**只写本地文件、不推送** | **v1.6.14 起**：`api_accounts_toggle` 保存后同步推 hub，响应带 `pushed`；前端在推送失败时如实告警。⚠️ 需重启工作台生效。详见第四节 §29 |
 | **点账号的「启用/停用」像卡死、面板还转圈** | 该开关原来在末尾调 `load(true)` —— 整页重采（Tailscale + GitHub + 逐机 SMB）的重活；而 `enabled` 只影响协调器，跟其它面板无关 | **v1.6.15 起**：乐观更新（本地先翻转 + 只重画账号表），该开关显示「同步中」并防连点，失败回滚。详见第四节 §30 |
+| **新号刚加就被封** | 公开仓库 + 公开 run 太显眼，GitHub 很快标记（acc-9 加号 1 小时即 suspended） | **v1.6.16 起**：新增账号默认「**先建私有仓库**」（GitHub 不允许公开仓库 fork 成私有 → 建独立私有仓库 + 拷 workflow）；私有 Actions 按分钟计费，**额度用尽（默认 1800 计费分钟）协调器自动转公开**续跑。详见第四节 §31 |
 | 快照推送很慢 | 体积不设上限 + 139 约 0.45 MB/s | 看日志 `SNAPSHOT_ETA_MIN`；大目录用 `copy` 可续传，下次接着传 |
 | **想让机器跑满 4 小时就自动换新机（别断档）** | 单 job 硬上限 6 小时，人工盯表容易漏 | **v1.6.4 起内置「自动接力」**：任一台在跑机器运行时长 ≥ `auto_start.uptime_hours`（默认 4 小时）→ 自动派发 1 台新机器。默认**关**（耗 Actions 分钟数），`config.json` 写 `{"auto_start":{"enabled":true}}` 重启即开；去重 = 同机只触发一次 + 冷却 30 分钟 + 每小时上限 4 台。只想看会不会触发：`GET /api/auto-start?dry=1`。详见第四节 §20 |
 | SMB(445) / AList(5244) 连不上 | 防火墙 | 已默认关闭；若被快照里的 `.wfw` 改回，还原后会再关一次 |

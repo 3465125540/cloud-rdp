@@ -445,6 +445,21 @@ catch 里再 `GetResponseStream()` 只能拿到 `Cannot access a disposed object
 
 详见主 README 第四节 §24。
 
+### 新增账号「先私有仓库跑 → 额度用尽自动转公开」（v1.6.16）
+
+**动机**：公开仓库太显眼（小号封得快）；私有仓库低调但按分钟计费（Free 号 2000 分钟/月、Windows 2x 倍率）。
+
+**硬约束**：GitHub **不允许把公开仓库 fork 成私有** ⇒ 私有方式 = **建独立私有仓库 + 拷 workflow**（不是 fork）。
+
+* `server.py`：`ensure_private_repo()`（`POST /user/repos {private:true}` + Contents API 拷 hub 的 workflow）；
+  provision 按 `repo_private` 分流；`/api/accounts` 透出 `repo_private` / `repo_visibility` / `private_minutes`。
+* `scripts/pool-lib.ps1`：`Get-RepoInfo` / `Get-RepoBillableMinutes`（Σ本月 run 时长 ×2）/ `Set-RepoVisibility`；
+  `Sync-PoolFork` 新增「非 fork → 直接推 workflow」分支。
+* `scripts/pool-coordinator.ps1`：私有 + 本月计费 ≥ `private_quota_minutes`（默认 1800）→ **自动转公开**，实测值写进池状态。
+* 界面：新增表单「先建私有仓库」勾选（默认开）；账号行显示 私有/公开 + 本月分钟徽标。
+
+详见主 README 第四节 §31。
+
 ### 「启用/停用」点一下像卡死：前端在等整页重刷（v1.6.15）
 
 `enabled` **只影响协调器**，跟机器列表/运行日志/顶部状态毫无关系。而该开关原来在末尾调 `load(true)`
@@ -755,7 +770,7 @@ v1.6.0 新增配置项 **`rdp_launch_target`**（默认 `auto`）：`auto` = Win
 ```
 workbench/
 ├── server.py             # 后端：标准库 HTTP 服务 + 全部 API
-├── selftest.py           # 离线自测（626 项）
+├── selftest.py           # 离线自测（632 项）
 ├── start.cmd             # 双击启动（自动开浏览器）※纯 ASCII
 ├── serve.cmd             # 后台启动（不开浏览器、失败不 pause；供快捷方式调用）※纯 ASCII
 ├── open-workbench.vbs    # 桌面快捷方式的真正目标：按需启动服务 + 开浏览器 ※纯 ASCII

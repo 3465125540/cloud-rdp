@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.15", server.VERSION == "1.6.15", server.VERSION)
+    check("T168 server.py 版本 1.6.16", server.VERSION == "1.6.16", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2921,6 +2921,35 @@ def main():
     check("T532 ★ 表格渲染「同步中」小字并禁用该开关（防连点）",
           'class="sync-tag"' in app_txt and '(a._syncing ? " disabled" : "")' in app_txt
           and ".tbl-accounts .sync-tag {" in css_txt)
+
+    # ---------------- 私有仓库模式：私有额度用尽自动转公开（v1.6.16） ----------------
+    # 需求（2026-10-12 瑀子）：「新增账号先跑私有仓库方式，账号被禁用 / 私有仓库时长用完后转公开仓库」。
+    # ⚠️ 硬约束：GitHub **不允许把公开仓库 fork 成私有** → 「私有方式」= 建独立私有仓库 + 拷 workflow。
+    print("[私有仓库模式 v1.6.16]")
+    check("T533 ★ 建私有仓库 ensure_private_repo（POST /user/repos private=true + 拷 hub 的 workflow）",
+          "def ensure_private_repo(owner, repo, token)" in srv_txt
+          and '"/user/repos"' in srv_txt and '"private": True' in srv_txt
+          and "_PRIVATE_SEED_FILES" in srv_txt)
+    check("T534 ★ provision 支持 repo_private 分支（私有走建仓步骤，公开仍走 fork）",
+          "state, detail, note = ensure_private_repo(owner, repo, pat)" in srv_txt
+          and "repo_private=repo_private" in srv_txt
+          and "def _prov_run(job, owner, repo, secret_name, pat, repo_private=False):" in srv_txt)
+    check("T535 ★ 接口透出 repo_private / repo_visibility / private_minutes",
+          '"repo_private": a.get("repo_private") is True,' in srv_txt
+          and '"repo_visibility": str(rep.get("repo_visibility") or ""),' in srv_txt
+          and '"private_minutes": rep.get("private_minutes"),' in srv_txt)
+    _lib = open(os.path.join(repo_dir, "scripts", "pool-lib.ps1"), encoding="utf-8-sig").read()
+    check("T536 ★ 池库：额度统计（Σ本月 run 时长 ×2 倍率）+ 切可见性 + 非 fork 的 workflow 同步",
+          "function Get-RepoBillableMinutes" in _lib and "function Set-RepoVisibility" in _lib
+          and "function Get-RepoInfo" in _lib and "不是 fork" in _lib)
+    _coord = open(os.path.join(repo_dir, "scripts", "pool-coordinator.ps1"), encoding="utf-8-sig").read()
+    check("T537 ★ 协调器：私有 + 达阈值 → 自动转公开，并把实测可见性/分钟写进池状态",
+          "Get-RepoBillableMinutes" in _coord and "Set-RepoVisibility" in _coord
+          and "$privateQuota" in _coord
+          and "repo_visibility = [string]$rep.repo_visibility" in _lib)
+    check("T538 ★ 前端：可勾「先建私有仓库」，面板显示 私有/公开 + 本月分钟",
+          'id="acc-private"' in idx_txt and "repo_private: privateMode" in app_txt
+          and "vis-tag" in app_txt and ".vis-tag.priv" in css_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

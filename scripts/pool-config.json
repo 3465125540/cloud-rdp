@@ -6,6 +6,7 @@
     "每个账号 = 一个 fork（或独立仓库）的 cloud-rdp，用 token_secret 指向的 Secret 里的 PAT 去查询/触发。",
     "把 owner 换成真实 GitHub 登录名、token_secret 换成你在 Secret 里建的变量名即可。",
     "账号项可加 \"reserve\": true —— 兜底账号：只在第一梯队（其余所有账号）都用不了时才被派发。",
+    "账号项可加 \"repo_private\": true —— 私有仓库模式：新增时建**独立私有仓库**（不是 fork，GitHub 不允许公开仓库 fork 成私有），私有 Actions 额度用尽后协调器自动转公开。",
     "token_secret 对应的 PAT 需要 repo + workflow 权限（能读 actions runs、能 workflow_dispatch）。"
   ],
   "hub": {
@@ -17,6 +18,8 @@
     "state_path": "state/pool-state.json"
   },
   "target_machines": 2,
+  "_private_quota_说明": "私有仓库模式的额度阈值（计费分钟）。Free 号私有仓库 2000 分钟/月、Windows runner 2x 倍率；到阈值协调器自动把仓库转公开（公开仓库 Actions 免费）。",
+  "private_quota_minutes": 1800,
   "machine": {
     "lifetime_minutes": 330,
     "rotate_lead_minutes": 45,
@@ -33,7 +36,7 @@
       "owner": "yc1966asgf",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_1",
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "acc-3",

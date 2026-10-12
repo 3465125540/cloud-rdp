@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.15"
+VERSION = "1.6.16"
 # 进程启动时刻：用来一眼分辨「浏览器连的是不是重启前的旧实例」——
 # 旧实例没有新加的路由，会回 404 "no such api"。页脚/健康接口显示它即可确认。
 STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1893,6 +1893,11 @@ def get_accounts():
             # 兜底账号（pool-config.json 里 reserve: true）：协调器只在第一梯队全都用不了时才派它。
             # 只用于界面标注，不影响任何后端逻辑。
             "reserve": a.get("reserve") is True,
+            # 私有仓库模式：新增账号时选「先建私有仓库」，额度用尽由协调器自动转公开
+            "repo_private": a.get("repo_private") is True,
+            # 下面两项来自协调器巡检（pool-state），是**实测**值；没有时前端按"未知"处理
+            "repo_visibility": str(rep.get("repo_visibility") or ""),
+            "private_minutes": rep.get("private_minutes"),
             "token_secret": secret,
             "secret_present": secret_present,
             "secret_via": secret_via,
@@ -3446,6 +3451,73 @@ def ensure_fork(owner, repo, token):
     return "forked", "已发起 fork，仓库仍在生成中", "fork 尚未就绪：可稍后在界面重跑一次部署"
 
 
+# 私有池仓库只需要带上 workflow：windows-rdp.yml 启动时会把 hub 的 scripts/ 运行时自愈进工作区
+# （见该 workflow 的 [upstream] 步骤），所以 scripts/ 不必拷进私有仓库。
+_PRIVATE_SEED_FILES = [".github/workflows/windows-rdp.yml", ".github/workflows/mail-test.yml"]
+
+
+def ensure_private_repo(owner, repo, token):
+    """确保 owner/repo 存在；不存在则**新建私有仓库**并把 hub 的 workflow 文件拷进去。
+
+    ⚠️ 为什么不是 fork：GitHub **不允许把公开仓库 fork 成私有**（fork 与上游同可见性），
+    所以「私有方式」= 独立私有仓库 + 把 workflow 拷进去（走 Contents API，不依赖本机 git/github.com）。
+    返回 (state, detail, note)：state ∈ {'exists','created','error'}。
+    """
+    hub = CONFIG.get("repo") or ""
+    ref = CONFIG.get("ref") or "main"
+    try:
+        gh_api_as(token, "/repos/%s/%s" % (owner, repo), timeout=20)
+        return "exists", "仓库已存在（跳过新建）", ""
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return "error", "查询仓库失败：HTTP %s %s" % (e.code, _http_err_body(e)), ""
+    except Exception as e:
+        return "error", "查询仓库异常：%s: %s" % (type(e).__name__, e), ""
+
+    try:
+        gh_api_as(token, "/user/repos", method="POST", timeout=60,
+                  body={"name": repo, "private": True, "auto_init": False,
+                        "description": "cloud-rdp 私有池仓库（Actions 额度用尽后自动转公开）"})
+    except urllib.error.HTTPError as e:
+        return "error", "新建私有仓库失败：HTTP %s %s" % (e.code, _http_err_body(e)), ""
+    except Exception as e:
+        return "error", "新建私有仓库异常：%s: %s" % (type(e).__name__, e), ""
+
+    copied, failed = [], []
+    for path in _PRIVATE_SEED_FILES:
+        try:
+            src = gh_api("/repos/%s/contents/%s" % (hub, path), params={"ref": ref}, timeout=30)
+            if not (src or {}).get("content"):
+                failed.append("%s(源文件读不到)" % path)
+                continue
+            body = {"message": "chore(pool): 初始化私有池仓库（从 hub 复制 %s）" % path,
+                    "content": src.get("content"), "branch": ref}
+            try:
+                gh_api_as(token, "/repos/%s/%s/contents/%s" % (owner, repo, path),
+                          method="PUT", body=body, timeout=60)
+            except urllib.error.HTTPError as e:
+                # 空仓首次提交：某些情况下不接受 branch 参数 → 去掉再试一次
+                if e.code in (409, 422) and "branch" in body:
+                    body.pop("branch", None)
+                    gh_api_as(token, "/repos/%s/%s/contents/%s" % (owner, repo, path),
+                              method="PUT", body=body, timeout=60)
+                else:
+                    raise
+            copied.append(path.split("/")[-1])
+        except urllib.error.HTTPError as e:
+            failed.append("%s(HTTP %s %s)" % (path, e.code, _http_err_body(e)))
+        except Exception as e:
+            failed.append("%s(%s: %s)" % (path, type(e).__name__, e))
+
+    detail = "已新建私有仓库 %s/%s" % (owner, repo)
+    if copied:
+        detail += "；已写入 %s" % "、".join(copied)
+    note = ""
+    if failed:
+        note = "部分文件未写入：" + "；".join(failed)
+    return ("created" if not failed else "created"), detail, note
+
+
 def enable_actions(owner, repo, token):
     """在 fork 里开启 Actions（fork 默认是关的）+ 允许所有 action + 启用各 workflow。"""
     notes = []
@@ -3634,7 +3706,7 @@ def _prov_add(job, step, ok, detail="", note=""):
                          "note": note, "ts": now_iso()})
 
 
-def _prov_run(job, owner, repo, secret_name, pat):
+def _prov_run(job, owner, repo, secret_name, pat, repo_private=False):
     """后台跑完整套远程部署步骤，逐步把结果追加到 job['steps']。"""
     hub = CONFIG.get("repo") or ""
     try:
@@ -3666,10 +3738,14 @@ def _prov_run(job, owner, repo, secret_name, pat):
         if not ok:
             raise _ProvStop()
 
-        # 4) 确保 fork 存在
+        # 4) 确保仓库存在：私有模式建独立私有仓库，公开模式沿用 fork
         try:
-            state, detail, note = ensure_fork(owner, repo, pat)
-            _prov_add(job, "fork", state != "error", detail, note)
+            if repo_private:
+                state, detail, note = ensure_private_repo(owner, repo, pat)
+                _prov_add(job, "repo", state != "error", detail, note)
+            else:
+                state, detail, note = ensure_fork(owner, repo, pat)
+                _prov_add(job, "fork", state != "error", detail, note)
             if state == "error":
                 raise _ProvStop()
         except _ProvStop:
@@ -3726,7 +3802,7 @@ def _prov_summary(job):
     return "全部 %d 步成功，账号已入池" % len(steps)
 
 
-def start_provision(owner, repo, secret_name, pat, config_step=None):
+def start_provision(owner, repo, secret_name, pat, config_step=None, repo_private=False):
     """起一个后台部署任务，返回 job 字典（可立即返回给前端轮询）。"""
     job_id = "prov-%d-%s" % (int(time.time() * 1000), owner)
     job = {"id": job_id, "owner": owner, "repo": repo, "status": "running",
@@ -3735,7 +3811,7 @@ def start_provision(owner, repo, secret_name, pat, config_step=None):
         job["steps"].append(config_step)
     with _PROVISION_LOCK:
         _PROVISION_JOBS[job_id] = job
-    threading.Thread(target=_prov_run, args=(job, owner, repo, secret_name, pat),
+    threading.Thread(target=_prov_run, args=(job, owner, repo, secret_name, pat, repo_private),
                      daemon=True).start()
     return job
 
@@ -3769,6 +3845,10 @@ def api_accounts_add(h, params):
     enabled = body.get("enabled")
     if enabled is None:
         enabled = True
+    # 私有仓库模式（新增账号默认建议勾选）：先建独立私有仓库跑，私有 Actions 额度用尽后
+    # 由协调器自动把仓库转公开（公开仓库 Actions 免费）。GitHub 不允许把公开仓库 fork 成私有，
+    # 所以这条路径是「新建私有仓库 + 拷 workflow」，不是 fork。
+    repo_private = bool(body.get("repo_private"))
 
     errs = []
     if not owner:
@@ -3839,6 +3919,8 @@ def api_accounts_add(h, params):
 
     entry = {"id": acc_id, "owner": owner, "repo": repo,
              "token_secret": secret, "enabled": bool(enabled)}
+    if repo_private:
+        entry["repo_private"] = True
     accs.append(entry)
     try:
         save_pool_config(cfg)
@@ -3854,11 +3936,13 @@ def api_accounts_add(h, params):
         cfg_step = {"step": "config", "ok": True, "ts": now_iso(), "note": "",
                     "detail": "已写入 %s（id=%s%s）" % (os.path.basename(pc["path"]), acc_id,
                                                       "，Secret 名自动分配为 %s" % secret if secret_auto else "")}
-        job = start_provision(owner, repo, secret, pat, config_step=cfg_step)
+        job = start_provision(owner, repo, secret, pat, config_step=cfg_step,
+                              repo_private=repo_private)
         resp["auto_deploy"] = True
         resp["job_id"] = job["id"]
         resp["steps"] = list(job["steps"])
-        resp["hint"] = ("已开始自动部署：建 fork → 开 Actions → 复制机器密钥 → "
+        resp["hint"] = ("已开始自动部署：" + ("建私有仓库" if repo_private else "建 fork") +
+                        " → 开 Actions → 复制机器密钥 → "
                         "写 hub Secret（%s）→ 推送配置 → 触发协调器。可在下方查看进度。" % secret)
     else:
         resp["hint"] = ("PAT 不会写进本文件。请到 GitHub 仓库 Secrets 配置其一："
