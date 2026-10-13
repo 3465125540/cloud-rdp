@@ -59,7 +59,7 @@
       "owner": "code19698fgh",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_5",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "acc-2",
