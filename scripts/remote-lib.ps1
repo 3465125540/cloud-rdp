@@ -53,7 +53,7 @@ function Get-RemoteRoot {
     <#
       139 侧的「根」= AList 存储挂载点（健康时必定可列）。
       优先级：显式 -Root > 环境变量 CLOUDRDP_REMOTE_ROOT > 由 CLOUDRDP_REMOTE_BASE 取前两段 > alist:/cloudrdp
-      alist:/cloudrdp/全部文件/AI文件库 -> alist:/cloudrdp
+      alist:/cloudrdp/AI文件库 -> alist:/cloudrdp
     #>
     param([string]$Remote = "", [string]$Root = "")
     if (-not [string]::IsNullOrWhiteSpace($Root)) { return $Root.TrimEnd('/') }
@@ -75,7 +75,7 @@ function Get-RemoteRoot {
 function Get-RemoteLevels {
     <#
       Remote 相对 Root 的层级。
-      alist:/cloudrdp/全部文件/AI文件库/CloudRDP + root=alist:/cloudrdp -> @('全部文件','AI文件库','CloudRDP')
+      alist:/cloudrdp/AI文件库/CloudRDP + root=alist:/cloudrdp -> @('AI文件库','CloudRDP')
     #>
     param([string]$Remote, [string]$Root)
     $r = ([string]$Remote).TrimEnd('/')

@@ -24,8 +24,8 @@
     <SysDir>\alist\alist.exe  +  <SysDir>\alist\data\  （AList 数据目录；SysDir 默认 D:\cloudrdp-sys）
     AList 服务监听 http://127.0.0.1:5244 ，WebDAV 在 /dav
     存储挂载路径 /cloudrdp （= 139 云盘整盘，由 $RootFolderID 决定）
-    数据实际落在 /cloudrdp/全部文件/AI文件库/CloudRDP （139 侧「全部文件 > AI文件库 > CloudRDP」）
-    快照落在   /cloudrdp/全部文件/AI文件库/_snapshot
+    数据实际落在 /cloudrdp/AI文件库/CloudRDP （139 根目录 > AI文件库 > CloudRDP）
+    快照落在   /cloudrdp/AI文件库/_snapshot
 
   ⚠️ 备选「根 ID 法」：若不想让远端路径里出现中文，可把 ALIST_139_ROOT_FOLDER_ID 设为
      「AI文件库」文件夹的 ID（139 网页 F12 从请求里取），则 AList 的 /cloudrdp 直接映射到
@@ -300,4 +300,4 @@ if ($resp.code -ne 200) {
     throw "创建 139 存储失败：$($resp.message)"
 }
 
-Write-Host "[AList 5/5] 完成。挂载路径: $MountPath （数据放 $MountPath/全部文件/AI文件库/CloudRDP）"
+Write-Host "[AList 5/5] 完成。挂载路径: $MountPath （数据放 $MountPath/AI文件库/CloudRDP）"
