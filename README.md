@@ -77,7 +77,9 @@
 > - 端口会自动推断加密方式：`465`=隐式 SSL、`587`=STARTTLS、`25`=明文；也可用 `MAIL_SECURITY` 强制。
 > - **不配这组 Secret 也能跑**：脚本会打印「跳过发信」并正常继续。密码照常在第 0d 步的日志里明文打印。
 
-### 4. `ALIST_139_AUTHORIZATION`（关键，约 15 天过期）
+### 4. 139 云盘凭据（`ALIST_139_AUTHORIZATION` 或「账号密码全量登录」）
+
+**方案 A（默认）—— `ALIST_139_AUTHORIZATION`（关键，约 15 天过期）**
 
 1. 浏览器登录 https://yun.139.com/
 2. 按 **F12** 打开开发者工具 → **Application（应用）** 面板
@@ -87,6 +89,26 @@
 6. 粘贴进 Secret 值
 
 > 备用取法：F12 → **Network（网络）** → 筛选 `hcy/file/list` → 请求标头里的 `Authorization`，同样只取 `Basic ` 之后的部分。
+
+> ⚠️ 该 token **约 15 天过期**。过期后第 5 步会报
+> `创建 139 存储失败：failed init storage but storage is already created: ... authorization has expired`。
+> 其中 `storage is already created` 是 AList `CreateStorage` 的**固定包装文案**（它先写库再初始化，初始化失败就套这句），
+> **真因永远是最后那句 `authorization has expired`** —— 且驱动在「已过期」时**不会**自动续期、也不会回退密码登录。
+> `setup-alist.ps1` 现在会**提前解码判有效期**并打印「剩余约 N 天 / 已过期」，不再让你对着这句猜。
+
+**方案 B（可选，长期免维护）—— 账号密码全量登录**
+
+同时配置以下三个 Secret（此时 `ALIST_139_AUTHORIZATION` 可留空；两者都配时以 B 为准）：
+
+| Secret | 说明 |
+|--------|------|
+| `ALIST_139_USERNAME` | 139 账号（手机号） |
+| `ALIST_139_PASSWORD` | 139 登录密码 |
+| `ALIST_139_MAIL_COOKIES` | `mail.10086.cn` 的 Cookie（至少含 `RMKEY`；建议整串复制） |
+
+三件套齐全时，AList 的 139 驱动会**自己走全量登录**（10086 邮件登录 → 换 artifact → 三方登录），
+把新 `Authorization` 回写进存储，运行中每 12 小时自动续期 → **不用再每 15 天手动更新 Secret**。
+注意：可能触发 10086 风控（图形验证码）而失败；失败时仍可回退方案 A。
 
 ---
 
@@ -1860,7 +1882,9 @@ cloud-rdp/
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| 第 5 步报「创建 139 存储失败」 | `Authorization` 过期或复制多了 `Basic` | 重新获取 Authorization，只取 `Basic ` 后那段，更新 Secret |
+| 第 5 步报「创建 139 存储失败：… storage is already created: … authorization has expired」 | 139 `Authorization` 已过期（`storage is already created` 是 AList 固定包装文案，真因是最后那句） | 重新获取 Authorization（只取 `Basic ` 后那段）更新 Secret；或改用方案 B「账号密码全量登录」（见 ③-4）。脚本现在会**提前**打印「已过期 / 剩余 N 天」 |
+| 第 5 步报「139 Authorization 已过期（… 天）」 | 脚本预检拦下，**没**等 AList 那句晦涩报错 | 同上：更新 Secret 或改用方案 B |
+| 第 5 步报「139 存储请求失败 … already/exist」 | 挂载路径 `/cloudrdp` 已被别的存储占用 | 删掉旧存储，或改 `setup-alist.ps1` 里的 `$MountPath`（脚本已自动「存在即更新」，正常不该出现） |
 | 第 5 步报驱动不存在 | AList 版本驱动名不同 | 日志会打印可用驱动列表，改 `setup-alist.ps1` 里的 `$driverKey` |
 | `sync-down` 退出码非 0 | 首次运行远端为空（正常）/ Authorization 过期 | 首次可忽略；否则更新 Secret |
 | C 盘占用显示 80%+ | 瘦身被关了（`slim.mode=off` 或输入 `slim_image=off`），或瘦身失败 | 见 ⑦；把 `slim.mode` 改回 `auto`，或看日志里 `SLIM_STATUS` |
@@ -1952,7 +1976,8 @@ cloud-rdp/
 - **数据目录在 `D:\a\cloud-rdp`**：D 盘是 runner 的临时盘，机器销毁即消失 —— 持久化完全依赖 139，
   所以**务必确认每次运行日志里「数据恢复 / 整机还原」不是 `FAILED`**。
 - **自动重装会跑很久**：402 个包可能几十分钟，期间机器可用但会占带宽/CPU；不想要就把 `install_apps` 填 `false`。
-- **Authorization 约 15 天过期**：需定期手动更新 Secret，否则工作流会在第 5 步失败。
+- **Authorization 约 15 天过期**：需定期手动更新 Secret，否则工作流会在第 5 步失败（脚本现在会**提前**提示剩余天数）。
+  想免去每 15 天一手动，可改用方案 B「账号密码全量登录」（见 ③-4）。
 - **额度有限**：私有仓库约 5~6 次满时长会话/月，用完即停（Actions 会**静默停摆、不报错**）。
 - **机器是一次性的**：Job 结束即销毁。已纳入快照的内容（见第四节）可自动还原，其余会丢失。
 - **防火墙已关闭**（本项目要求）：机器无公网 IP、只走 Tailscale 内网，但内网可达面变大，请自行评估。
@@ -1984,7 +2009,8 @@ git push -u origin main
 | Secret | 用途 | 是否必需 |
 |--------|------|----------|
 | `TAILSCALE_AUTHKEY` | Tailscale 组网 | ✅ 必需 |
-| `ALIST_139_AUTHORIZATION` | 139 云盘授权（约 15 天过期） | ✅ 必需 |
+| `ALIST_139_AUTHORIZATION` | 139 云盘授权（约 15 天过期） | 二选一（方案 A） |
+| `ALIST_139_USERNAME` / `ALIST_139_PASSWORD` / `ALIST_139_MAIL_COOKIES` | 139 账号密码全量登录（长期免维护） | 二选一（方案 B，见 ③-4） |
 | `MAIL_TO` / `MAIL_USER` / `MAIL_PASS` / `MAIL_SMTP_HOST` | 开机后把连接信息发到邮箱 | 可选（见第三节） |
 | `GH_BILLING_TOKEN` | 查官方 Billing API 拿账号级额度（需 `user` scope） | 可选（缺省回退本仓库估算） |
 

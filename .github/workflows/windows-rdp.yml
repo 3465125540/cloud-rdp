@@ -581,6 +581,10 @@ jobs:
         shell: pwsh
         env:
           ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
+          # 可选：三件套齐全时改用「账号密码全量登录」（authorization 留空 → 长期免维护）
+          ALIST_139_USERNAME: ${{ secrets.ALIST_139_USERNAME }}
+          ALIST_139_PASSWORD: ${{ secrets.ALIST_139_PASSWORD }}
+          ALIST_139_MAIL_COOKIES: ${{ secrets.ALIST_139_MAIL_COOKIES }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .\scripts\setup-alist.ps1
       - name: 6. （可选）迁移 139 老路径到 AI文件库

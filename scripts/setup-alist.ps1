@@ -13,6 +13,13 @@
     ALIST_139_ROOT_FOLDER_ID  根文件夹ID，默认 "/"（整个盘）
     ALIST_139_CLOUD_ID        家庭云/共享群专用ID，默认空
 
+  ⚠️ 139 凭据二选一：
+    A) 只配 ALIST_139_AUTHORIZATION（浏览器 yun.139.com 的 Authorization，约 15 天过期）；
+    B) 或同时配 ALIST_139_USERNAME + ALIST_139_PASSWORD + ALIST_139_MAIL_COOKIES
+       （三者齐全时 authorization 留空，驱动会全量登录并把新 token 回写存储 → 长期免维护）。
+    两者都配时以 B 为准。A 过期时 AList 只会回一句晦涩的
+    "failed init storage but storage is already created: ... authorization has expired"。
+
   产物：
     <SysDir>\alist\alist.exe  +  <SysDir>\alist\data\  （AList 数据目录；SysDir 默认 D:\cloudrdp-sys）
     AList 服务监听 http://127.0.0.1:5244 ，WebDAV 在 /dav
@@ -43,8 +50,60 @@ $StorageType   = if ([string]::IsNullOrWhiteSpace($env:ALIST_139_TYPE)) { "perso
 $RootFolderID  = if ([string]::IsNullOrWhiteSpace($env:ALIST_139_ROOT_FOLDER_ID)) { "/" } else { $env:ALIST_139_ROOT_FOLDER_ID }
 $CloudID       = if ($null -eq $env:ALIST_139_CLOUD_ID) { "" } else { $env:ALIST_139_CLOUD_ID }
 
-if ([string]::IsNullOrWhiteSpace($Authorization)) {
-    throw "缺少环境变量 ALIST_139_AUTHORIZATION —— 请确认 GitHub Secret 已配置且未过期。"
+# ---------- 0. 凭据解析 + 预检（真机 2026-10-14 踩坑）----------
+# Authorization = base64("pc:<账号>:<token>|<..>|<..>|<过期毫秒>|..")，约 15 天过期。
+# 过期后 AList 只会回一句晦涩的
+#   "failed init storage but storage is already created: failed init storage: authorization has expired"
+# （"storage is already created" 是 CreateStorage 的固定包装文案，真因永远是最后那句）。
+# 且驱动 refreshToken() 先判 expiration<0 → 直接报错，**不会**续期、也**不会**回退密码登录。
+# 这里提前解码判有效期：已过期就立刻、明确地报错，别等到 AList 那一句。
+function Get-139AuthExpiry([string]$Auth) {
+    if ([string]::IsNullOrWhiteSpace($Auth)) { return $null }
+    try { $dec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Auth.Trim())) }
+    catch { return $null }
+    $parts = $dec -split ':'
+    if ($parts.Count -lt 3) { return $null }
+    $seg = $parts[2] -split '\|'
+    if ($seg.Count -lt 4) { return $null }
+    $ms = 0L
+    if (-not [long]::TryParse($seg[3], [ref]$ms)) { return $null }
+    if ($ms -le 0) { return $null }
+    return [DateTimeOffset]::FromUnixTimeMilliseconds($ms)
+}
+
+# 可选「账号密码全量登录」：三件套齐全且 authorization 留空时，驱动会自己登录并把新
+# token 回写存储（长期免维护，不再 15 天一手动）。详见 README「139 凭据」。
+$FullLoginUser = $env:ALIST_139_USERNAME
+$FullLoginPass = $env:ALIST_139_PASSWORD
+$FullLoginCook = $env:ALIST_139_MAIL_COOKIES
+$UseFullLogin  = (-not [string]::IsNullOrWhiteSpace($FullLoginUser)) -and
+                 (-not [string]::IsNullOrWhiteSpace($FullLoginPass)) -and
+                 (-not [string]::IsNullOrWhiteSpace($FullLoginCook))
+
+if ($UseFullLogin) {
+    Write-Host "[AList] 139 凭据：账号密码全量登录（authorization 留空，由 AList 自愈续期）"
+} elseif ([string]::IsNullOrWhiteSpace($Authorization)) {
+    throw ("缺少 139 凭据。二选一：`n" +
+           "  A) 配置 Secret ALIST_139_AUTHORIZATION（浏览器 yun.139.com 的 Authorization，约 15 天过期）；或`n" +
+           "  B) 同时配置 ALIST_139_USERNAME + ALIST_139_PASSWORD + ALIST_139_MAIL_COOKIES（长期自愈）。")
+} else {
+    $exp = Get-139AuthExpiry $Authorization
+    if ($null -eq $exp) {
+        Write-Host "[AList] 警告：无法解析 Authorization 有效期（格式可能异常），仍继续尝试。" -ForegroundColor Yellow
+    } else {
+        $left = ($exp - [DateTimeOffset]::UtcNow).TotalDays
+        if ($left -le 0) {
+            throw ("139 Authorization 已过期（$([math]::Round($left,1)) 天）—— AList 无法挂载 139 云盘。`n" +
+                   "请重新获取后更新 GitHub Secret ALIST_139_AUTHORIZATION：`n" +
+                   "  浏览器登录 https://yun.139.com/ → F12 → Application → Cookies → yun.139.com`n" +
+                   "  → 复制 Authorization 的值，**只取 'Basic ' 之后那段**（不含 Basic 和空格）。`n" +
+                   "  （要免去每 15 天一手动，见 README「139 凭据」的账号密码全量登录方案。）")
+        } elseif ($left -lt 15) {
+            Write-Host "[AList] 注意：139 Authorization 仅剩 $([math]::Round($left,1)) 天；AList 运行时每 12h 会自动续期，但请尽快更新 Secret。" -ForegroundColor Yellow
+        } else {
+            Write-Host "[AList] 139 Authorization 有效，剩余约 $([math]::Round($left,1)) 天。"
+        }
+    }
 }
 
 function Wait-Http([string]$Url, [int]$TimeoutSec = 90) {
@@ -163,21 +222,33 @@ function Resolve-Field([string[]]$candidates, [string]$fallback) {
 }
 
 $kAuth  = Resolve-Field @("authorization", "Authorization") "authorization"
+$kUser  = Resolve-Field @("username", "Username") "username"
+$kPass  = Resolve-Field @("password", "Password") "password"
+$kCook  = Resolve-Field @("mail_cookies", "MailCookies") "mail_cookies"
 $kType  = Resolve-Field @("type", "Type") "type"
 $kRoot  = Resolve-Field @("root_folder_id", "RootFolderID") "root_folder_id"
 $kCloud = Resolve-Field @("cloud_id", "CloudID") "cloud_id"
 $kPart  = Resolve-Field @("custom_upload_part_size", "CustomUploadPartSize") "custom_upload_part_size"
 
-# ---------- 5. 创建存储 ----------
+# ---------- 5. 创建 / 更新存储（幂等）----------
+# 真机踩坑：同一台机器重跑（或数据目录被还原）时，/cloudrdp 已存在 → create 会报
+#   "failed create storage in database"（重复挂载路径）。所以先查列表，存在就 update。
 $addObj = @{}
-$addObj[$kAuth] = $Authorization
+if ($UseFullLogin) {
+    # 三件套齐全 → 不填 authorization，驱动走全量登录并把新 token 回写存储。
+    $addObj[$kUser] = $FullLoginUser
+    $addObj[$kPass] = $FullLoginPass
+    $addObj[$kCook] = $FullLoginCook
+} else {
+    $addObj[$kAuth] = $Authorization
+}
 $addObj[$kType] = $StorageType
 $addObj[$kRoot] = $RootFolderID
 if (-not [string]::IsNullOrWhiteSpace($CloudID)) { $addObj[$kCloud] = $CloudID }
 $addObj[$kPart] = 0
 $addition = $addObj | ConvertTo-Json -Compress
 
-$createBody = @{
+$storageObj = @{
     mount_path       = $MountPath
     order            = 0
     driver           = [string]$driverKey
@@ -187,18 +258,45 @@ $createBody = @{
     remark           = "139 cloudrdp"
     web_proxy        = $false
     webdav_policy    = "302_redirect"
-} | ConvertTo-Json -Compress
+}
+
+# 查是否已存在同挂载路径的存储
+$existingId = $null
+try {
+    $listResp = Invoke-RestMethod -Uri "$BaseUrl/api/admin/storage/list" -Headers @{ Authorization = $token }
+    if ($listResp.code -eq 200) {
+        $hit = @($listResp.data.content) | Where-Object { $_.mount_path -eq $MountPath } | Select-Object -First 1
+        if ($hit) { $existingId = $hit.id }
+    }
+} catch { Write-Host "[AList] 存储列表读取失败（继续按新建处理）：$($_.Exception.Message)" }
+
+$apiPath = "$BaseUrl/api/admin/storage/create"
+if ($null -ne $existingId) {
+    Write-Host "[AList] /cloudrdp 已存在（id=$existingId）→ 改为更新"
+    $storageObj["id"] = $existingId
+    $apiPath = "$BaseUrl/api/admin/storage/update"
+}
+$body = $storageObj | ConvertTo-Json -Compress
 
 try {
-    $resp = Invoke-RestMethod -Uri "$BaseUrl/api/admin/storage/create" -Method Post -Headers @{ Authorization = $token } -Body $createBody -ContentType "application/json"
+    $resp = Invoke-RestMethod -Uri $apiPath -Method Post -Headers @{ Authorization = $token } -Body $body -ContentType "application/json"
 } catch {
-    throw "创建 139 存储请求失败：$($_.Exception.Message)"
+    throw "139 存储请求失败（$apiPath）：$($_.Exception.Message)"
 }
 if ($resp.code -ne 200) {
     Write-Host "----- 诊断：可用驱动 -----"
     try { (Invoke-RestMethod -Uri "$BaseUrl/api/admin/driver/list" -Headers @{ Authorization = $token }).data | Format-Table } catch {}
     Write-Host "----- 诊断：$driverKey 期望字段 -----"
     try { (Invoke-RestMethod -Uri "$BaseUrl/api/admin/driver/info?driver=$driverKey" -Headers @{ Authorization = $token }).data.additional | ConvertTo-Json -Depth 6 } catch {}
+    if ("$($resp.message)" -match "authorization has expired") {
+        throw ("创建 139 存储失败：139 Authorization 已过期。`n" +
+               "  更新 GitHub Secret ALIST_139_AUTHORIZATION（浏览器 yun.139.com 的 Authorization，只取 'Basic ' 后那段）后重跑；`n" +
+               "  或改用账号密码全量登录（见 README「139 凭据」）。")
+    }
+    if ("$($resp.message)" -match "already|exist") {
+        throw ("创建 139 存储失败：$($resp.message)`n" +
+               "  （挂载路径 $MountPath 可能已被别的存储占用；删掉旧存储或改 $MountPath。）")
+    }
     throw "创建 139 存储失败：$($resp.message)"
 }
 

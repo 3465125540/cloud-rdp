@@ -2951,6 +2951,24 @@ def main():
           'id="acc-private"' in idx_txt and "repo_private: privateMode" in app_txt
           and "vis-tag" in app_txt and ".vis-tag.priv" in css_txt)
 
+    # 139 Authorization 过期（真机 2026-10-14 第 5 步失败）—— 预检 / 幂等 / 全量登录
+    _alist = open(os.path.join(repo_dir, "scripts", "setup-alist.ps1"), encoding="utf-8-sig").read()
+    check("T539 ★ setup-alist 提前解码 Authorization 判有效期（过期即明确报错，不等 AList 那句晦涩的 storage is already created）",
+          "function Get-139AuthExpiry" in _alist
+          and "authorization has expired" in _alist
+          and "139 Authorization 已过期" in _alist
+          and "剩余约" in _alist)
+    check("T540 ★ setup-alist 存储创建幂等：已存在 /cloudrdp 就改 update（避免重复挂载路径）",
+          "/api/admin/storage/list" in _alist
+          and "/api/admin/storage/update" in _alist
+          and "改为更新" in _alist
+          and "storage is already created" in _alist)
+    check("T541 ★ setup-alist 支持账号密码全量登录（三件套齐全 → authorization 留空），workflow 透传三个可选 Secret",
+          "ALIST_139_USERNAME" in _alist and "ALIST_139_PASSWORD" in _alist
+          and "ALIST_139_MAIL_COOKIES" in _alist and "$UseFullLogin" in _alist
+          and "secrets.ALIST_139_USERNAME" in wf_txt
+          and "secrets.ALIST_139_MAIL_COOKIES" in wf_txt)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()
