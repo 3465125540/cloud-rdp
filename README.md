@@ -340,8 +340,8 @@
 - **一次性迁移**：`Run workflow` 时把 `migrate_139` 填 `true`，第 6 步会 `rclone copy`（**不 move**）把老数据搬到新位置；
   幂等守卫：仅当「新路径为空 且 老路径非空」才执行。老数据原样保留，可随时切回
 - **备选「根 ID 法」**：若不想让远端路径出现中文，可把 Secret/环境变量 `ALIST_139_ROOT_FOLDER_ID` 设为
-  「AI文件库」的**文件夹 ID**（139 网页 F12 从请求里取），AList 的 `/cloudrdp` 会直接映射到该文件夹，
-  远端路径即回归纯 ASCII（`alist:/cloudrdp/CloudRDP`），脚本原生支持，无需改代码
+  「AI文件库」的**文件夹 ID**（139 网页 F12 从请求里取），AList 的 `/` 会直接映射到该文件夹，
+  远端路径即回归纯 ASCII（`alist:/CloudRDP`），脚本原生支持，无需改代码
 
 #### ⑦ C 盘策略：开机瘦身（压到 ≤30%）+ 增量守卫
 
@@ -766,7 +766,7 @@ python workbench\selftest.py   :: 离线自测（632 项）
 
 **事故**：账号 `acc-1 · yc1966asgf`（`100.77.250.79`）开机后**没有从 139 云盘拉取数据**，界面却显示
 「已同步」。机器空着手起来，随后它自己的 `sync-up.ps1` 还在 139 根目录 `mkdir` 出一个**幽灵
-`AI文件库`** 目录（真实的是 `/cloudrdp/AI文件库`），把「空」这个假象固化下来。
+`AI文件库`** 目录（真实的是 `/AI文件库`），把「空」这个假象固化下来。
 
 **根因**：旧 `sync-down.ps1` 只凭 rclone 退出码 3/4 就判定「远端为空」。但 AList 在 DNS 抖动时会把
 WebDAV `PROPFIND` 打成 `404`，rclone **同样**映射成码 3 —— 于是「远端为空」和「网络抖动」无法区分。
@@ -788,7 +788,7 @@ WebDAV `PROPFIND` 打成 `404`，rclone **同样**映射成码 3 —— 于是�
 **为什么把判定放进共享库**：`sync-down` / `sync-up` / `pre-restore` / `backup-snapshot` 四处都要用同
 一套口径。放共享库能保证**判定不漂移** —— 改一处，四处同时生效。
 
-> **运维提醒**：139 根目录下若已存在那个幽灵 `AI文件库`（与 `/cloudrdp/AI文件库` 并存），需**手动删除**；
+> **运维提醒**：139 根目录下若已存在那个幽灵 `AI文件库`（与 `/AI文件库` 并存），需**手动删除**；
 > 老 fork（如 acc-1）不必再手工同步脚本 —— 步骤 0p 每次开机都会拉 hub 的最新 `scripts/` 覆盖。
 
 ### 11. runner 掉线保命四件套（`The hosted runner lost communication with the server`）

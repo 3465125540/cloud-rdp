@@ -76,7 +76,9 @@ env:
   CLOUDRDP_DATA_DIR: 'D:\a\cloud-rdp'
   # 139 侧根：数据 = $base/CloudRDP，快照 = $base/_snapshot
   # 「全部文件」是 139 网页 UI 的标签名，**不是真实目录**；API 根目录下 AI文件库 是直接子项（2026-10-14 踩坑确认）。
-  CLOUDRDP_REMOTE_BASE: 'alist:/cloudrdp/AI文件库'
+  # AList 挂载点改为 /（整盘根），AI文件库 是根直接子项 → 数据 alist:/AI文件库/CloudRDP（2026-10-15）
+  CLOUDRDP_REMOTE_BASE: 'alist:/AI文件库'
+  CLOUDRDP_REMOTE_ROOT: 'alist:'
   # 可移动程序暂存目录（位于数据目录内，随数据管线高频同步）
   CLOUDRDP_PORTABLE_DIR: 'D:\a\cloud-rdp\_portable'
   # ---------- 系统目录：rclone / AList / 快照暂存 / 程序还原 全部放 D 盘 ----------

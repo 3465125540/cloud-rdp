@@ -23,13 +23,13 @@
   产物：
     <SysDir>\alist\alist.exe  +  <SysDir>\alist\data\  （AList 数据目录；SysDir 默认 D:\cloudrdp-sys）
     AList 服务监听 http://127.0.0.1:5244 ，WebDAV 在 /dav
-    存储挂载路径 /cloudrdp （= 139 云盘整盘，由 $RootFolderID 决定）
-    数据实际落在 /cloudrdp/AI文件库/CloudRDP （139 根目录 > AI文件库 > CloudRDP）
-    快照落在   /cloudrdp/AI文件库/_snapshot
+    存储挂载路径 / （= 139 云盘整盘，AI文件库 是根直接子项；由 $RootFolderID 决定）
+    数据实际落在 /AI文件库/CloudRDP （139 根目录 > AI文件库 > CloudRDP）
+    快照落在   /AI文件库/_snapshot
 
   ⚠️ 备选「根 ID 法」：若不想让远端路径里出现中文，可把 ALIST_139_ROOT_FOLDER_ID 设为
-     「AI文件库」文件夹的 ID（139 网页 F12 从请求里取），则 AList 的 /cloudrdp 直接映射到
-     该文件夹，rclone 远端即可回归纯 ASCII：alist:/cloudrdp/CloudRDP
+     「AI文件库」文件夹的 ID（139 网页 F12 从请求里取），则 AList 的 / 直接映射到
+     该文件夹，rclone 远端即可回归纯 ASCII：alist:/CloudRDP
 #>
 
 $ErrorActionPreference = "Stop"
@@ -43,7 +43,7 @@ $BaseUrl   = "http://127.0.0.1:5244"
 $Port      = 5244
 $AdminUser = "admin"
 $AdminPass = if ([string]::IsNullOrWhiteSpace($env:ALIST_ADMIN_PASS)) { "CloudRdp-Alist-2026" } else { $env:ALIST_ADMIN_PASS }
-$MountPath = "/cloudrdp"
+$MountPath = "/"
 
 $Authorization = $env:ALIST_139_AUTHORIZATION
 $StorageType   = if ([string]::IsNullOrWhiteSpace($env:ALIST_139_TYPE)) { "personal_new" } else { $env:ALIST_139_TYPE }
@@ -231,7 +231,7 @@ $kCloud = Resolve-Field @("cloud_id", "CloudID") "cloud_id"
 $kPart  = Resolve-Field @("custom_upload_part_size", "CustomUploadPartSize") "custom_upload_part_size"
 
 # ---------- 5. 创建 / 更新存储（幂等）----------
-# 真机踩坑：同一台机器重跑（或数据目录被还原）时，/cloudrdp 已存在 → create 会报
+# 真机踩坑：同一台机器重跑（或数据目录被还原）时，挂载点已存在 → create 会报
 #   "failed create storage in database"（重复挂载路径）。所以先查列表，存在就 update。
 $addObj = @{}
 if ($UseFullLogin) {
@@ -272,7 +272,7 @@ try {
 
 $apiPath = "$BaseUrl/api/admin/storage/create"
 if ($null -ne $existingId) {
-    Write-Host "[AList] /cloudrdp 已存在（id=$existingId）→ 改为更新"
+    Write-Host "[AList] 挂载点已存在（id=$existingId）→ 改为更新"
     $storageObj["id"] = $existingId
     $apiPath = "$BaseUrl/api/admin/storage/update"
 }

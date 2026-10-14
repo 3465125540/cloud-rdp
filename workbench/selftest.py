@@ -3002,13 +3002,11 @@ def main():
     # 139 远端基准路径：AI文件库 是根的直接子项，「全部文件」只是网页标签名不是目录（2026-10-14 踩坑确认）
     _sd = open(os.path.join(repo_dir, "scripts", "sync-down.ps1"), encoding="utf-8-sig").read()
     _su = open(os.path.join(repo_dir, "scripts", "sync-up.ps1"), encoding="utf-8-sig").read()
-    check("T546 ★ 139 远端基准路径 = alist:/cloudrdp/AI文件库（不含「全部文件」，它是网页标签名不是目录）",
-          "alist:/cloudrdp/AI文件库" in wf_txt
-          and "alist:/cloudrdp/AI文件库" in _sd
-          and "alist:/cloudrdp/AI文件库" in _su
-          and "全部文件/AI文件库" not in wf_txt
-          and "全部文件/AI文件库" not in _sd
-          and "全部文件/AI文件库" not in _su)
+    check("T546 ★ 139 远端基准路径 = alist:/AI文件库（挂载点已改为 /，AI文件库 是根直接子项）",
+          "alist:/AI文件库" in wf_txt
+          and "alist:/AI文件库" in _sd
+          and "alist:/AI文件库" in _su
+          and "alist:/cloudrdp/AI文件库" not in wf_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

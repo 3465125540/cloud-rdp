@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
   抓取「整机状态快照」：文件树 + 注册表 + 已装软件清单 + 系统设置 + 快捷方式，
-  落到 C:\_snapshot，并可选推送到 139 云盘 alist:/cloudrdp/_snapshot。
+  落到 C:\_snapshot，并可选推送到 139 云盘 alist:/AI文件库/_snapshot。
 
 .DESCRIPTION
   GitHub Actions runner 是一次性全新 VM，没有镜像级快照能力，所以「复刻关机前的机器」
@@ -23,7 +23,7 @@
     _tools\                  供开机还原用的脚本副本（restore-snapshot.ps1 / snapshot-config.json）
 
 .PARAMETER Stage    本地暂存目录，默认 C:\_snapshot
-.PARAMETER Remote   139 侧目标路径，默认 alist:/cloudrdp/_snapshot
+.PARAMETER Remote   139 侧目标路径，默认 alist:/AI文件库/_snapshot
 .PARAMETER ConfigPath 清单配置文件路径
 .PARAMETER RdpUser  目标 RDP 用户名（用于解析 %RDPUSERPROFILE% 与导出其 HKCU）
 .PARAMETER Push     抓取完成后推送到远端
@@ -37,7 +37,7 @@
 [CmdletBinding()]
 param(
     [string]$Stage      = $(if ($env:CLOUDRDP_SNAPSHOT_STAGE) { $env:CLOUDRDP_SNAPSHOT_STAGE } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\_snapshot" } else { "C:\_snapshot" }),
-    [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/cloudrdp/AI文件库/_snapshot" }),
+    [string]$Remote     = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/_snapshot" } else { "alist:/AI文件库/_snapshot" }),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "snapshot-config.json"),
     [string]$RdpUser    = $(if ($env:RDP_USERNAME) { $env:RDP_USERNAME } else { "a" }),
     [string]$RemoteRoot = "",

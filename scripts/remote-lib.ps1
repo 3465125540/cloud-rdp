@@ -11,7 +11,7 @@
 
   ── 本库的做法 ──
   把判定从「rclone 退出码」升级成「先探根、再逐级探」：
-    1. 先列 AList 挂载根（默认 alist:/cloudrdp，即 139 云盘根）—— 能列出来 = 网络 + 鉴权都正常；
+    1. 先列 AList 挂载根（默认 alist:，即 139 云盘根）—— 能列出来 = 网络 + 鉴权都正常；
     2. 再逐级往下列，缺哪一级就报哪一级；
     3. 只有「根可列 + 父级可列 + 子级确实不在」时才敢判 EMPTY；根都列不出来 → TRANSIENT。
   换句话说：**绝不把「探不动」当成「不存在」**。
@@ -52,8 +52,8 @@ function Get-RcloneErrorKind {
 function Get-RemoteRoot {
     <#
       139 侧的「根」= AList 存储挂载点（健康时必定可列）。
-      优先级：显式 -Root > 环境变量 CLOUDRDP_REMOTE_ROOT > 由 CLOUDRDP_REMOTE_BASE 取前两段 > alist:/cloudrdp
-      alist:/cloudrdp/AI文件库 -> alist:/cloudrdp
+      优先级：显式 -Root > 环境变量 CLOUDRDP_REMOTE_ROOT > 由 CLOUDRDP_REMOTE_BASE 取前缀 > alist:
+      挂载点已改为 /（整盘根），所以 root = alist:；层级 alist:/AI文件库/CloudRDP -> @('AI文件库','CloudRDP')
     #>
     param([string]$Remote = "", [string]$Root = "")
     if (-not [string]::IsNullOrWhiteSpace($Root)) { return $Root.TrimEnd('/') }
@@ -63,19 +63,19 @@ function Get-RemoteRoot {
     $base = [string]$env:CLOUDRDP_REMOTE_BASE
     if (-not [string]::IsNullOrWhiteSpace($base)) {
         $parts = @($base.TrimEnd('/').Split('/') | Where-Object { $_ -ne '' })
-        if ($parts.Count -ge 2) { return ($parts[0] + '/' + $parts[1]) }
+        if ($parts.Count -ge 1) { return $parts[0] }
     }
     if (-not [string]::IsNullOrWhiteSpace($Remote)) {
         $parts = @($Remote.TrimEnd('/').Split('/') | Where-Object { $_ -ne '' })
-        if ($parts.Count -ge 2) { return ($parts[0] + '/' + $parts[1]) }
+        if ($parts.Count -ge 1) { return $parts[0] }
     }
-    return 'alist:/cloudrdp'
+    return 'alist:'
 }
 
 function Get-RemoteLevels {
     <#
       Remote 相对 Root 的层级。
-      alist:/cloudrdp/AI文件库/CloudRDP + root=alist:/cloudrdp -> @('AI文件库','CloudRDP')
+      alist:/AI文件库/CloudRDP + root=alist: -> @('AI文件库','CloudRDP')
     #>
     param([string]$Remote, [string]$Root)
     $r = ([string]$Remote).TrimEnd('/')
@@ -203,6 +203,11 @@ function Get-RemoteProbe {
             $res.LeafNames = $curList.Names
             $res.Verdict   = 'EMPTY'
             $res.Message   = "远端确实不存在：$cur（父目录 $($curList.Path) 可列，里面没有「$leaf」）"
+            # 诊断：把父目录实际列到的内容打出来，一眼定位「根到底映射到了哪层 / 是否为空」
+            $shown = if ($curList.Names -and $curList.Names.Count -gt 0) {
+                ($curList.Names -join ', ')
+            } else { '（空列表）' }
+            Write-Host "[remote] 诊断：$($curList.Path) 实际列出 $($curList.Names.Count) 项 → $shown"
             return [pscustomobject]$res
         }
 

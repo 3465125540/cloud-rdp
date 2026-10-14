@@ -3,7 +3,7 @@
   把本地数据目录推回 139 云盘（运行中定期调用 + 收尾全量调用）。
 .NOTES
   用 rclone copy（只增不删），避免远端误删。
-  远端路径: alist:/cloudrdp/AI文件库/CloudRDP
+  远端路径: alist:/AI文件库/CloudRDP
   本地路径: D:\a\cloud-rdp
 
   ⚠️ 关键：本地数据目录是 Actions 工作区的**父目录**（工作区 = D:\a\<仓库名>\<仓库名>），
@@ -24,7 +24,7 @@
 
 param(
     [string]$Local  = $(if ($env:CLOUDRDP_DATA_DIR)    { $env:CLOUDRDP_DATA_DIR }    else { "D:\a\cloud-rdp" }),
-    [string]$Remote = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/CloudRDP" } else { "alist:/cloudrdp/AI文件库/CloudRDP" }),
+    [string]$Remote = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE + "/CloudRDP" } else { "alist:/AI文件库/CloudRDP" }),
     [string]$RemoteRoot = "",
     [string[]]$Exclude = @(),
     [int]$ProbeAttempts   = 3,
@@ -76,7 +76,7 @@ if ($hasRemoteLib) {
     $rroot = if (-not [string]::IsNullOrWhiteSpace($RemoteRoot)) { $RemoteRoot }
              elseif ($env:CLOUDRDP_REMOTE_ROOT) { $env:CLOUDRDP_REMOTE_ROOT }
              elseif ($env:CLOUDRDP_REMOTE_BASE) { ((($env:CLOUDRDP_REMOTE_BASE -split '/')[0..1]) -join '/') }
-             else { 'alist:/cloudrdp' }
+             else { 'alist:' }
     & $RcloneExe lsf $rroot --max-depth 1 --timeout "$($ProbeTimeoutSec)s" --contimeout "$($ProbeTimeoutSec)s" --retries 1 --low-level-retries 1 2>&1 | Out-Null
     $rootOk = ($LASTEXITCODE -eq 0)
 }
