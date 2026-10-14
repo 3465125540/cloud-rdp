@@ -2969,6 +2969,36 @@ def main():
           and "secrets.ALIST_139_USERNAME" in wf_txt
           and "secrets.ALIST_139_MAIL_COOKIES" in wf_txt)
 
+    # ---------------- 工作流顺序优化（2026-10-14）----------------
+    # ① 0b2 挪到 0c1 之后（先装 UU远程，再装交接任务/快捷方式）
+    _i0c1 = wf_txt.index("- name: 0c1. 安装 UU远程")
+    _i0b2 = wf_txt.index("- name: 0b2. 会话归属校正")
+    _i0c2 = wf_txt.index("- name: 0c2. 解析账号池角色")
+    check("T542 ★ 0b2 会话归属校正挪到 0c1 安装 UU远程 之后（先装 UU，再装交接任务/快捷方式）",
+          _i0c1 < _i0b2 < _i0c2)
+
+    # ② AList 前置提到瘦身之前，好让「拉数据」尽早和瘦身并行
+    _i1  = wf_txt.index("- name: 1. 开机瘦身")
+    _i3  = wf_txt.index("- name: 3. 生成 AList 管理员密码")
+    _i6  = wf_txt.index("- name: 6. （可选）迁移 139")
+    _i7  = wf_txt.index("- name: 7. 从 139 云盘拉取数据")
+    _i7b = wf_txt.index("- name: 7b. 等待后台任务")
+    _i2  = wf_txt.index("- name: 2. C 盘守卫：记录基线")
+    _i8  = wf_txt.index("- name: 8. 预还原")
+    check("T543 ★ AList 前置（3/4/5/6）提到瘦身(1)之前 —— 好让「拉数据」尽早与瘦身并行",
+          _i3 < _i6 < _i1 < _i7)
+    check("T544 ★ 瘦身(1) 与 拉数据(7) 都改后台启动，新增 7b 等两者，再走基线(2) → 预还原(8)",
+          "bg-run.ps1 -Mode Start -Name slim" in wf_txt
+          and "bg-run.ps1 -Mode Start -Name syncdown" in wf_txt
+          and "bg-run.ps1 -Mode Wait -Name slim" in wf_txt
+          and "bg-run.ps1 -Mode Wait -Name syncdown" in wf_txt
+          and _i1 < _i7 < _i7b < _i2 < _i8)
+    _bg = open(os.path.join(repo_dir, "scripts", "bg-run.ps1"), encoding="utf-8-sig").read()
+    check("T545 ★ bg-run.ps1：GITHUB_ENV 重定向到临时文件 + Wait 回填（后台进程直接写 GITHUB_ENV 无效）+ done flag + PID 死亡检测",
+          "$env:GITHUB_ENV = $GhEnvFile" in _bg
+          and "-ghenv.txt" in _bg and "done.flag" in _bg
+          and "Get-Process -Id $bgPid" in _bg and "已回填" in _bg)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

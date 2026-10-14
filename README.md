@@ -133,7 +133,7 @@
 
 **启动后约 2~3 分钟**，展开 **`0d. 打印连接信息（可立即连接）`** 步骤记下 **Tailscale IP** —— 此刻就能连进来。
 
-> ⏱️ **剩下的是后台初始化**：C 盘瘦身 → 数据/桌面恢复 → 中文环境 → 软件重装，通常再要 **30~60 分钟**
+> ⏱️ **剩下的是后台初始化**：139 挂载 → **C 盘瘦身 ∥ 数据拉取（并行）** → 桌面/整机还原 → 中文环境 → 软件重装，通常再要 **30~60 分钟**
 > （取决于 139 云盘速度，实测约 0.45 MB/s）。
 > **等到日志出现 `>>> ENV READY —— 环境初始化完成 <<<`（第 13 步）**，才代表「满血」环境就绪。
 > 提前登录也能用，但数据 / 桌面 / 中文输入法可能还在恢复中。
@@ -413,14 +413,16 @@
 - 仅在**瘦身实际执行**时生效（`mode=off` 或 `auto` 且未超阈值则整段跳过）
 - 透出 `SLIM_PURGED_DIRS` / `SLIM_PURGED_GB`
 
-**② 增量守卫（`scripts/disk-guard.ps1`，第 0c / 10b / 保活每 30 分钟 / 收尾）** —— 瘦身后继续守住「我们产生的增量」：
+**② 增量守卫（`scripts/disk-guard.ps1`，第 2 / 11 步 / 保活每 30 分钟 / 收尾）** —— 瘦身后继续守住「我们产生的增量」：
 
 ```
 增量 = 当前 C: 已用 − 开机基线已用   ≤   基线可用空间 × 30%
 ```
 
-> 顺序很关键：**先瘦身（0b）再记基线（0c）** —— 基线反映瘦身后的真实起点，
+> 顺序很关键：**先瘦身（第 1 步）再记基线（第 2 步）** —— 基线反映瘦身后的真实起点，
 > 可用空间从约 31 GB 变成约 105 GB，增量上限也随之从 9.3 GB 变成约 31 GB。
+> （第 1 步现在是**后台启动**：它和「第 7 步 从 139 拉数据」并行跑，**第 7b 步**等两者都结束，
+> 第 2 步才记基线 —— 顺序仍然成立。）
 
 其余措施：产物全落 D 盘（数据 / rclone / AList / 快照暂存 / 程序实体）；超限时安全清理临时文件、
 Windows 更新缓存、安装包残留。
@@ -1841,7 +1843,7 @@ cloud-rdp/
     └── quota-report.ps1                # Actions 额度估算与告警
 ```
 
-工作流 26 步。**0d 之后就能连**，其余在后台继续跑：
+工作流 28 步。**0d 之后就能连**，其余在后台继续跑：
 
 | # | 步骤 | 说明 |
 |---|------|------|
@@ -1849,16 +1851,18 @@ cloud-rdp/
 | **0p** | **跟随上游 hub 同步脚本（fork 自愈）** | 从 hub 仓库下 `scripts/` 覆盖本机脚本（`/MIR`）—— **老 fork 不必手点 Sync 也能拿到最新逻辑**。⚠️ 只覆盖 `scripts/`、**覆盖不到 `.github/workflows/`**（Actions 用的是触发 commit 里的 workflow），所以 workflow 内联的保命参数对老 fork 不生效（acc-5 事故，见 §17）。本步 fail-soft、末尾 `exit 0`，robocopy 退出码已归一化（不再误报 `exit 1`）；顺带 SHA256 比对 workflow 是否与 hub 漂移 |
 | **0a** | 记录 job 起点 + 开 RDP + **关防火墙** + **加 Defender 排除项** | 尽早写 `_state\job-start.txt`（供 ETA / 耗时计算）；顺手把 `watchdog-lib.ps1` 的 `Enable-RdpAvExclusions` 调了 —— 后面第 7/8 步要落地 ≈1.8 万个小文件，**必须**在重 IO 之前把实时扫描摘掉（见 §11） |
 | **0b** | 建管理员账号 + 数据目录 + 桌面快捷方式 | 数据目录 `D:\a\cloud-rdp`（**会排除其中的仓库 checkout**） |
-| **0b2** | **会话归属校正 + 装「切到 UU远程」快捷方式 + 无感自动交接** | `session-lib.ps1`：诊断当前控制台会话归属 → 写 `CONSOLE_OWNER`；一次装齐 ① SYSTEM 任务 `CloudRDP-UUHandover` + ② 公共桌面「切到 UU远程」+ ③ 无感自动任务 `CloudRDP-UUAuto`（开机 + 每 60s，仅切**没被 RDP 连着**的 `a` 会话，见 §16） |
 | **0c** | 安装并连接 Tailscale | ← **IP 在这里产生**，并记录「可连时刻」。`tailscale up` 带 **`--accept-dns=false`**，避免 VPN 接管系统 DNS 把 runner 自己的长轮询也拽进隧道（见 §11） |
+| **0c1** | **安装 UU远程（备用远程通道）** | `install-uu-remote.ps1`：装网易 GameViewer + 拉起 + 用官方 CLI 取「设备 ID」并设「仅自定义验证码」，打印/邮件连接信息（复用 0e 那套 `MAIL_*`）。fail-soft，永不 exit≠0 |
+| **0b2** | **会话归属校正 + 装「切到 UU远程」快捷方式 + 无感自动交接** | `session-lib.ps1`：诊断当前控制台会话归属 → 写 `CONSOLE_OWNER`；一次装齐 ① SYSTEM 任务 `CloudRDP-UUHandover` + ② 公共桌面「切到 UU远程」+ ③ 无感自动任务 `CloudRDP-UUAuto`（开机 + 每 60s，仅切**没被 RDP 连着**的 `a` 会话，见 §16）。**2026-10-14 挪到 0c1 之后** —— 先把 UU 装上，再装交接任务 / 快捷方式 |
 | **0c2** | **解析账号池角色** | `pool_role` 留空=单机（等同历史行为）；`primary`=唯一写 139；`standby`=只读热备、主下线自升为主。角色写入 `_state\pool-role.txt` |
 | **0d** | ⭐ **打印连接信息（可立即连接）** | **约 2~3 分钟**就能拿到 IP 连进来；账号密码**明文打印**；公共桌面放 `_CloudRDP_SETTING_UP.txt` |
 | **0e** | **把连接信息发到邮箱** | `send-connection-mail.ps1`：IP + 账号 + 密码发到你邮箱；**未配置 `MAIL_*` 会自动跳过**，失败也不影响开机。诊断日志 `D:\cloudrdp-sys\_state\mail.log`，结果透出 `MAIL_RESULT` |
 | **0f** | **设置中文 + 微软拼音（提前到瘦身之前）** | `setup-chinese.ps1`：`Install-Language` 实测每次 **30~43 分钟**，所以放最前面 + **5 分钟封顶、超时转后台**（`LANGPACK=TIMEOUT_BACKGROUND`）。它能在后面瘦身/拉数据/还原的 ~40 分钟里悄悄装完。步级 `timeout-minutes: 6` + `continue-on-error` 双保险 |
-| **1** | **开机瘦身** | `slim-image.ps1`：① 真卸载 `blockedApps`（9 个程序）→ ② 删镜像大件（约 70 GB）→ ③ 清空 `C:\Windows\Installer`（约 6.7 GB）→ ④ **残留清理**（删残留 ARP 卸载项 + 残留空壳目录）。`auto`/`always`/`off` |
+| 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | **2026-10-14 提前到瘦身之前** —— 这样「拉数据」能尽早与瘦身并行。139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
+| **1** | **开机瘦身（后台启动）** | `slim-image.ps1`（经 `bg-run.ps1 -Mode Start`）：① 真卸载 `blockedApps`（9 个程序）→ ② 删镜像大件（约 70 GB）→ ③ 清空 `C:\Windows\Installer`（约 6.7 GB）→ ④ **残留清理**（删残留 ARP 卸载项 + 残留空壳目录）。`auto`/`always`/`off`。**启动后立即返回**，与第 7 步并行 |
+| **7** | **从 139 拉取数据（后台启动）** | `sync-down.ps1`（经 `bg-run.ps1 -Mode Start`；实测 ≈19 分钟，139 约 0.45 MB/s）。**启动后立即返回**，与第 1 步并行 |
+| **7b** | **等待后台任务（瘦身 + 拉数据）** | `bg-run.ps1 -Mode Wait`：等两个 done 标记（带心跳；后台进程被杀则提前退出，不干等），并把 `SLIM_*` / `RESTORE_*` **回填**到当步 env —— 供第 2 / 13 步读（后台进程直接写 `GITHUB_ENV` 无效：runner 只在 step 结束时读一次） |
 | **2** | **C 盘守卫：记录基线** | `disk-guard.ps1 -Baseline`（**在瘦身之后**，基线反映瘦身后的起点） |
-| 3–6 | AList 密码 / rclone / 部署 AList / （可选）迁移 139 | 139 挂载点 `/cloudrdp`；rclone / AList 都装在 `D:\cloudrdp-sys`；迁移仅当 `migrate_139=true` |
-| **7** | **从 139 拉取数据** | `sync-down.ps1`（实测 ≈19 分钟；139 约 0.45 MB/s） |
 | **8** | **预还原** | `pre-restore.ps1 -Pull`（拉取 → **用户名变更迁移** → 记录程序基线 → 校验 → 规划 → 回滚记录 → 驱动全量还原） |
 | **8b** | **补写用户语言键** | `setup-chinese.ps1 -UserHiveOnly`：第 8 步会导入 `registry\user\HKCU-Software.reg`，把 0f 写的语言键覆盖掉 —— 这里再补一次（幂等、秒级） |
 | **10** | **后台重装软件 + 恢复 Edge/WorkBuddy 用户数据** | `reinstall-apps.ps1 -Background`（异步，不阻塞）：winget 逐包重装 → 再对 Edge（浏览记录 / 已存密码 / 全部设置含下载位置）与 WorkBuddy（用户数据 / 缓存 / 安装目录）做完整性校验 + 缺失补漏 |

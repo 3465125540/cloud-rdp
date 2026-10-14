@@ -290,61 +290,6 @@ jobs:
             $lnk.Save()
             Write-Host "已创建桌面快捷方式: CloudData -> $dataDir"
           } catch { Write-Host "创建桌面快捷方式失败: $_" }
-      - name: 0b2. 会话归属校正（控制台交给 a）+ 装 SYSTEM 交接任务 + 桌面「切到 UU远程」快捷方式 + 无感自动交接
-        shell: pwsh
-        run: |
-          # UU远程（网易 GameViewer）是「屏幕镜像」型工具，连的是机器的**控制台会话**；
-          # 镜像把 runneradmin 放在控制台（AutoAdminLogon=runneradmin）→ 默认 UU远程 看到的
-          # 是 runneradmin 的桌面（不是 a）。这里做三件事（都 fail-soft，绝不 logoff、不重启、
-          # 不动 runner）：
-          #   ① 诊断：打印当前控制台会话归属（写进 ENV READY 第 13 步）；
-          #   ② 装 SYSTEM 计划任务 CloudRDP-UUHandover + 公共桌面「切到 UU远程」快捷方式。
-          #      为什么必须是 SYSTEM 任务：2026-09-29 真机实测，以 a 的普通令牌跑
-          #      `tscon /dest:console` 会 Error 5（缺 SeTcbPrivilege）；快捷方式只负责触发那个
-          #      SYSTEM 任务，由它以 tsdiscon + tscon 把 a 的会话交给控制台。
-          #   ③ 装 SYSTEM 计划任务 CloudRDP-UUAuto（开机 + 每 60s）：**无感**交接 ——
-          #      只在「控制台不是 a 且 a 的会话没被 RDP 连着（Disc）」时才切。a 正被 mstsc
-          #      连着时不抢（否则会把用户踢断、并和 RDP 来回抢控制台）。
-          # 想彻底关掉自动：仓库里设 CLOUDRDP_UU_AUTO=0，或机器上放 <sysdir>\_state\uu-auto-off。
-          try {
-            $sessLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\session-lib.ps1'
-            if (Test-Path -LiteralPath $sessLib) {
-              . $sessLib
-              $rep = Get-RdpSessionReport -RdpUser $env:RDP_USERNAME
-              Write-Host ("[0b2] " + (Format-RdpSessionReport -RdpUser $env:RDP_USERNAME))
-              "CONSOLE_OWNER=" + $rep.consoleOwner | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-              $tk = Install-RdpSessionHandoverTask -RdpUser $env:RDP_USERNAME
-              if ($tk.ok) {
-                Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut + " / 自动: " + $tk.auto)
-                # ②③ 的真实成败单独打出来：上面那句里的「自动: CloudRDP-UUAuto」只是**任务名**，
-                # 安装失败也照打 —— 曾经因此把「③ 根本没装上」误读成「已就绪」（见 README/SKILL）。
-                Write-Host ("[0b2] ② 桌面快捷方式 ok=" + $tk.shortcutOk + " :: " + $tk.shortcutNote)
-                Write-Host ("[0b2] ③ 无感自动交接 ok=" + $tk.autoOk + " :: " + $tk.autoNote)
-              }
-              else        { Write-Host ("[0b2] 交接任务未安装（可忽略）: " + $tk.note) }
-
-              # ④ 直接登录 a：a 还没有会话时，用 RDP 回环（mstsc → 127.0.0.1）自动给它造一个，
-              #    再交给 ③ 自动交接 —— 用户不必再手动「先用 mstsc 以 a 登录一次」。
-              #    为什么要这样：Windows 没有「编程创建会话」的公开 API（会话只能由登录产生），
-              #    而改 AutoAdminLogon=a 会把 runner 弄死（HostedComputeAgent 依赖 runneradmin 的交互令牌）。
-              #    关掉：仓库里设 CLOUDRDP_UU_AUTOLOGIN=0。
-              if ($env:CLOUDRDP_UU_AUTOLOGIN -eq '0') {
-                Write-Host '[0b2] ④ CLOUDRDP_UU_AUTOLOGIN=0 → 跳过自动登录 a'
-              } else {
-                $ls = New-RdpUserSession -RdpUser $env:RDP_USERNAME -Password $env:RDP_PASSWORD
-                Write-Host ("[0b2] ④ 自动登录 " + $env:RDP_USERNAME + " ok=" + $ls.ok + " action=" + $ls.action + " :: " + $ls.note)
-                foreach ($s in $ls.steps) { Write-Host ('[0b2]    ' + $s) }
-                ("UU_AUTOLOGIN=" + $(if ($ls.ok) { $ls.action } else { 'FAILED' })) | Out-File $env:GITHUB_ENV -Append -Encoding ascii
-                # 会话刚造好就顺手触发一次交接（不必等 ③ 那 ≤60s）；失败无所谓，③ 会兜底
-                if ($ls.ok -and $ls.action -eq 'created') {
-                  Start-Sleep -Seconds 5
-                  try { Start-ScheduledTask -TaskName 'CloudRDP-UUHandover' -ErrorAction SilentlyContinue } catch { }
-                }
-              }
-            } else {
-              Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'
-            }
-          } catch { Write-Host "[0b2] 会话校正失败（可忽略）：$($_.Exception.Message)" }
       - name: 0c. 安装并连接 Tailscale
         shell: pwsh
         env:
@@ -419,6 +364,61 @@ jobs:
           # 脚本会用官方 CLI（bin\uuyc-cli.exe）取「设备 ID」并设「仅使用自定义验证码」，
           # 于是邮件里的「设备 ID + 验证码」是一对**能直接输入**的凭据（不再受 DPAPI 跨机限制）。
           .\scripts\install-uu-remote.ps1 -LogPath "$env:CLOUDRDP_SYS_DIR\_state\uu-remote.log"
+      - name: 0b2. 会话归属校正（控制台交给 a）+ 装 SYSTEM 交接任务 + 桌面「切到 UU远程」快捷方式 + 无感自动交接
+        shell: pwsh
+        run: |
+          # UU远程（网易 GameViewer）是「屏幕镜像」型工具，连的是机器的**控制台会话**；
+          # 镜像把 runneradmin 放在控制台（AutoAdminLogon=runneradmin）→ 默认 UU远程 看到的
+          # 是 runneradmin 的桌面（不是 a）。这里做三件事（都 fail-soft，绝不 logoff、不重启、
+          # 不动 runner）：
+          #   ① 诊断：打印当前控制台会话归属（写进 ENV READY 第 13 步）；
+          #   ② 装 SYSTEM 计划任务 CloudRDP-UUHandover + 公共桌面「切到 UU远程」快捷方式。
+          #      为什么必须是 SYSTEM 任务：2026-09-29 真机实测，以 a 的普通令牌跑
+          #      `tscon /dest:console` 会 Error 5（缺 SeTcbPrivilege）；快捷方式只负责触发那个
+          #      SYSTEM 任务，由它以 tsdiscon + tscon 把 a 的会话交给控制台。
+          #   ③ 装 SYSTEM 计划任务 CloudRDP-UUAuto（开机 + 每 60s）：**无感**交接 ——
+          #      只在「控制台不是 a 且 a 的会话没被 RDP 连着（Disc）」时才切。a 正被 mstsc
+          #      连着时不抢（否则会把用户踢断、并和 RDP 来回抢控制台）。
+          # 想彻底关掉自动：仓库里设 CLOUDRDP_UU_AUTO=0，或机器上放 <sysdir>\_state\uu-auto-off。
+          try {
+            $sessLib = Join-Path $env:GITHUB_WORKSPACE 'scripts\session-lib.ps1'
+            if (Test-Path -LiteralPath $sessLib) {
+              . $sessLib
+              $rep = Get-RdpSessionReport -RdpUser $env:RDP_USERNAME
+              Write-Host ("[0b2] " + (Format-RdpSessionReport -RdpUser $env:RDP_USERNAME))
+              "CONSOLE_OWNER=" + $rep.consoleOwner | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+              $tk = Install-RdpSessionHandoverTask -RdpUser $env:RDP_USERNAME
+              if ($tk.ok) {
+                Write-Host ("[0b2] 交接任务已就绪: " + $tk.task + " / 快捷方式: " + $tk.shortcut + " / 自动: " + $tk.auto)
+                # ②③ 的真实成败单独打出来：上面那句里的「自动: CloudRDP-UUAuto」只是**任务名**，
+                # 安装失败也照打 —— 曾经因此把「③ 根本没装上」误读成「已就绪」（见 README/SKILL）。
+                Write-Host ("[0b2] ② 桌面快捷方式 ok=" + $tk.shortcutOk + " :: " + $tk.shortcutNote)
+                Write-Host ("[0b2] ③ 无感自动交接 ok=" + $tk.autoOk + " :: " + $tk.autoNote)
+              }
+              else        { Write-Host ("[0b2] 交接任务未安装（可忽略）: " + $tk.note) }
+
+              # ④ 直接登录 a：a 还没有会话时，用 RDP 回环（mstsc → 127.0.0.1）自动给它造一个，
+              #    再交给 ③ 自动交接 —— 用户不必再手动「先用 mstsc 以 a 登录一次」。
+              #    为什么要这样：Windows 没有「编程创建会话」的公开 API（会话只能由登录产生），
+              #    而改 AutoAdminLogon=a 会把 runner 弄死（HostedComputeAgent 依赖 runneradmin 的交互令牌）。
+              #    关掉：仓库里设 CLOUDRDP_UU_AUTOLOGIN=0。
+              if ($env:CLOUDRDP_UU_AUTOLOGIN -eq '0') {
+                Write-Host '[0b2] ④ CLOUDRDP_UU_AUTOLOGIN=0 → 跳过自动登录 a'
+              } else {
+                $ls = New-RdpUserSession -RdpUser $env:RDP_USERNAME -Password $env:RDP_PASSWORD
+                Write-Host ("[0b2] ④ 自动登录 " + $env:RDP_USERNAME + " ok=" + $ls.ok + " action=" + $ls.action + " :: " + $ls.note)
+                foreach ($s in $ls.steps) { Write-Host ('[0b2]    ' + $s) }
+                ("UU_AUTOLOGIN=" + $(if ($ls.ok) { $ls.action } else { 'FAILED' })) | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+                # 会话刚造好就顺手触发一次交接（不必等 ③ 那 ≤60s）；失败无所谓，③ 会兜底
+                if ($ls.ok -and $ls.action -eq 'created') {
+                  Start-Sleep -Seconds 5
+                  try { Start-ScheduledTask -TaskName 'CloudRDP-UUHandover' -ErrorAction SilentlyContinue } catch { }
+                }
+              }
+            } else {
+              Write-Host '[0b2] 未找到 session-lib.ps1 —— 跳过会话校正（不影响开机）'
+            }
+          } catch { Write-Host "[0b2] 会话校正失败（可忽略）：$($_.Exception.Message)" }
       - name: 0c2. 解析账号池角色（primary / standby / 单机）
         shell: pwsh
         run: |
@@ -491,7 +491,7 @@ jobs:
           Write-Host "  >> 打开 mstsc，连接上面的 Tailscale IP" -ForegroundColor Magenta
           Write-Host "  >> 看不到 IP 时：https://login.tailscale.com/admin/machines 找 github-rdp-server*" -ForegroundColor DarkGray
           Write-Host ""
-          Write-Host "  [后台仍在进行] C盘瘦身 -> 数据/桌面恢复 -> 中文环境 -> 软件重装" -ForegroundColor DarkYellow
+          Write-Host "  [后台仍在进行] 139 挂载 -> C盘瘦身 ∥ 数据拉取（并行）-> 桌面/整机还原 -> 中文环境 -> 软件重装" -ForegroundColor DarkYellow
           Write-Host "    预计 30~60 分钟（取决于 139 云盘速度，实测约 0.45 MB/s）" -ForegroundColor DarkGray
           Write-Host "    想用满血环境，等日志出现 【ENV READY】 再登录更稳妥；" -ForegroundColor DarkGray
           Write-Host "    现在登录也能用，但数据 / 桌面 / 中文输入法可能还在恢复中。" -ForegroundColor DarkGray
@@ -507,7 +507,7 @@ jobs:
               "Username     : $env:RDP_USER"
               "Password     : $env:RDP_PASSWORD"
               ""
-              "后台仍在进行：C盘瘦身 -> 数据/桌面恢复 -> 中文环境 -> 软件重装"
+              "后台仍在进行：139 挂载 -> C盘瘦身 ∥ 数据拉取（并行）-> 桌面/整机还原 -> 中文环境 -> 软件重装"
               "初始化完成后，本文件会改名为 _CloudRDP_READY.txt"
             ) | Out-File -LiteralPath $marker -Encoding UTF8
           } catch { Write-Host "写桌面标记文件失败: $_" }
@@ -562,12 +562,6 @@ jobs:
         continue-on-error: true       # 万一被超时杀掉也不阻断后续步骤
         shell: pwsh
         run: .\scripts\setup-chinese.ps1
-      - name: 1. 开机瘦身（删镜像自带大件，约 70 GB）
-        shell: pwsh
-        run: .\scripts\slim-image.ps1
-      - name: 2. C 盘守卫：记录基线（在瘦身之后）
-        shell: pwsh
-        run: .\scripts\disk-guard.ps1 -Baseline
       - name: 3. 生成 AList 管理员密码（本机专用）
         shell: pwsh
         run: |
@@ -590,12 +584,32 @@ jobs:
       - name: 6. （可选）迁移 139 老路径到 AI文件库
         shell: pwsh
         run: .\scripts\migrate-139.ps1
-      - name: 7. 从 139 云盘拉取数据
-        # 脚本自身永不返回非 0；这一层是「万一抛异常」的兜底 —— 开机不能被拉数据卡死，
-        # 状态由 _state\restore-status.json 记录，保活循环会自愈重拉。
-        continue-on-error: true
+      - name: 1. 开机瘦身（后台启动，立即返回；与第 7 步「拉数据」并行）
+        # 2026-10-14：瘦身（删 C 盘镜像大件）与「从 139 拉数据」互不依赖，串行纯属浪费。
+        # 现在两步都丢到后台并行跑，第 7b 步等它们都结束。
+        # ⚠️ 必须是「启动后立刻正常返回」的短 step —— GitHub 在 step 超时/被杀时会连整棵
+        #    进程树一起杀（见 0f 步复盘），正常结束的 step 不会波及子进程。
+        # SLIM_* 由 bg-run.ps1 先写临时文件，第 7b 步回填到当步 env。
         shell: pwsh
-        run: .\scripts\sync-down.ps1
+        run: .\scripts\bg-run.ps1 -Mode Start -Name slim -Target "slim-image.ps1"
+      - name: 7. 从 139 云盘拉取数据（后台启动，立即返回；与第 1 步「瘦身」并行）
+        # 脚本自身永不返回非 0；状态由 _state\restore-status.json 记录，保活循环会自愈重拉。
+        # 后台跑 + 第 7b 步等它，是为了和瘦身并行（实测拉取 30~60 分钟）。
+        # ⚠️ 第 8 步（预还原）依赖它完成 —— 第 7b 步已经等过。
+        shell: pwsh
+        run: .\scripts\bg-run.ps1 -Mode Start -Name syncdown -Target "sync-down.ps1"
+      - name: 7b. 等待后台任务（瘦身 + 数据拉取）完成
+        # 第 1 / 第 7 步并行启动的两个后台任务，在这里等它们都结束（带心跳）。
+        # 完成后把 bg-<name>-ghenv.txt 里的 SLIM_* / RESTORE_* 回填到本步 ——
+        # 供第 2 步（基线）、第 13 步（ENV READY）读取。
+        # 不阻断：等超时、或后台进程被杀，都只告警、按现有状态继续（拉取失败由保活循环自愈）。
+        shell: pwsh
+        run: |
+          .\scripts\bg-run.ps1 -Mode Wait -Name slim     -TimeoutSec 3600
+          .\scripts\bg-run.ps1 -Mode Wait -Name syncdown -TimeoutSec 18000
+      - name: 2. C 盘守卫：记录基线（在瘦身之后）
+        shell: pwsh
+        run: .\scripts\disk-guard.ps1 -Baseline
       - name: 8. 预还原（校验 → 规划 → 准备 → 驱动全量还原）
         continue-on-error: true
         shell: pwsh
