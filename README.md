@@ -180,7 +180,7 @@
 #### ① 数据管线（`D:\a\cloud-rdp`，高频）
 
 - 云主机里用 **`D:\a\cloud-rdp`** 存数据（**公共桌面已放 `CloudData` 快捷方式**，双击即达）
-- **开机自动恢复**：每次启动自动把 139 云盘的 `/AI文件库/CloudRDP` 拉回 `D:\a\cloud-rdp`
+- **开机自动恢复**：每次启动自动把 139 云盘的 `/全部文件/AI文件库/CloudRDP` 拉回 `D:\a\cloud-rdp`
 - 运行中每 10 分钟推送到 139 云盘；关闭会话后还会做一次全量推送
 - 恢复结果会显示在 **「13. 环境就绪汇总（ENV READY）」** 步骤里，也会写进机器上的
   `D:\cloudrdp-sys\_state\restore-status.json`（工作台「机器运行实况」表的**「恢复」列**直接读它）：
@@ -205,7 +205,7 @@
 
 #### ② 整机快照管线（文件 / 注册表 / 设置，低频）
 
-覆盖 `D:\a\cloud-rdp` 之外的一切「关机前的样子」，存到 139 的 **`/AI文件库/_snapshot`**（与 `/AI文件库/CloudRDP` 分开）。
+覆盖 `D:\a\cloud-rdp` 之外的一切「关机前的样子」，存到 139 的 **`/全部文件/AI文件库/_snapshot`**（与 `/全部文件/AI文件库/CloudRDP` 分开）。
 
 **抓取时机**：开机后基线、保活期间**每 60 分钟**、**关机前全量**（`if: always()`，取消也会跑）。
 
@@ -766,7 +766,7 @@ python workbench\selftest.py   :: 离线自测（632 项）
 
 **事故**：账号 `acc-1 · yc1966asgf`（`100.77.250.79`）开机后**没有从 139 云盘拉取数据**，界面却显示
 「已同步」。机器空着手起来，随后它自己的 `sync-up.ps1` 还在 139 根目录 `mkdir` 出一个**幽灵
-`AI文件库`** 目录（真实的是 `/cloudrdp/AI文件库`），把「空」这个假象固化下来。
+`AI文件库`** 目录（真实的是 `/cloudrdp/全部文件/AI文件库`），把「空」这个假象固化下来。
 
 **根因**：旧 `sync-down.ps1` 只凭 rclone 退出码 3/4 就判定「远端为空」。但 AList 在 DNS 抖动时会把
 WebDAV `PROPFIND` 打成 `404`，rclone **同样**映射成码 3 —— 于是「远端为空」和「网络抖动」无法区分。
@@ -1827,7 +1827,7 @@ cloud-rdp/
     ├── regimport-lib.ps1               # 【新】注册表导入容错：识别「部分成功」，只告警不计失败
     ├── setup-chinese.ps1               # 【新】中文环境：装语言包 + 系统 locale + 写 a 的 HKCU（微软拼音）
     ├── rdpuser-migrate.ps1             # 【新】用户名变更迁移：快照目录名 + manifest 字面路径 + .reg 内容（幂等、可反向）
-    ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/AI文件库/_snapshot
+    ├── backup-snapshot.ps1             # 抓取整机状态 → D:\cloudrdp-sys\_snapshot → 139/全部文件/AI文件库/_snapshot
     ├── restore-snapshot.ps1            # 还原整机状态（machine / user 两个作用域）
     ├── reinstall-apps.ps1              # 第 10 步：winget 后台逐包重装 + Edge/WorkBuddy 用户数据校验补漏
     ├── userdata-lib.ps1                # 【新】用户数据取证/补漏（Edge 已存密码 · WorkBuddy 数据/缓存/安装目录）
@@ -1877,8 +1877,8 @@ cloud-rdp/
 
 | 路径 | 内容 |
 |------|------|
-| `AI文件库/CloudRDP/` | 用户数据（`D:\a\cloud-rdp` 的镜像） |
-| `AI文件库/_snapshot/` | 整机快照（文件 / 注册表 / 软件清单 / 设置 / 快捷方式） |
+| `全部文件/AI文件库/CloudRDP/` | 用户数据（`D:\a\cloud-rdp` 的镜像） |
+| `全部文件/AI文件库/_snapshot/` | 整机快照（文件 / 注册表 / 软件清单 / 设置 / 快捷方式） |
 
 ---
 
@@ -1937,7 +1937,7 @@ cloud-rdp/
 | `SNAPSHOT_USERMIGRATE=SKIPPED` | 快照用户名已等于当前账号（正常，幂等跳过） | 无需处理。只有「用户名变了却没迁移」才需要排查 |
 | 关机前的改动丢了 | Job 被**硬杀**（超时/取消太快），收尾步骤没跑完 | 保活期每 60 分钟会自动抓一次快照，最多丢 1 小时内改动 |
 | 快照没上传 | `files.maxTotalMB` 被设成了有限值且已超 | 现在默认 `0 = 不限`；日志会告警并跳过后续目录 |
-| 预检报「`AI文件库` 不存在」 | 139 里还没建这个文件夹（脚本刻意不自动创建） | 在 139 网页根目录下建好「AI文件库」后重跑；或改用「根 ID 法」（见 §4.⑥） |
+| 预检报「`AI文件库` 不存在」 | 139 里「全部文件」下还没建这个文件夹（脚本刻意不自动创建） | 在 139 网页「全部文件」下建好「AI文件库」后重跑；或改用「根 ID 法」（见 §4.⑥） |
 | 139 上找不到数据 | 还在老路径 `/CloudRDP` | Run workflow 时勾 `migrate_139=true` 迁移一次 |
 | 数据目录里混进了仓库文件 | rclone 排除规则没生效（`GITHUB_WORKSPACE` 与数据目录不匹配） | 看日志 `[sync-up] 排除:` 那行；确认里面有 `/cloud-rdp/**` 与 `/.git/**` |
 | 可移动程序没被备份 | 被判定为「非可移动」（MSI 安装 / 落在系统目录 / 体积超限 / 命中黑名单） | 日志会打印候选数；要强制纳入可把路径加进 `portable.scanRoots` 或用 `files.dirs` 直接抓 |

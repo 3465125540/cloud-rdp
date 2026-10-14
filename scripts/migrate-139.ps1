@@ -3,8 +3,8 @@
   把 139 云盘上的老路径迁移到新路径（一次性、幂等、**只 copy 不 move**）。
 
 .DESCRIPTION
-  老: alist:/cloudrdp/CloudRDP    →  新: alist:/cloudrdp/AI文件库/CloudRDP
-  老: alist:/cloudrdp/_snapshot   →  新: alist:/cloudrdp/AI文件库/_snapshot
+  老: alist:/cloudrdp/CloudRDP    →  新: alist:/cloudrdp/全部文件/AI文件库/CloudRDP
+  老: alist:/cloudrdp/_snapshot   →  新: alist:/cloudrdp/全部文件/AI文件库/_snapshot
 
   触发条件（满足任一）：
     · 环境变量 INPUT_MIGRATE_139 = 'true'（workflow_dispatch 的 migrate_139 输入）
@@ -19,7 +19,7 @@
 [CmdletBinding()]
 param(
     [string]$OldBase  = "alist:/cloudrdp",
-    [string]$NewBase  = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE } else { "alist:/cloudrdp/AI文件库" }),
+    [string]$NewBase  = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE } else { "alist:/cloudrdp/全部文件/AI文件库" }),
     [string]$RcloneExe = $(if ($env:CLOUDRDP_SYS_DIR) { Join-Path $env:CLOUDRDP_SYS_DIR "rclone\rclone.exe" } elseif (Test-Path 'D:\') { "D:\cloudrdp-sys\rclone\rclone.exe" } else { "C:\rclone\rclone.exe" }),
     [switch]$Force
 )

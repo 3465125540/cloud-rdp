@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   依赖 setup-rclone.ps1 已配置好 remote: alist
-  远端路径: alist:/cloudrdp/AI文件库/CloudRDP
+  远端路径: alist:/cloudrdp/全部文件/AI文件库/CloudRDP
   本地路径: D:\a\cloud-rdp
 
   ⚠️ 本地数据目录是 Actions 工作区的父目录，仓库 checkout 在其下（D:\a\cloud-rdp\cloud-rdp），
@@ -26,7 +26,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RemoteBase = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE } else { "alist:/cloudrdp/AI文件库" }),
+    [string]$RemoteBase = $(if ($env:CLOUDRDP_REMOTE_BASE) { $env:CLOUDRDP_REMOTE_BASE } else { "alist:/cloudrdp/全部文件/AI文件库" }),
     [string]$Remote,                                   # 可选：直接覆盖完整远端路径
     [string]$Local  = $(if ($env:CLOUDRDP_DATA_DIR) { $env:CLOUDRDP_DATA_DIR } else { "D:\a\cloud-rdp" }),
     [int]$MaxAttempts = 3,
