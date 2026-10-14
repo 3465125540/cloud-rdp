@@ -1,0 +1,40 @@
+name: _tmp sync 139 auth (one-shot)
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: push ALIST_139_AUTHORIZATION to forks
+        env:
+          S_AUTH: ${{ secrets.ALIST_139_AUTHORIZATION }}
+          POOL_TOKEN_1: ${{ secrets.POOL_TOKEN_1 }}
+          POOL_TOKEN_4: ${{ secrets.POOL_TOKEN_4 }}
+          POOL_TOKEN_5: ${{ secrets.POOL_TOKEN_5 }}
+          POOL_TOKEN_2: ${{ secrets.POOL_TOKEN_2 }}
+          POOL_TOKEN_6: ${{ secrets.POOL_TOKEN_6 }}
+          POOL_TOKEN_8: ${{ secrets.POOL_TOKEN_8 }}
+          POOL_TOKEN_9: ${{ secrets.POOL_TOKEN_9 }}
+        run: |
+          set -uo pipefail
+          setone() {
+            repo="$1"; tok="$2"
+            if [ -z "$tok" ]; then echo "SKIP $repo (无 token)"; return 0; fi
+            if GH_TOKEN="$tok" gh secret set ALIST_139_AUTHORIZATION --repo "$repo" --body "$S_AUTH"; then
+              echo "OK   $repo"
+            else
+              echo "FAIL $repo"; return 1
+            fi
+          }
+          rc=0
+          setone "yc1966asgf/cloud-rdp" "$POOL_TOKEN_1" || rc=1
+          setone "code1969sda/cloud-rdp" "$POOL_TOKEN_4" || rc=1
+          setone "code19698fgh/cloud-rdp" "$POOL_TOKEN_5" || rc=1
+          setone "code09101/cloud-rdp" "$POOL_TOKEN_2" || rc=1
+          setone "code10081/cloud-rdp" "$POOL_TOKEN_6" || rc=1
+          setone "code14201/cloud-rdp" "$POOL_TOKEN_8" || rc=1
+          setone "2gj2y3gf4/cloud-rdp" "$POOL_TOKEN_9" || rc=1
+          exit $rc
