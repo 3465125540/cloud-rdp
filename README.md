@@ -1799,6 +1799,24 @@ POST 内容正确 / 返回后清标记并提示「已同步到池子」/ 失败�
 > `app.js`/`index.html`/`styles.css` **刷新即生效**。
 > ⚠️ **存量账号不受影响**（仍是公开 fork）—— 只有新加的账号走私有。
 
+### 32. 数据恢复「假 EMPTY」：rclone 中文目录名被 GBK 误解码（v1.6.17）
+
+**事故**（2026-10-15）：sync-down 日志自相矛盾——`诊断：alist: 实际列出 62 项 → 10浜胯韩浠借瘉.txt, AI鏂囦欢搴?, ...`，紧接着却判 `EMPTY —— 远端确实不存在：alist:/AI文件库`。那串 `AI鏂囦欢搴?` **就是**「AI文件库」——数据一直在 139 上，一个文件都没拉回来，机器空手开机。
+
+**根因**：rclone 恒以 UTF-8 输出文件名，而中文 Windows 上 pwsh 默认按 ACP=936(GBK) 解码子进程 stdout（实测 pwsh 7.6.6 的 `[Console]::OutputEncoding` 默认值就是 DBCSCodePageEncoding）。UTF-8 的「文件库」9 字节被 GBK 两两分组 → `鏂囦欢搴?`。`Get-RemoteProbe` 拿「AI文件库」去 `-contains` 比一份乱码列表，永远不命中 → 判 EMPTY。后果与 acc-1 同源：sync-up / backup-snapshot -Push 守卫 B 只拦 TRANSIENT/FAILED/PENDING，EMPTY 放行 → 把未还原的空壳推回 139 覆盖好数据。
+
+**为什么「事后修乱码」当不了主防线**：奇数长度的 UTF-8 名（AI文件库 = 11 字节）被 GBK 两两分组后，落单的最后 1 字节被替换成 `?`，**信息永久丢失**。实测把 `?` 去掉再用 0x80..0xBF 逐个补回，64 种都能通过严格 UTF-8 解码（AI文件庀 / 庁 / … / 库 / …），只有已知目标名才反查得回来。
+
+**修复（三层防线，remote-lib.ps1）**：
+
+1. **主防线**：`Invoke-RcloneList` 改用 .NET `Process` + `StandardOutputEncoding=UTF8` 直读子进程输出——**绕过 PowerShell 的 console 解码路径**，与代码页彻底解耦（实测把 console 编码故意设回 GBK 后依然正确拿到「AI文件库」）。异步读双流防死锁；超时强杀。
+2. **兜底**：`Test-NameInList` 带 mojibake 容错比较——列表项能修复就修复后再比（救偶数长度名，如 `10浜胯韩浠借瘉.txt`→`10亿身份证.txt`）；修不回的（奇数长度）由**已知目标名**正向生成乱码形态（`Get-MojibakeVariants`：'AI文件库'→'AI鏂囦欢搴?'）去列表里反查命中。
+3. **哨兵（ENCODING 第五态）**：`Invoke-RcloneList` 额外返回 `MojibakeFixed`（本轮修回几个名字——修复动作就是「编码坏过」的铁证，因为修复会把乱码洗干净、让静态检测失效）；`Get-RemoteProbe` 判 EMPTY 前检查「列表仍有乱码 OR MojibakeFixed>0」，且**仅当目标名含非 ASCII** 才升级 ENCODING——ASCII 字节在 UTF-8/GBK 下一致，纯 ASCII 目标（`_snapshot`）的缺失依旧可信，仍判 EMPTY，不过度保守。
+
+**推送守卫闭环**：sync-up / backup-snapshot 守卫 B 拒绝名单加入 `ENCODING`（防空壳覆盖 139）；sync-down / pre-restore 新增 ENCODING 显式分支（按 TRANSIENT 落盘 + 写待重试标记，保活循环自愈重拉）。
+
+**验证**：workbench selftest 新增 T547-T554 钉死上述铁律（全量 648 PASS / 0 FAIL）；mock rclone 功能测试 43/43 全绿——三场景分别验证：正常 UTF-8 输出 → OK；输出全乱码 → 变体反查仍能导航判 OK；乱码 + 非ASCII目标缺失 → ENCODING 拒绝误判 EMPTY。
+
 ## 五、目录结构
 
 ```

@@ -34,7 +34,7 @@
 
 ```bash
 # 1) 把整个 zip 解压到服务器任意目录（zip 顶层就是 cloud-rdp/）
-unzip cloud-rdp-workbench-linux-v1.6.16.zip -d /tmp/cloud-rdp-src
+unzip cloud-rdp-workbench-linux-v1.6.17.zip -d /tmp/cloud-rdp-src
 cd /tmp/cloud-rdp-src/cloud-rdp
 
 # 2) 跑安装脚本（默认装到 /opt/cloud-rdp，端口 8899）

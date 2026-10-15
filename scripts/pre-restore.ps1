@@ -211,6 +211,18 @@ if ($Pull) {
         else { Set-GhEnv "SNAPSHOT_STATUS=EMPTY" }
         exit 0
     }
+    if ($vKind -eq 'ENCODING') {
+        # 远端列表可列、但中文目录名疑似被误解码 —— 无法证明「快照目录不存在」。
+        # 绝不写 EMPTY（否则 backup-snapshot -Push 守卫 B 会放行，把空壳 sync 上 139 抹掉好快照）。
+        # 按可恢复故障处理：落盘 TRANSIENT + 写待重试标记，保活循环自愈重跑。
+        Warn "远端列表中文被误解码（GBK/UTF-8 混淆），无法证明快照目录不存在 —— 拒绝判 EMPTY"
+        Set-GhEnv "SNAPSHOT_PREVALIDATE=TRANSIENT"
+        $pullStatus = 'TRANSIENT'
+        if ($hasRemoteLib) { Set-RestoreStatus -Status 'TRANSIENT' -Reason ("ENCODING: " + $vMsg) -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
+        else { Set-GhEnv "SNAPSHOT_STATUS=TRANSIENT" }
+        & $writePending ("ENCODING: " + $vMsg)
+        exit 0
+    }
     if ($vKind -eq 'AUTH') {
         Warn "139 云盘鉴权失败，无法拉取快照"
         Set-GhEnv "SNAPSHOT_PREVALIDATE=FAILED"
@@ -272,7 +284,7 @@ if ($Pull) {
             $pullStatus = 'EMPTY'
             if ($hasRemoteLib) { Set-RestoreStatus -Status 'EMPTY' -Reason $reason -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }
             else { Set-GhEnv "SNAPSHOT_STATUS=EMPTY" }
-        } elseif ($reKind -eq 'TRANSIENT' -or $reKind -eq '') {
+        } elseif ($reKind -eq 'TRANSIENT' -or $reKind -eq 'ENCODING' -or $reKind -eq '') {
             Set-GhEnv "SNAPSHOT_PREVALIDATE=TRANSIENT"
             $pullStatus = 'TRANSIENT'
             if ($hasRemoteLib) { Set-RestoreStatus -Status 'TRANSIENT' -Reason $reason -Scope snapshot -SysDir $SysDir -Remote $Remote -Local $Stage }

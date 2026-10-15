@@ -112,6 +112,17 @@ if ($probe.Verdict -eq 'EMPTY') {
                       @stCommon
     exit 0
 }
+if ($probe.Verdict -eq 'ENCODING') {
+    # 远端列表可列、但中文目录名疑似被 GBK 误解码 —— 无法证明「远端为空」。
+    # 绝不写 EMPTY（否则 sync-up 守卫 B 会放行，把未还原的空壳推回 139 覆盖好数据）。
+    # remote-lib 已内置三层防线（.NET Process 强制 UTF-8 / mojibake 修复 / 变体反查），
+    # 走到这里说明三层全失效，按可恢复故障处理，交保活循环自愈重拉。
+    Warn "远端列表中文被误解码（GBK/UTF-8 混淆），无法证明目标不存在 —— 拒绝判 EMPTY"
+    Warn "  本次不拉取；保活循环会自愈重拉（详见 remote-lib.ps1 文件头事故记录）"
+    Set-RestoreStatus -Status 'TRANSIENT' -Reason ("ENCODING: " + $probe.Message) -Scope data `
+                      @stCommon
+    exit 0
+}
 if ($probe.Verdict -eq 'AUTH') {
     Warn "139 鉴权失败（Authorization 大概率已过期）—— 本次不拉取"
     Set-RestoreStatus -Status 'FAILED' -Reason ("AUTH: " + $probe.Message) -Scope data `

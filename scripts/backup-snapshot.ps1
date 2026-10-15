@@ -1178,7 +1178,9 @@ if ($Push) {
     if (-not $Force -and $script:HasRemoteLib) {
         $snapStatus = ''
         try { $snapStatus = [string](Get-RestoreStatusValue -Scope snapshot -SysDir $SysDir) } catch { }
-        if ($snapStatus -in @('TRANSIENT', 'FAILED', 'PENDING')) {
+        # ENCODING 同罪入名单：远端列表编码坏掉时无法证明快照不存在，
+        # 本地快照可能根本没还原过 —— sync 上去会把 139 上的好快照元数据抹掉。
+        if ($snapStatus -in @('TRANSIENT', 'FAILED', 'PENDING', 'ENCODING')) {
             Warn "本机快照恢复状态 = $snapStatus（未成功）—— 拒绝推送，以免用未还原的空壳覆盖 139 上的好快照。确认无误请加 -Force"
             Set-GhEnv "SNAPSHOT_PUSH=SKIPPED-UNRESTORED"
             exit 0

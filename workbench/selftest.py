@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.16", server.VERSION == "1.6.16", server.VERSION)
+    check("T168 server.py 版本 1.6.17", server.VERSION == "1.6.17", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -3007,6 +3007,41 @@ def main():
           and "alist:/AI文件库" in _sd
           and "alist:/AI文件库" in _su
           and "alist:/cloudrdp/AI文件库" not in wf_txt)
+
+    # ---------------- rclone 中文输出编码防线（AI文件库 误判 EMPTY 事故） ----------------
+    # 背景：rclone 恒以 UTF-8 输出，pwsh 在中文 Windows 上默认按 ACP=936(GBK) 解码子进程
+    # stdout，「AI文件库」变成「AI鏂囦欢搴?」，Get-RemoteProbe 的 -contains 永远不命中 →
+    # 误判 EMPTY → 机器空手开机，sync-up/backup-snapshot -Push 又把空壳推回 139。
+    # 修复：remote-lib 三层防线（.NET Process 强制 UTF-8 / mojibake 修复与变体反查 /
+    # ENCODING 五态哨兵）+ 推送守卫闭环。以下断言把这条铁律钉死。
+    print("[rclone 编码防线]")
+    check("T547 remote-lib 强制 UTF-8 解码（Set-RcloneOutputEncoding + StandardOutputEncoding）",
+          "function Set-RcloneOutputEncoding" in rl_txt
+          and "StandardOutputEncoding" in rl_txt
+          and "StandardErrorEncoding" in rl_txt
+          and "CodePagesEncodingProvider" in rl_txt)
+    check("T548 remote-lib mojibake 修复与变体反查三件套",
+          "function Repair-MojibakeName" in rl_txt
+          and "function Get-MojibakeVariants" in rl_txt
+          and "function Test-NameInList" in rl_txt)
+    check("T549 remote-lib 五态判定含 ENCODING（绝不把编码错乱判成 EMPTY）",
+          "'ENCODING'" in rl_txt)
+    check("T550 Get-RemoteProbe 判 EMPTY 前有编码哨兵（Test-ListingLooksMojibake + MojibakeFixed）",
+          "Test-ListingLooksMojibake" in rl_txt
+          and "MojibakeFixed" in rl_txt
+          and "listUnreliable" in rl_txt)
+    check("T551 Invoke-RcloneList 用 .NET Process 异步读双流（绕过 console 代码页 + 防死锁）",
+          "ReadToEndAsync" in rl_txt and "WaitForExit" in rl_txt
+          and "UsedProcessApi" in rl_txt)
+    _su_g = open(os.path.join(repo_dir, "scripts", "sync-up.ps1"), encoding="utf-8-sig").read()
+    check("T552 sync-up 守卫 B 拒绝名单含 ENCODING（防空壳覆盖 139）",
+          "@('TRANSIENT', 'FAILED', 'PENDING', 'ENCODING')" in _su_g)
+    _bs_g = open(os.path.join(repo_dir, "scripts", "backup-snapshot.ps1"), encoding="utf-8-sig").read()
+    check("T553 backup-snapshot 守卫 B 拒绝名单含 ENCODING（防空壳抹掉好快照）",
+          "@('TRANSIENT', 'FAILED', 'PENDING', 'ENCODING')" in _bs_g)
+    check("T554 sync-down/pre-restore 有 ENCODING 显式分支（按可恢复故障自愈，绝不 EMPTY）",
+          "if ($probe.Verdict -eq 'ENCODING')" in sd_txt
+          and "$vKind -eq 'ENCODING'" in pre_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

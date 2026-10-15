@@ -90,7 +90,9 @@ if (-not $Force) {
     $dataStatus = ''
     if ($hasRemoteLib) { $dataStatus = [string](Get-RestoreStatusValue -Scope data -SysDir $SysDir) }
 
-    if ($dataStatus -in @('TRANSIENT', 'FAILED', 'PENDING')) {
+    # ENCODING = 远端列表中文被误解码、无法证明目标不存在 —— 与 TRANSIENT 同罪：
+    # 本地此刻同样可能是未还原的空壳，推上去会把 139 上的好数据覆盖掉（acc-1 翻版）。
+    if ($dataStatus -in @('TRANSIENT', 'FAILED', 'PENDING', 'ENCODING')) {
         Write-Warning "[sync-up] 本次开机数据恢复状态 = $dataStatus（未成功）—— 拒绝推送，以免用未还原的本地状态覆盖 139。确认无误请加 -Force"
         exit 0
     }
