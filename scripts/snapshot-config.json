@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 1,
   "_comment": "整机快照清单。改这个文件即可调整『备份什么 / 还原什么』，无需改脚本。",
   "_placeholders": "%RDPUSERPROFILE% = C:\\Users\\<RDP_USERNAME>；%RDPUSER% = 用户名；其余 %VAR% 按环境变量展开",
@@ -447,7 +447,7 @@
     "mode": "auto",
     "targetPercent": 30,
     "disableHibernation": true,
-    "runDismComponentCleanup": false,
+    "runDismComponentCleanup": true,
     "extraPaths": [],
     "keepPaths": [],
     "_comment_alwaysDelete": "无条件删除清单：不受 enabled/mode/targetPercent 影响，每次开机都执行。用于清理「用户装的但明确不想要」的程序（如 Unity Hub）。仍受硬保护名单约束。",
@@ -499,7 +499,26 @@
       { "path": "C:\\Program Files\\Eclipse Adoptium", "enabled": false, "note": "默认关：同上" },
       { "path": "C:\\Program Files (x86)\\Microsoft\\Edge", "enabled": false, "note": "默认关：WebView2 依赖它（脚本里也已硬保护）" },
       { "path": "C:\\ProgramData\\chocolatey", "enabled": false, "note": "默认关：删掉会移除 chocolatey 包管理器" },
-      { "path": "C:\\ProgramData\\Package Cache", "enabled": false, "note": "默认关：MSI 修复/卸载需要它" }
+      { "path": "C:\\ProgramData\\Package Cache", "enabled": false, "note": "默认关：MSI 修复/卸载需要它" },
+      { "path": "C:\\ProgramData\\Microsoft\\VisualStudio\\Packages", "note": "VS 安装器包缓存实测 2-5 GB；删掉 VS 主目录它也不会自动消失（run 38672943667 实测漏网大件）" },
+      { "path": "C:\\ProgramData\\MySQL", "note": "MySQL 数据目录（winget 卸载后残留）" },
+      { "path": "C:\\ProgramData\\Microsoft SQL Server", "note": "SQL Server 数据目录；Stop-Lockers 会先停 SQL 全家桶服务再删" },
+      { "path": "C:\\ProgramData\\DockerDesktop", "note": "Docker Desktop 的 ProgramData 残留" },
+      { "path": "C:\\cygwin", "note": "镜像自带 cygwin ~1 GB" },
+      { "path": "C:\\Program Files\\Microsoft SDKs\\Service Fabric", "note": "上一轮被服务占用删不掉的 SF SDK 残留（Stop-Lockers 增强后应可删）" },
+      { "path": "C:\\Program Files\\Microsoft Service Fabric", "note": "Service Fabric 残留（同上）" }
+    ],
+    "_comment_allowPaths": "显式放行名单（窄门）：C:\\Users 整体在脚本硬保护名单里，但 runner 用户目录下的大件（Android Sdk / .rustup / .nuget 等缓存）从未进过瘦身范围。这里点名的绝对路径允许删除（含其内部），其余 C:\\Users 内容照旧保护。runner 用户在 GitHub 托管 windows 镜像上固定为 runneradmin。",
+    "allowPaths": [
+      "C:\\Users\\runneradmin\\AppData\\Local\\Android\\Sdk",
+      "C:\\Users\\runneradmin\\.android",
+      "C:\\Users\\runneradmin\\.rustup",
+      "C:\\Users\\runneradmin\\.cargo",
+      "C:\\Users\\runneradmin\\.gradle",
+      "C:\\Users\\runneradmin\\.m2",
+      "C:\\Users\\runneradmin\\.nuget",
+      "C:\\Users\\runneradmin\\AppData\\Local\\Docker",
+      "C:\\Users\\runneradmin\\AppData\\Local\\Temp"
     ]
   }
 }

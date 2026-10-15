@@ -128,12 +128,29 @@ foreach ($x in @($env:GITHUB_WORKSPACE, $env:CLOUDRDP_DATA_DIR, $env:CLOUDRDP_SY
 foreach ($x in $KeepPaths) {
     if (-not [string]::IsNullOrWhiteSpace($x)) { $protect.Add($x.TrimEnd('\')) }
 }
+# 显式放行名单（allowPaths，窄门）：C:\Users 整体在硬保护名单里，但 runner 用户目录下的
+# 大件（Android Sdk / .rustup / .nuget / Temp 等缓存）从未进过瘦身范围 —— 实测
+# run 38672943667 释放 67.9 GB 后 C 盘仍停在 34%（目标 30%），剩的主要就是这些用户级缓存。
+# 只放行**显式列出**的绝对路径及其内部；其余 C:\Users 内容照旧保护。
+$AllowPaths = New-Object System.Collections.Generic.List[string]
+foreach ($p in @(Get-Cfg $slimCfg 'allowPaths' @())) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    $p = ([string]$p).TrimEnd('\')
+    if ($p -match '^[A-Za-z]:\\') { $AllowPaths.Add($p) }   # 只收绝对路径，防手滑配了宽泛相对串
+}
 
 function Test-NeverDelete {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
     $p = $Path.TrimEnd('\')
     if ($p -notmatch '^[A-Za-z]:\\') { return $true }                 # 必须绝对路径
+    # 放行名单优先于硬保护：allowPaths 是配置显式点名要删的路径（含其内部）。
+    # 必须在 protect 三重判定**之前**做 —— 否则 C:\Users 这条会把 allowPaths 里的
+    # 用户级路径全部拦掉，放行名单形同虚设。
+    foreach ($a in $AllowPaths) {
+        $al = $a.ToLower()
+        if ($pl -eq $al -or $pl.StartsWith($al + "\")) { return $false }
+    }
     # 只拦盘根（C:\）—— 不再要求「层级>=3」。
     # 真机踩过（run 35309039120 日志）：C:\Android、C:\hostedtoolcache、C:\azureCli、
     # C:\Strawberry、C:\rtools45 全是 2 段路径，被旧规则一律拒删 → 白丢约 25 GB，
@@ -151,14 +168,29 @@ function Test-NeverDelete {
     return $false
 }
 
-# 停掉常见的文件占用者（best-effort），提高删除成功率
+# 停掉常见的文件占用者（best-effort），提高删除成功率。
+# run 38672943667 实测：MSBuild / SQL Server / Service Fabric 残留 3 个目录 + Config.Msi 2 项
+# 因「被占用」删不掉。根因是占用者没停干净：
+#   ① SQL 实例服务名不一定叫 MSSQLSERVER（可能是 MSSQLSERVER01），写死名单会漏 → 按模式通配；
+#   ② msiserver（Windows Installer 服务）锁着 C:\Config.Msi 的事务残留 → 只停不禁（它是
+#      Manual 启动，禁用会让后续 msiexec 安装全部失败）；
+#   ③ 卸载后的驻留进程（sqlwriter/sqlceip/fabrichost 等）还会咬着目录 → 进程名单扩充。
 function Stop-Lockers {
-    foreach ($svc in @('GoogleUpdate.exe','GoogleUpdateTaskMachineCore','GoogleUpdateTaskMachineUA','MSSQLSERVER','SQLSERVERAGENT','docker')) {
-        try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue } catch { }
+    $svcPat = '(?i)^(mssql|sql(server|writer|agent|browser|ceip|telemetry|vows)|msiserver|servicefabric|fabrichost|docker)'
+    Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $svcPat -or $_.DisplayName -match $svcPat } | ForEach-Object {
+            try { Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue } catch { }
+            if ($_.Name -ne 'msiserver') {
+                try { Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+    foreach ($svc in @('GoogleUpdate','GoogleUpdateTaskMachineCore','GoogleUpdateTaskMachineUA')) {
+        try { Get-Process -Name $svc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
     }
     foreach ($proc in @('devenv','MSBuild','vctip','ServiceHub.Host.Node.x86','ServiceHub.RoslynCodeAnalysisService',
-                        'GoogleUpdate','chrome','firefox','msedge','sqlservr','Rgui','Rterm','cmake','clang','perl',
-                        'python','node','java','VBCSCompiler','VsDebugConsole')) {
+                        'GoogleUpdate','chrome','firefox','msedge','sqlservr','sqlwriter','sqlceip','sqlagent','msmdsrv',
+                        'fabrichost','fabric','Rgui','Rterm','cmake','clang','perl','mongod','mysqld',
+                        'python','node','java','VBCSCompiler','VsDebugConsole','dotnet','conda')) {
         try { Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
     }
 }
@@ -526,6 +558,40 @@ if (-not $DryRun) {
         Say "  DISM 组件清理完成"
     }
 }
+
+# ---------------------------------------------------------------- 瘦身后大目录 Top 报告
+# 为什么：targets 是人工清单，删漏的大件只能靠日志反推。这里把「ProgramData /
+# runner 用户 AppData\Local / 用户家目录点目录」的实际占用打进日志，
+# 下次照单把大头加进 targets 即可（本轮 34%->30% 的差值就藏在这几层里）。
+# robocopy /L 只遍历不复制；整体限预算 8 分钟，超时剩余项跳过，不拖死开机。
+function Show-TopDirs {
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($base in @('C:\ProgramData', 'C:\Users\runneradmin\AppData\Local')) {
+        if (Test-Path -LiteralPath $base) {
+            foreach ($d in @(Get-ChildItem -LiteralPath $base -Directory -Force -ErrorAction SilentlyContinue)) {
+                $roots.Add($d.FullName)
+            }
+        }
+    }
+    if (Test-Path -LiteralPath 'C:\Users\runneradmin') {
+        foreach ($d in @(Get-ChildItem -LiteralPath 'C:\Users\runneradmin' -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($d.Name.StartsWith('.')) { $roots.Add($d.FullName) }   # .rustup / .cargo / .gradle / .android
+        }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    $budget = (Get-Date).AddMinutes(8)
+    foreach ($r in $roots) {
+        if ((Get-Date) -gt $budget) { Note "  大目录报告超预算（8 分钟），剩余项跳过"; break }
+        $out = & robocopy.exe $r 'C:\__slim_null__' /L /E /BYTES /NFL /NDL /NJH /NC /NS /NP 2>$null
+        $bytes = 0L
+        foreach ($ln in $out) { if ($ln -match 'Bytes\s*:\s*(\d+)') { $bytes = [long]$matches[1]; break } }
+        if ($bytes -gt 0) { $rows.Add([pscustomobject]@{ GB = [math]::Round($bytes / 1GB, 2); Path = $r }) }
+    }
+    $top = @($rows | Sort-Object GB -Descending | Select-Object -First 15)
+    Say ("瘦身后大目录 Top {0}（供下次补 targets）：" -f $top.Count)
+    foreach ($t in $top) { Say ("  {0,8:N2} GB  {1}" -f $t.GB, $t.Path) }
+}
+try { Show-TopDirs } catch { Note ("大目录报告失败（可忽略）：{0}" -f $_) }
 
 # ---------------------------------------------------------------- 结果
 $usedAfter = Get-UsedPercent 'C'
