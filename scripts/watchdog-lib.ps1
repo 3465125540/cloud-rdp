@@ -286,16 +286,21 @@ function Get-RdpRcloneNetArgs {
     #>
     param(
         [ValidateSet('pull', 'push')][string]$Mode = 'pull',
-        [int]$Transfers = 4,
-        [int]$Checkers = 8,
+        # 2026-10-15：pull 默认并发 4/8 → 8/16。拉取对象是**万级小文件**（快照/数据目录），
+        # 139 WebDAV 的单文件往返延迟才是瓶颈（0.45MB/s 量级）；并发翻倍对海量小文件接近线性提速，
+        # --tpslimit 20 仍然兜着限流。push 保持 4/8 保守值 —— 上传对并发更敏感，历史踩过服务端断连。
+        [int]$Transfers = 8,
+        [int]$Checkers = 16,
         [int]$TpsLimit = 20,
         [int]$Retries = 5,
         [int]$LowLevelRetries = 10
     )
 
+    $xferT = if ($Mode -eq 'pull') { $Transfers } else { 4 }
+    $xferC = if ($Mode -eq 'pull') { $Checkers }  else { 8 }
     $common = @(
-        '--transfers', "$Transfers",
-        '--checkers',  "$Checkers",
+        '--transfers', "$xferT",
+        '--checkers',  "$xferC",
         '--retries',   "$Retries",
         '--low-level-retries', "$LowLevelRetries",
         '--tpslimit',  "$TpsLimit",

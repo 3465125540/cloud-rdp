@@ -85,7 +85,15 @@
     ],
     "_comment_excludePaths": "按「绝对路径前缀」整目录排除（先展开占位符，再做不区分大小写前缀匹配）。比 excludeDirNames 更精准：excludeDirNames 全局按目录名匹配、会误伤同名目录；这里只排除你点名的那个路径。默认空 = 完整抓取，什么都不额外排除。",
     "_comment_excludePaths_example": "例：.workbuddy 实测 4.4GB，其中 logs(713MB)/traces(633MB) 是纯运行日志、还原零价值；若嫌推送慢（139 实测约 0.45MB/s），把这两项加进来可省约 1.35GB / 50 分钟：%RDPUSERPROFILE%\\.workbuddy\\logs、%RDPUSERPROFILE%\\.workbuddy\\traces",
-    "excludePaths": [],
+    "_comment_excludePaths_binaries": "2026-10-15 加入：binaries/logs/traces 全是可再生内容（node/python/PortableGit 运行时 + 运行日志），却是预还原的最大负担——实测 .workbuddy-ai/binaries 单目录占 43% 文件数，万级小文件走 139 WebDAV 单文件往返极慢，预还原常年 1 小时起步、直接吃掉 job 6 小时预算（run 38690076905 就死在预还原被取消）。用户数据（db/storage/sessions/plugins 等）一律不动。",
+      "excludePaths": [
+        "%RDPUSERPROFILE%\\.workbuddy-ai\\binaries",
+        "%RDPUSERPROFILE%\\.workbuddy\\binaries",
+        "%RDPUSERPROFILE%\\.workbuddy-ai\\logs",
+        "%RDPUSERPROFILE%\\.workbuddy\\logs",
+        "%RDPUSERPROFILE%\\.workbuddy-ai\\traces",
+        "%RDPUSERPROFILE%\\.workbuddy\\traces"
+      ],
     "_comment_maxTotalMB": "快照总大小上限（MB）。0 = 不限（本项目按需求设为不限）",
     "maxTotalMB": 0,
     "_comment_tombstones": "显式清理清单：列出的相对路径（相对暂存根，如 files/C/apps/old）会从远端快照删除。用于弥补「大目录用 rclone copy 不删远端」",
@@ -262,6 +270,16 @@
         "path": "%RDPUSERPROFILE%\\AppData\\Local\\GameViewer",
         "required": [ "setting.ini", "setting_guest_anonymous_id.ini" ]
       }
+    ],
+    "_comment_excludePaths": "还原端排除（快照内相对路径；支持 %RDPUSERPROFILE% 占位符，展开后自动转成 files/<盘符>/<路径>）。为什么需要：备份端新加的 files.excludePaths 只影响**新快照**，139 上的老快照仍带着这些大件，不在这里过滤的话每次预还原都要白拉一遍（实测 .workbuddy-ai/binaries 占 43% 文件数 + programs/D/a/cloud-rdp 与数据目录同步重复的 27%）。只放「可再生 / 已由数据目录同步独立拉取」的路径，绝不排用户数据。",
+    "excludePaths": [
+      "%RDPUSERPROFILE%\\.workbuddy-ai\\binaries",
+      "%RDPUSERPROFILE%\\.workbuddy\\binaries",
+      "%RDPUSERPROFILE%\\.workbuddy-ai\\logs",
+      "%RDPUSERPROFILE%\\.workbuddy\\logs",
+      "%RDPUSERPROFILE%\\.workbuddy-ai\\traces",
+      "%RDPUSERPROFILE%\\.workbuddy\\traces",
+      "programs/D/a/cloud-rdp"
     ],
     "_comment_preRestore": "预还原阶段的开关",
     "preRestore": {

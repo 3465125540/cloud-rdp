@@ -3043,6 +3043,34 @@ def main():
           "if ($probe.Verdict -eq 'ENCODING')" in sd_txt
           and "$vKind -eq 'ENCODING'" in pre_txt)
 
+    # ---------------- 预还原提速：job 6 小时预算铁律（run 38690076905 事故） ----------------
+    # 背景：预还原（步骤 8）要拉快照里万级小文件，实测 .workbuddy-ai/binaries 单目录占 43%
+    # 文件数、programs/D/a/cloud-rdp 与数据目录同步重复占 27%，预还原常年 1 小时起步，
+    # 叠加拉数据的 3.5 小时直接吃掉 job 6 小时硬上限 → run 死在预还原被取消
+    # （日志尾部：[watchdog] 看门狗收尾 + The operation was canceled.）。
+    # 修复：备份端 files.excludePaths 砍可再生大件（新快照源头减量）；还原端 restore.excludePaths
+    # 过滤（老快照兼容）；pull 并发 4/8 → 8/16（万级小文件瓶颈是单文件往返延迟）。
+    # 以下断言把「快照必须瘦、还原必须过滤、拉取必须并发」钉死。
+    print("[预还原提速 / job 6h 预算]")
+    import json as _json
+    _cfg = _json.load(open(os.path.join(repo_dir, "scripts", "snapshot-config.json"), encoding="utf-8-sig"))
+    _fex = _cfg["files"].get("excludePaths", [])
+    _rex = _cfg["restore"].get("excludePaths", [])
+    check("T555 备份端 files.excludePaths 砍掉可再生 binaries（源头减量）",
+          any("binaries" in p for p in _fex)
+          and any(".workbuddy" in p for p in _fex))
+    check("T556 还原端 restore.excludePaths 过滤老快照（binaries + 与 sync 重复的 programs/D/a/cloud-rdp）",
+          any("binaries" in p for p in _rex)
+          and any("programs/D/a/cloud-rdp" in p for p in _rex))
+    check("T557 pre-restore / restore-snapshot 两处拉取都应用 restore.excludePaths",
+          "restoreExArgs" in pre_txt and "restoreExArgs" in open(
+              os.path.join(repo_dir, "scripts", "restore-snapshot.ps1"), encoding="utf-8-sig").read()
+          and "@netArgs @restoreExArgs" in pre_txt)
+    _wd = open(os.path.join(repo_dir, "scripts", "watchdog-lib.ps1"), encoding="utf-8-sig").read()
+    check("T558 pull 并发 8/16（小文件瓶颈），push 仍保守 4/8",
+          "[int]$Transfers = 8" in _wd and "[int]$Checkers = 16" in _wd
+          and "if ($Mode -eq 'pull') { $Transfers } else { 4 }" in _wd)
+
     # ---------------- 收尾 ----------------
     httpd.shutdown()
     httpd.server_close()

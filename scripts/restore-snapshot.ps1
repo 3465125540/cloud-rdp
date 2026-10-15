@@ -324,10 +324,25 @@ function Invoke-PullSnapshot {
         try { $wdHandle = Start-RdpConnWatchdog -IntervalSec 60 -FailThreshold 3 } catch { Warn "拉起看门狗失败（可忽略）：$_" }
     }
 
+    # restore.excludePaths：与 pre-restore.ps1 同口径（本脚本被独立调用时也要过滤）。
+    # 详见 pre-restore.ps1 里的说明与 snapshot-config.json 的 _comment_excludePaths。
+    $restoreExArgs = @()
+    foreach ($p in @(Get-Cfg $restoreCfg 'excludePaths' @())) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $s = ([string]$p).Trim()
+        if ($s -match '%RDPUSERPROFILE%') {
+            $prof = if ($env:RDPUSERPROFILE) { $env:RDPUSERPROFILE } else { "C:\Users\$RdpUser" }
+            $s = $s.Replace('%RDPUSERPROFILE%', $prof) -replace '\\', '/'
+            $s = $s -replace '^([A-Za-z]):', 'files/$1'
+        }
+        $s = $s.Trim('/')
+        if ($s) { $restoreExArgs += @('--exclude', "/$s/**") }
+    }
+    if ($restoreExArgs.Count -gt 0) { Say ("还原端排除 {0} 条（restore.excludePaths）" -f [int]($restoreExArgs.Count / 2)) }
     $code = 0
     try {
         for ($i = 1; $i -le $MaxAttempts; $i++) {
-            & $RcloneExe copy $Remote $Stage --update @netArgs
+            & $RcloneExe copy $Remote $Stage --update @netArgs @restoreExArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) { return "OK" }
             if ($code -eq 3 -or $code -eq 4) { return "EMPTY" }   # 远端尚无快照（首次运行）

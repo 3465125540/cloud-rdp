@@ -255,13 +255,31 @@ if ($Pull) {
     }
     # 拉取方向用有限超时：--timeout 0 会把一条僵死连接吊到天亮（rclone 不报错、step 不结束）
     $netArgs = if ($hasWdLib) { @(Get-RdpRcloneNetArgs -Mode pull) } else {
-        @('--timeout','5m','--contimeout','60s','--transfers','4','--checkers','8',
+        @('--timeout','5m','--contimeout','60s','--transfers','8','--checkers','16',
           '--retries','5','--low-level-retries','10','--stats-one-line','-v')
     }
+    # restore.excludePaths：还原端排除（兼容「老快照里还带着、但已判定可再生 / 已由 sync 独立同步」的大件）。
+    # 备份端新加的 files.excludePaths 只影响**新快照**；139 上的老快照仍带着这些目录，
+    # 不在这里过滤的话每次预还原都要白拉一遍 —— 实测 .workbuddy-ai/binaries 单目录占 43% 文件数，
+    # 预还原因此常年 1 小时起步，直接吃掉 job 6 小时预算（run 38690076905 就死在预还原被取消）。
+    # 条目 = 快照内相对路径（支持 %RDPUSERPROFILE%，展开后转成 files/<盘符>/<路径>）。
+    $restoreExArgs = @()
+    foreach ($p in @(Get-Cfg $restoreCfg 'excludePaths' @())) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $s = ([string]$p).Trim()
+        if ($s -match '%RDPUSERPROFILE%') {
+            $prof = if ($env:RDPUSERPROFILE) { $env:RDPUSERPROFILE } else { "C:\Users\$RdpUser" }
+            $s = $s.Replace('%RDPUSERPROFILE%', $prof) -replace '\\', '/'
+            $s = $s -replace '^([A-Za-z]):', 'files/$1'
+        }
+        $s = $s.Trim('/')
+        if ($s) { $restoreExArgs += @('--exclude', "/$s/**") }
+    }
+    if ($restoreExArgs.Count -gt 0) { Say ("还原端排除 {0} 条（restore.excludePaths）" -f [int]($restoreExArgs.Count / 2)) }
     $code = 0
     try {
         for ($i = 1; $i -le 3; $i++) {
-            & $RcloneExe copy $Remote $Stage --update @netArgs
+            & $RcloneExe copy $Remote $Stage --update @netArgs @restoreExArgs
             $code = $LASTEXITCODE
             if ($code -eq 0) { break }
             if ($i -lt 3) { Warn "第 $i/3 次拉取失败（码 $code），8 秒后重试"; Start-Sleep -Seconds 8 }
