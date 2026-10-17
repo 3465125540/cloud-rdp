@@ -1,16 +1,24 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-17T01:37:43.9360403Z",
+  "updated_utc": "2026-10-17T06:12:46.7069133Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
     "owner": "3465125540",
     "repo": "cloud-rdp",
-    "run_id": null,
-    "since": "2026-10-17T01:37:41.2245839Z"
+    "run_id": 38991670693,
+    "since": "2026-10-17T01:37:43Z"
   },
-  "standby": [],
+  "standby": [
+    {
+      "account": "acc-3",
+      "owner": "3465125540",
+      "repo": "cloud-rdp",
+      "run_id": 39003948917,
+      "since": "2026-10-17T04:48:34Z"
+    }
+  ],
   "accounts": [
     {
       "id": "acc-1",
@@ -36,20 +44,20 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_3",
       "token_state": "ok",
-      "alive_count": 0,
-      "running_count": 0,
-      "queued_count": 0,
+      "alive_count": 2,
+      "running_count": 1,
+      "queued_count": 1,
       "total": 20,
       "last_run": {
-        "run_id": 38946042650,
-        "status": "completed",
-        "conclusion": "success",
-        "created_at": "2026-10-16T18:16:23Z",
-        "event": "workflow_dispatch",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/38946042650"
+        "run_id": 39003948917,
+        "status": "pending",
+        "conclusion": "",
+        "created_at": "2026-10-17T04:48:34Z",
+        "event": "schedule",
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/39003948917"
       },
       "note": "",
-      "role": "primary",
+      "role": "standby",
       "repo_visibility": "public",
       "private_minutes": null
     },
@@ -157,12 +165,12 @@
     }
   ],
   "recent_dispatches": {
-    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
     "2gj2y3gf4": "2026-10-12T01:16:13.6446902Z",
-    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "code1969sda": "2026-10-05T15:00:53.7416181Z",
     "3465125540": "2026-10-17T01:37:41.2245839Z",
-    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z"
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
+    "code1969sda": "2026-10-05T15:00:53.7416181Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "code19698fgh": "2026-10-08T01:15:37.5195272Z"
   }
 }
