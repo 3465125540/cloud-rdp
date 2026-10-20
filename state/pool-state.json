@@ -1,22 +1,22 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-20T10:13:37.2241716Z",
+  "updated_utc": "2026-10-20T15:11:16.9315149Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
     "owner": "3465125540",
     "repo": "cloud-rdp",
-    "run_id": 39373080892,
-    "since": "2026-10-20T05:06:09Z"
+    "run_id": 39407208308,
+    "since": "2026-10-20T10:20:12Z"
   },
   "standby": [
     {
       "account": "acc-7",
       "owner": "agsk74432",
       "repo": "cloud-rdp",
-      "run_id": 39384470751,
-      "since": "2026-10-20T07:07:13Z"
+      "run_id": null,
+      "since": "2026-10-20T15:11:10.5914345Z"
     }
   ],
   "accounts": [
@@ -49,12 +49,12 @@
       "queued_count": 0,
       "total": 20,
       "last_run": {
-        "run_id": 39373080892,
+        "run_id": 39407208308,
         "status": "in_progress",
         "conclusion": "",
-        "created_at": "2026-10-20T05:06:09Z",
+        "created_at": "2026-10-20T10:20:12Z",
         "event": "schedule",
-        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/39373080892"
+        "url": "https://github.com/3465125540/cloud-rdp/actions/runs/39407208308"
       },
       "note": "",
       "role": "primary",
@@ -170,14 +170,14 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_7",
       "token_state": "ok",
-      "alive_count": 1,
-      "running_count": 1,
+      "alive_count": 0,
+      "running_count": 0,
       "queued_count": 0,
       "total": 1,
       "last_run": {
         "run_id": 39384470751,
-        "status": "in_progress",
-        "conclusion": "",
+        "status": "completed",
+        "conclusion": "cancelled",
         "created_at": "2026-10-20T07:07:13Z",
         "event": "workflow_dispatch",
         "url": "https://github.com/agsk74432/cloud-rdp/actions/runs/39384470751"
@@ -185,17 +185,17 @@
       "note": "",
       "role": "standby",
       "repo_visibility": "private",
-      "private_minutes": 1
+      "private_minutes": 731
     }
   ],
   "recent_dispatches": {
-    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
-    "agsk74432": "2026-10-20T07:07:08.3855418Z",
-    "2gj2y3gf4": "2026-10-12T01:16:13.6446902Z",
     "code19698fgh": "2026-10-08T01:15:37.5195272Z",
-    "code1969sda": "2026-10-05T15:00:53.7416181Z",
     "3465125540": "2026-10-19T21:30:17.6006770Z",
-    "yc1966asgf": "2026-10-03T05:54:54.6571663Z"
+    "2gj2y3gf4": "2026-10-12T01:16:13.6446902Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "agsk74432": "2026-10-20T15:11:10.5914345Z",
+    "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "code1969sda": "2026-10-05T15:00:53.7416181Z",
+    "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z"
   }
 }
