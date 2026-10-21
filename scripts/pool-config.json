@@ -94,7 +94,7 @@
       "owner": "agsk74432",
       "repo": "cloud-rdp",
       "token_secret": "POOL_TOKEN_7",
-      "enabled": true,
+      "enabled": false,
       "repo_private": true
     }
   ]
