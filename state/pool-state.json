@@ -1,24 +1,16 @@
 {
   "version": 1,
   "pool_id": "cloud-rdp-pool",
-  "updated_utc": "2026-10-25T11:46:03.0356623Z",
+  "updated_utc": "2026-10-25T15:03:59.2235672Z",
   "target_machines": 2,
   "primary": {
     "account": "acc-3",
     "owner": "3465125540",
     "repo": "cloud-rdp",
-    "run_id": 40164177557,
-    "since": "2026-10-25T05:04:09Z"
+    "run_id": null,
+    "since": "2026-10-25T15:03:56.2975808Z"
   },
-  "standby": [
-    {
-      "account": "acc-3",
-      "owner": "3465125540",
-      "repo": "cloud-rdp",
-      "run_id": 40183212695,
-      "since": "2026-10-25T10:03:47Z"
-    }
-  ],
+  "standby": [],
   "accounts": [
     {
       "id": "acc-1",
@@ -44,20 +36,20 @@
       "enabled": true,
       "secret_name": "POOL_TOKEN_3",
       "token_state": "ok",
-      "alive_count": 2,
-      "running_count": 1,
-      "queued_count": 1,
+      "alive_count": 0,
+      "running_count": 0,
+      "queued_count": 0,
       "total": 20,
       "last_run": {
         "run_id": 40183212695,
-        "status": "pending",
-        "conclusion": "",
+        "status": "completed",
+        "conclusion": "failure",
         "created_at": "2026-10-25T10:03:47Z",
         "event": "schedule",
         "url": "https://github.com/3465125540/cloud-rdp/actions/runs/40183212695"
       },
       "note": "",
-      "role": "standby",
+      "role": "primary",
       "repo_visibility": "public",
       "private_minutes": null
     },
@@ -182,13 +174,13 @@
     }
   ],
   "recent_dispatches": {
-    "code1969sda": "2026-10-05T15:00:53.7416181Z",
-    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
     "REPLACE_OWNER_1": "2026-09-22T03:49:04.9130907Z",
-    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
     "yc1966asgf": "2026-10-03T05:54:54.6571663Z",
+    "code19698fgh": "2026-10-08T01:15:37.5195272Z",
     "2gj2y3gf4": "2026-10-12T01:16:13.6446902Z",
-    "3465125540": "2026-10-25T01:10:28.0172986Z",
+    "REPLACE_OWNER_2": "2026-09-22T06:30:10.0700867Z",
+    "3465125540": "2026-10-25T15:03:56.2975808Z",
+    "code1969sda": "2026-10-05T15:00:53.7416181Z",
     "agsk74432": "2026-10-20T22:32:03.1564652Z"
   }
 }
