@@ -1028,7 +1028,7 @@ def main():
 
     # ---------------- 工作台透出「数据/快照恢复状态」 ----------------
     print("[工作台恢复状态]")
-    check("T168 server.py 版本 1.6.17", server.VERSION == "1.6.17", server.VERSION)
+    check("T168 server.py 版本 1.6.18", server.VERSION == "1.6.18", server.VERSION)
     check("T169 存在 read_restore_status()", callable(getattr(server, "read_restore_status", None)))
     check("T170 restore_kind 口径与脚本侧一致",
           (server.restore_kind("OK") == "ok" and server.restore_kind("PARTIAL") == "ok"
@@ -2884,8 +2884,9 @@ def main():
           not _missing, "漏列：%s" % _missing)
     check("T524 env 余量列到 POOL_TOKEN_12（以后加账号不必再改 workflow）",
           "POOL_TOKEN_12: ${{ secrets.POOL_TOKEN_12 }}" in _coord_yml)
-    check("T525 pool-config 里已无 acc-7（owner code1420 是笔误，code1420/cloud-rdp 是 404）",
-          not [a for a in _pc["accounts"] if a.get("id") == "acc-7"])
+    check("T525 pool-config 里 acc-7 若存在必须 disabled（已封号；owner 笔误 code1420 已修正为 agsk74432）",
+          not [a for a in _pc["accounts"]
+               if a.get("id") == "acc-7" and (a.get("enabled") or a.get("owner") == "code1420")])
     check("T526 ★ 面板能说清「Secret 名存在、但协调器取不到值」这个自相矛盾",
           "function tokenStateBadge(ts, note, secretPresent)" in app_txt
           and 'badge("Secret 未生效", "bad")' in app_txt
@@ -2953,7 +2954,7 @@ def main():
 
     # 139 Authorization 过期（真机 2026-10-14 第 5 步失败）—— 预检 / 幂等 / 全量登录
     _alist = open(os.path.join(repo_dir, "scripts", "setup-alist.ps1"), encoding="utf-8-sig").read()
-    check("T539 ★ setup-alist 提前解码 Authorization 判有效期（过期即明确报错，不等 AList 那句晦涩的 storage is already created）",
+    check("T539 ★ setup-alist 提前解码 Authorization 判有效期（过期降级不中断，状态透出 ALIST_AUTH_STATUS / DAYS_LEFT）",
           "function Get-139AuthExpiry" in _alist
           and "authorization has expired" in _alist
           and "139 Authorization 已过期" in _alist
@@ -3070,6 +3071,46 @@ def main():
     check("T558 pull 并发 8/16（小文件瓶颈），push 仍保守 4/8",
           "[int]$Transfers = 8" in _wd and "[int]$Checkers = 16" in _wd
           and "if ($Mode -eq 'pull') { $Transfers } else { 4 }" in _wd)
+
+
+    # ---------------- 139 Authorization 过期降级 + 邮件剩余天数（2026-11-16）----------------
+    _mail = open(os.path.join(repo_dir, "scripts", "send-connection-mail.ps1"), encoding="utf-8-sig").read()
+    _mt = open(os.path.join(repo_dir, ".github", "workflows", "mail-test.yml"), encoding="utf-8").read()
+    _e0 = wf_txt[wf_txt.index("- name: 0e."):wf_txt.index("- name: 0f.")]
+    check("T559 ★ setup-alist 过期不再 throw：写状态 + 跳过 139 存储创建，RDP 照常开机",
+          "function Set-AlistAuthState" in _alist
+          and "ALIST_AUTH_STATUS=$Status" in _alist
+          and "ALIST_AUTH_DAYS_LEFT=$days" in _alist
+          and "$Skip139Storage = $true" in _alist
+          and "if ($Skip139Storage)" in _alist
+          and "RDP 继续开机" in _alist)
+    check("T560 ★ setup-alist 状态机：FULL_LOGIN / EXPIRED / EXPIRING / VALID / UNKNOWN / MISSING 六态",
+          all(("'%s'" % s) in _alist for s in
+              ("FULL_LOGIN", "EXPIRED", "EXPIRING", "VALID", "UNKNOWN", "MISSING"))
+          and "Set-AlistAuthState -Status 'EXPIRED' -DaysLeft $left" in _alist)
+    check("T561 ★ setup-alist 运行时过期兜底：预检 + HTTP catch + 响应分支共 3 处写 EXPIRED 并 exit 0",
+          _alist.count("Set-AlistAuthState -Status 'EXPIRED'") >= 3
+          and "authorization has expired" in _alist
+          and "exit 0" in _alist)
+    check("T562 ★ 连接邮件授权段：显示剩余天数 / 到期 UTC，且不回显 token、密码、Cookie",
+          "function Get-139AuthMailLines" in _mail
+          and "剩余约 $dd 天" in _mail
+          and "已过期约 $dd 天" in _mail
+          and "$expText" in _mail
+          and "$uuLines + $authLines" in _mail
+          and "账号密码全量登录" in _mail)
+    check("T563 ★ windows-rdp 0e 步透传 139 四个 Secret（邮件在 AList 部署之前，须自带授权）",
+          all(("%s: ${{ secrets.%s }}" % (k, k)) in _e0 for k in
+              ("ALIST_139_AUTHORIZATION", "ALIST_139_USERNAME",
+               "ALIST_139_PASSWORD", "ALIST_139_MAIL_COOKIES")))
+    check("T564 ★ mail-test 透传 139 四个 Secret（dry-run 邮件也能验证授权段）",
+          all(("%s: ${{ secrets.%s }}" % (k, k)) in _mt for k in
+              ("ALIST_139_AUTHORIZATION", "ALIST_139_USERNAME",
+               "ALIST_139_PASSWORD", "ALIST_139_MAIL_COOKIES")))
+    check("T565 ★ ENV READY 显示 139 授权状态，EXPIRED 红字说明数据/快照未恢复且无法上传",
+          "$env:ALIST_AUTH_STATUS" in wf_txt
+          and "139 授权" in wf_txt
+          and "本次数据/快照未恢复，新数据也无法上传 139" in wf_txt)
 
     # ---------------- 收尾 ----------------
     httpd.shutdown()

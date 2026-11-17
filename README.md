@@ -90,11 +90,11 @@
 
 > 备用取法：F12 → **Network（网络）** → 筛选 `hcy/file/list` → 请求标头里的 `Authorization`，同样只取 `Basic ` 之后的部分。
 
-> ⚠️ 该 token **约 15 天过期**。过期后第 5 步会报
-> `创建 139 存储失败：failed init storage but storage is already created: ... authorization has expired`。
-> 其中 `storage is already created` 是 AList `CreateStorage` 的**固定包装文案**（它先写库再初始化，初始化失败就套这句），
-> **真因永远是最后那句 `authorization has expired`** —— 且驱动在「已过期」时**不会**自动续期、也不会回退密码登录。
-> `setup-alist.ps1` 现在会**提前解码判有效期**并打印「剩余约 N 天 / 已过期」，不再让你对着这句猜。
+> ⚠️ 该 token **约 15 天过期**。**过期不再让开机失败**（2026-11-16 起）：`setup-alist.ps1` 提前解码判有效期，
+> 已过期时只告警、跳过 139 存储创建，RDP 照常开机；代价是本次数据/快照不恢复、新数据也不上传 139。
+> 状态透出到 `ALIST_AUTH_STATUS` / `ALIST_AUTH_DAYS_LEFT`，**连接邮件**、ENV READY、warning 三处都会显示「已过期约 N 天 / 到期 UTC」。
+> 若仍强行挂载，AList 会报 `创建 139 存储失败：... authorization has expired`（`storage is already created` 是其固定包装文案，真因是最后那句）；驱动在「已过期」时不会自动续期、也不会回退密码登录。
+> 📧 每次开机的连接邮件（0e 步）都会附带「139 云盘授权」段：正常显示剩余天数与到期时间，临期/已过期有醒目提示；只显示状态与时间，不回显凭据本身。
 
 **方案 B（可选，长期免维护）—— 账号密码全量登录**
 
@@ -1816,6 +1816,18 @@ POST 内容正确 / 返回后清标记并提示「已同步到池子」/ 失败�
 **推送守卫闭环**：sync-up / backup-snapshot 守卫 B 拒绝名单加入 `ENCODING`（防空壳覆盖 139）；sync-down / pre-restore 新增 ENCODING 显式分支（按 TRANSIENT 落盘 + 写待重试标记，保活循环自愈重拉）。
 
 **验证**：workbench selftest 新增 T547-T554 钉死上述铁律（全量 648 PASS / 0 FAIL）；mock rclone 功能测试 43/43 全绿——三场景分别验证：正常 UTF-8 输出 → OK；输出全乱码 → 变体反查仍能导航判 OK；乱码 + 非ASCII目标缺失 → ENCODING 拒绝误判 EMPTY。
+### 33. 139 授权过期：从「整台机器起不来」降级为「数据暂缺但 RDP 照常」（v1.6.18）
+
+**事故**（2026-11-16）：`setup-alist.ps1:96` 预检发现 Authorization 已过期 3 天，直接 `throw` → 第 5 步 exit 1 → 后续所有步骤（包括 RDP 连接）全部不执行，整台云机等于没开。代价远大于「暂时没有数据」。
+
+**修复**：
+1. **过期不再中断**：预检只 `Write-Warning` + 置 ` = $true`，跳过 139 存储创建/更新（AList 服务照常起、RDP 照常开）；运行时 AList 报 `authorization has expired`（HTTP catch / 响应分支）同样写状态后 `exit 0`。
+2. **状态透出**：`Set-AlistAuthState` 写 `ALIST_AUTH_STATUS`（FULL_LOGIN / VALID / EXPIRING / EXPIRED / UNKNOWN / MISSING）与 `ALIST_AUTH_DAYS_LEFT`（带符号一位小数）到 `GITHUB_ENV`；ENV READY 汇总显示状态，EXPIRED 打红字「本次数据/快照未恢复，新数据也无法上传 139」。
+3. **邮件显示剩余天数**：0e 步在 AList 部署之前执行，取不到 `GITHUB_ENV`，所以 `send-connection-mail.ps1` 自带 `Get-139AuthExpiry` / `Get-139AuthMailLines` 独立解码 Authorization，正文新增「139 云盘授权」段：正常显示剩余天数与到期 UTC，临期/已过期醒目提示，三件套齐全显示全量登录模式。**只输出状态与时间，绝不回显 token / 密码 / Cookie**。
+4. **workflow 透传**：windows-rdp.yml 0e 步与 mail-test.yml 都补上 4 个 139 Secret，dry-run 也能验证授权段。
+
+**验证**：两个 ps1 通过 PSParser 语法检查；selftest 新增 T559-T565，全量 659 PASS / 0 FAIL（同时把 T525 的 acc-7 断言改为「存在即必须 disabled」，适配工作台自动部署）。
+
 
 ## 五、目录结构
 
@@ -1905,7 +1917,7 @@ cloud-rdp/
 | 现象 | 原因 | 解决 |
 |------|------|------|
 | 第 5 步报「创建 139 存储失败：… storage is already created: … authorization has expired」 | 139 `Authorization` 已过期（`storage is already created` 是 AList 固定包装文案，真因是最后那句） | 重新获取 Authorization（只取 `Basic ` 后那段）更新 Secret；或改用方案 B「账号密码全量登录」（见 ③-4）。脚本现在会**提前**打印「已过期 / 剩余 N 天」 |
-| 第 5 步报「139 Authorization 已过期（… 天）」 | 脚本预检拦下，**没**等 AList 那句晦涩报错 | 同上：更新 Secret 或改用方案 B |
+| 连接邮件提示「139 云盘授权：【已过期】已过期约 N 天」 | 预检已降级：跳过 139 挂载但 RDP 照常开机，数据/快照本次不恢复也不上传 | 更新 Secret 或配齐全量登录三件套后重跑 |
 | 第 5 步报「139 存储请求失败 … already/exist」 | 挂载路径 `/cloudrdp` 已被别的存储占用 | 删掉旧存储，或改 `setup-alist.ps1` 里的 `$MountPath`（脚本已自动「存在即更新」，正常不该出现） |
 | 第 5 步报驱动不存在 | AList 版本驱动名不同 | 日志会打印可用驱动列表，改 `setup-alist.ps1` 里的 `$driverKey` |
 | `sync-down` 退出码非 0 | 首次运行远端为空（正常）/ Authorization 过期 | 首次可忽略；否则更新 Secret |
@@ -1998,7 +2010,7 @@ cloud-rdp/
 - **数据目录在 `D:\a\cloud-rdp`**：D 盘是 runner 的临时盘，机器销毁即消失 —— 持久化完全依赖 139，
   所以**务必确认每次运行日志里「数据恢复 / 整机还原」不是 `FAILED`**。
 - **自动重装会跑很久**：402 个包可能几十分钟，期间机器可用但会占带宽/CPU；不想要就把 `install_apps` 填 `false`。
-- **Authorization 约 15 天过期**：需定期手动更新 Secret，否则工作流会在第 5 步失败（脚本现在会**提前**提示剩余天数）。
+- **Authorization 约 15 天过期**：需定期手动更新 Secret；过期不再导致工作流失败，但本次数据/快照不会恢复、新数据也不会上传 139（连接邮件与 ENV READY 会明确提示）。
   想免去每 15 天一手动，可改用方案 B「账号密码全量登录」（见 ③-4）。
 - **额度有限**：私有仓库约 5~6 次满时长会话/月，用完即停（Actions 会**静默停摆、不报错**）。
 - **机器是一次性的**：Job 结束即销毁。已纳入快照的内容（见第四节）可自动还原，其余会丢失。

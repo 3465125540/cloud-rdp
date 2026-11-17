@@ -527,6 +527,11 @@ jobs:
           MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_CC: ${{ secrets.MAIL_CC }}
+          # 139 授权：0e 早于 AList 部署，邮件脚本自己解码 Authorization 算剩余天数
+          ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
+          ALIST_139_USERNAME: ${{ secrets.ALIST_139_USERNAME }}
+          ALIST_139_PASSWORD: ${{ secrets.ALIST_139_PASSWORD }}
+          ALIST_139_MAIL_COOKIES: ${{ secrets.ALIST_139_MAIL_COOKIES }}
         run: |
           # 账号密码按用户要求写死在 workflow（明文打印、方便直接取用）。
           # 同时主动发一封到用户邮箱，省得每次去翻 Actions 日志。
@@ -671,6 +676,33 @@ jobs:
           Write-Host "  Username     : $env:RDP_USER" -ForegroundColor Yellow
           Write-Host "  Password     : $env:RDP_PASSWORD" -ForegroundColor Yellow
           Write-Host "  开机总耗时   : $totalMin 分钟（其中拿到 IP 后 $afterIpMin 分钟用于初始化）" -ForegroundColor DarkGray
+          # ---- 139 云盘授权（setup-alist 写入 GITHUB_ENV；EXPIRED 时数据/快照都不会恢复）----
+          $authSt = [string]$env:ALIST_AUTH_STATUS
+          if (-not [string]::IsNullOrWhiteSpace($authSt)) {
+            $authDays = [string]$env:ALIST_AUTH_DAYS_LEFT
+            $authAbs = $authDays
+            try { $authAbs = ([math]::Abs([double]$authDays)).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture) } catch { }
+            $ac = switch ($authSt) {
+              'FULL_LOGIN' { 'Green' }
+              'VALID'      { 'Green' }
+              'EXPIRING'   { 'Yellow' }
+              'EXPIRED'    { 'Red' }
+              default      { 'DarkGray' }
+            }
+            $authNote = switch ($authSt) {
+              'FULL_LOGIN' { '（账号密码全量登录，AList 自动续期）' }
+              'VALID'      { "（剩余约 $authDays 天）" }
+              'EXPIRING'   { "（临期：仅剩约 $authDays 天，尽快更新 Secret）" }
+              'EXPIRED'    { "（已过期约 $authAbs 天）" }
+              'UNKNOWN'    { '（无法解析有效期，请检查 Secret 格式）' }
+              'MISSING'    { '（未配置凭据）' }
+              default      { '' }
+            }
+            Write-Host "  139 授权      : $authSt   $authNote" -ForegroundColor $ac
+            if ($authSt -eq 'EXPIRED') {
+              Write-Host "  !! 139 授权已过期：本次数据/快照未恢复，新数据也无法上传 139；RDP 照常可用 !!" -ForegroundColor Red
+            }
+          }
           # ---- 数据/快照恢复状态：优先读 _state\restore-status.json（带 reason），env 作兜底 ----
           $dataSt = [string]$env:RESTORE_STATUS
           $dataRs = [string]$env:RESTORE_REASON

@@ -13,6 +13,9 @@
     TS_IP         Tailscale IP（由 workflow 第 0c 步写入）
     RDP_USER      用户名
     RDP_PASSWORD  密码
+    ALIST_139_AUTHORIZATION / ALIST_139_USERNAME / ALIST_139_PASSWORD / ALIST_139_MAIL_COOKIES
+                  → 仅用于邮件里的「139 授权剩余 N 天 / 全量登录模式」；
+                    绝不输出 token、密码、Cookie 或解码原文。
   其余 MAIL_* 由 send-mail.ps1 自己读。
   退出码：始终 0 —— 连接信息已在日志明文打印（可直接取用），邮件失败不算错误；
           真正的配置问题（认证失败等）仍会写 MAIL_RESULT=FAIL:*，由第 13 步汇总展示。
@@ -25,6 +28,11 @@ param(
     [string]$User = $env:RDP_USER,
     [string]$Pass = $env:RDP_PASSWORD,
     [string]$Elapsed = '',
+    # 139 授权信息：只用于在邮件里显示「剩余 N 天 / 全量登录模式」，绝不输出 token 本身
+    [string]$Authorization = $env:ALIST_139_AUTHORIZATION,
+    [string]$FullLoginUser = $env:ALIST_139_USERNAME,
+    [string]$FullLoginPass = $env:ALIST_139_PASSWORD,
+    [string]$FullLoginCook = $env:ALIST_139_MAIL_COOKIES,
     # 诊断日志：0e 步带 continue-on-error，失败会被静默吞掉 —— 落盘才查得到原因
     [string]$LogPath = '',
     [switch]$DryRun
@@ -67,6 +75,91 @@ try {
     }
 } catch { }
 
+# ── 139 云盘授权（剩余天数 / 全量登录状态）────────────────────────────────────
+# 为什么邮件里要算：0e 步在「部署 AList」之前执行，此时 setup-alist.ps1 还没跑、
+# GITHUB_ENV 里的 ALIST_AUTH_STATUS 尚不存在 —— 只能自己解码 Authorization。
+# 只输出状态/剩余时间，绝不输出 token、密码、Cookie 或解码后的原文。
+function Get-139AuthExpiry([string]$Auth) {
+    if ([string]::IsNullOrWhiteSpace($Auth)) { return $null }
+    try { $dec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Auth.Trim())) }
+    catch { return $null }
+    $parts = $dec -split ':'
+    if ($parts.Count -lt 3) { return $null }
+    $seg = $parts[2] -split '\|'
+    if ($seg.Count -lt 4) { return $null }
+    $ms = 0L
+    if (-not [long]::TryParse($seg[3], [ref]$ms)) { return $null }
+    if ($ms -le 0) { return $null }
+    try { return [DateTimeOffset]::FromUnixTimeMilliseconds($ms) } catch { return $null }
+}
+
+function Get-139AuthMailLines {
+    param(
+        [string]$Authorization,
+        [string]$FullLoginUser,
+        [string]$FullLoginPass,
+        [string]$FullLoginCook,
+        [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
+    )
+    $missingFull = @()
+    if ([string]::IsNullOrWhiteSpace($FullLoginUser)) { $missingFull += 'ALIST_139_USERNAME' }
+    if ([string]::IsNullOrWhiteSpace($FullLoginPass)) { $missingFull += 'ALIST_139_PASSWORD' }
+    if ([string]::IsNullOrWhiteSpace($FullLoginCook)) { $missingFull += 'ALIST_139_MAIL_COOKIES' }
+    $hasAny = (-not [string]::IsNullOrWhiteSpace($FullLoginUser)) -or
+              (-not [string]::IsNullOrWhiteSpace($FullLoginPass)) -or
+              (-not [string]::IsNullOrWhiteSpace($FullLoginCook))
+
+    # 与 setup-alist.ps1 同口径：三件套完整时旧 Authorization 不参与判断（AList 自愈续期）
+    if ($missingFull.Count -eq 0) {
+        return @(
+            ''
+            '139 云盘授权：'
+            '  模式：账号密码全量登录（由 AList 自动登录/续期，无需手动更新）。'
+        )
+    }
+
+    $lines = @('', '139 云盘授权：')
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    if ([string]::IsNullOrWhiteSpace($Authorization)) {
+        $lines += '  【未读取到凭据】当前步骤没收到 Authorization，全量登录三件套也不完整。'
+        $lines += '  可能是 Secret 未配置，也可能是旧 workflow 尚未透传这些环境变量。'
+    } else {
+        $exp = Get-139AuthExpiry $Authorization
+        if ($null -eq $exp) {
+            $lines += '  【格式异常】无法解析 Authorization 有效期；后续仍会尝试挂载，请检查 Secret 格式。'
+        } else {
+            $leftDays = ($exp - $Now).TotalDays
+            $expText = $exp.ToUniversalTime().ToString("yyyy-MM-dd HH:mm 'UTC'", $culture)
+            if ($leftDays -le 0) {
+                $dd = ([math]::Round([math]::Abs($leftDays), 1)).ToString('0.0', $culture)
+                $lines += "  【已过期】已过期约 $dd 天（到期：$expText）。"
+                $lines += '  本次 RDP 仍会开机，但 139 数据/快照不会恢复、新数据也不会随关机上传。'
+                $lines += '  请更新 ALIST_139_AUTHORIZATION，或配齐全量登录三件套后重跑。'
+            } elseif ($leftDays -lt 15) {
+                $dd = ([math]::Round($leftDays, 1)).ToString('0.0', $culture)
+                $lines += "  【临期】剩余约 $dd 天（到期：$expText）。"
+                $lines += '  请尽快更新 Secret，或配置全量登录三件套（长期免维护）。'
+            } else {
+                $dd = ([math]::Round($leftDays, 1)).ToString('0.0', $culture)
+                $lines += "  本地解析剩余约 $dd 天（到期：$expText）。"
+            }
+        }
+    }
+    if ($hasAny) {
+        $lines += '  全量登录三件套未配齐，缺少：' + ($missingFull -join ', ') + '。'
+    }
+    return $lines
+}
+
+$authLines = @()
+try {
+    $authLines = @(Get-139AuthMailLines -Authorization $Authorization `
+        -FullLoginUser $FullLoginUser -FullLoginPass $FullLoginPass -FullLoginCook $FullLoginCook)
+} catch {
+    Write-Host "[connmail] 139 授权状态解析失败（不影响连接信息）：$($_.Exception.Message)" -ForegroundColor Yellow
+    $authLines = @('', '139 云盘授权：', '  状态解析失败；不影响本次连接信息发送。')
+}
+
 $lines = @(
     'CloudRDP 已开机，现在就能连。'
     ''
@@ -81,7 +174,7 @@ $lines = @(
     '  * 看不到 IP 时，到 https://login.tailscale.com/admin/machines 找 github-rdp-server*'
     '  * 此刻后台仍在初始化（C盘瘦身 / 数据恢复 / 中文环境 / 软件重装），预计 30~60 分钟。'
     '    想用满血环境，等 Actions 日志出现【ENV READY】再登录更稳妥。'
-) + $uuLines + @(
+) + $uuLines + $authLines + @(
     ''
     '-- 由 GitHub Actions 自动发送'
 )

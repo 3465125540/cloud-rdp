@@ -56,7 +56,8 @@ $CloudID       = if ($null -eq $env:ALIST_139_CLOUD_ID) { "" } else { $env:ALIST
 #   "failed init storage but storage is already created: failed init storage: authorization has expired"
 # （"storage is already created" 是 CreateStorage 的固定包装文案，真因永远是最后那句）。
 # 且驱动 refreshToken() 先判 expiration<0 → 直接报错，**不会**续期、也**不会**回退密码登录。
-# 这里提前解码判有效期：已过期就立刻、明确地报错，别等到 AList 那一句。
+# 这里提前解码判有效期：已过期**不再中断开机**（2026-11-16 起）——跳过 139 挂载照常开 RDP，
+# 同时把状态写进 GITHUB_ENV，由连接邮件 / ENV READY / warning 三处醒目提示数据不会恢复。
 function Get-139AuthExpiry([string]$Auth) {
     if ([string]::IsNullOrWhiteSpace($Auth)) { return $null }
     try { $dec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Auth.Trim())) }
@@ -71,39 +72,91 @@ function Get-139AuthExpiry([string]$Auth) {
     return [DateTimeOffset]::FromUnixTimeMilliseconds($ms)
 }
 
-# 可选「账号密码全量登录」：三件套齐全且 authorization 留空时，驱动会自己登录并把新
-# token 回写存储（长期免维护，不再 15 天一手动）。详见 README「139 凭据」。
+function Set-AlistAuthState {
+    <#
+      把 139 授权状态透出到 GITHUB_ENV（供邮件之后的步骤 / ENV READY 汇总 / 保活诊断用）。
+      状态：FULL_LOGIN / VALID / EXPIRING / EXPIRED / UNKNOWN / MISSING
+      DAYS_LEFT 带符号一位小数（过期时为负数，便于判断）；非 VALID/EXPIRING/EXPIRED 时留空。
+      绝不写 Authorization / 密码 / Cookie 本身。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Status,
+        [object]$DaysLeft = $null
+    )
+    if ([string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) { return }
+    $days = ''
+    if ($null -ne $DaysLeft) {
+        try { $days = ([double]$DaysLeft).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture) }
+        catch { $days = '' }
+    }
+    try {
+        @(
+            "ALIST_AUTH_STATUS=$Status"
+            "ALIST_AUTH_DAYS_LEFT=$days"
+        ) | Out-File -LiteralPath $env:GITHUB_ENV -Append -Encoding ascii
+    } catch {
+        Write-Warning "[AList] 写 139 授权状态到 GITHUB_ENV 失败：$($_.Exception.Message)"
+    }
+}
+
+# 可选「账号密码全量登录」：三件套齐全时**优先**走它（不填 authorization，驱动自己登录并把
+# 新 token 回写存储 → 长期免维护，不再 15 天一手动）。详见 README「139 凭据」。
 $FullLoginUser = $env:ALIST_139_USERNAME
 $FullLoginPass = $env:ALIST_139_PASSWORD
 $FullLoginCook = $env:ALIST_139_MAIL_COOKIES
-$UseFullLogin  = (-not [string]::IsNullOrWhiteSpace($FullLoginUser)) -and
-                 (-not [string]::IsNullOrWhiteSpace($FullLoginPass)) -and
-                 (-not [string]::IsNullOrWhiteSpace($FullLoginCook))
+
+$missingFull = @()
+if ([string]::IsNullOrWhiteSpace($FullLoginUser)) { $missingFull += 'ALIST_139_USERNAME' }
+if ([string]::IsNullOrWhiteSpace($FullLoginPass)) { $missingFull += 'ALIST_139_PASSWORD' }
+if ([string]::IsNullOrWhiteSpace($FullLoginCook)) { $missingFull += 'ALIST_139_MAIL_COOKIES' }
+
+$UseFullLogin = ($missingFull.Count -eq 0)
+$HasAnyFullLogin = (-not [string]::IsNullOrWhiteSpace($FullLoginUser)) -or
+                   (-not [string]::IsNullOrWhiteSpace($FullLoginPass)) -or
+                   (-not [string]::IsNullOrWhiteSpace($FullLoginCook))
+$HasPartialFullLogin = $HasAnyFullLogin -and (-not $UseFullLogin)
+
+# 过期**不再中断开机**（真机 2026-11-16：过期 3 天直接 throw，整台机器起不来，代价过大）。
+# $Skip139Storage = 本次跳过 139 存储创建（AList 服务照常起、RDP 照常开），
+# 但数据/快照的恢复与上传都会缺席 —— 必须由邮件 + ENV READY + warning 三处醒目提示。
+$Skip139Storage = $false
+$left = $null
 
 if ($UseFullLogin) {
-    Write-Host "[AList] 139 凭据：账号密码全量登录（authorization 留空，由 AList 自愈续期）"
+    Set-AlistAuthState -Status 'FULL_LOGIN'
+    Write-Host "[AList] 139 凭据：账号密码全量登录（忽略 authorization，由 AList 自动登录/续期）"
 } elseif ([string]::IsNullOrWhiteSpace($Authorization)) {
+    Set-AlistAuthState -Status 'MISSING'
     throw ("缺少 139 凭据。二选一：`n" +
            "  A) 配置 Secret ALIST_139_AUTHORIZATION（浏览器 yun.139.com 的 Authorization，约 15 天过期）；或`n" +
            "  B) 同时配置 ALIST_139_USERNAME + ALIST_139_PASSWORD + ALIST_139_MAIL_COOKIES（长期自愈）。")
 } else {
     $exp = Get-139AuthExpiry $Authorization
     if ($null -eq $exp) {
-        Write-Host "[AList] 警告：无法解析 Authorization 有效期（格式可能异常），仍继续尝试。" -ForegroundColor Yellow
+        Set-AlistAuthState -Status 'UNKNOWN'
+        Write-Host "[AList] 警告：无法解析 Authorization 有效期（格式可能异常），仍继续尝试挂载。" -ForegroundColor Yellow
     } else {
         $left = ($exp - [DateTimeOffset]::UtcNow).TotalDays
         if ($left -le 0) {
-            throw ("139 Authorization 已过期（$([math]::Round($left,1)) 天）—— AList 无法挂载 139 云盘。`n" +
-                   "请重新获取后更新 GitHub Secret ALIST_139_AUTHORIZATION：`n" +
-                   "  浏览器登录 https://yun.139.com/ → F12 → Application → Cookies → yun.139.com`n" +
-                   "  → 复制 Authorization 的值，**只取 'Basic ' 之后那段**（不含 Basic 和空格）。`n" +
-                   "  （要免去每 15 天一手动，见 README「139 凭据」的账号密码全量登录方案。）")
+            Set-AlistAuthState -Status 'EXPIRED' -DaysLeft $left
+            $Skip139Storage = $true
+            $expiredDays = [math]::Round([math]::Abs($left), 1)
+            Write-Warning ("139 Authorization 已过期约 $expiredDays 天 —— 本次跳过 139 挂载，但 RDP 继续开机。" +
+                           "数据与快照不会恢复、新数据也无法上传 139。" +
+                           "请更新 Secret ALIST_139_AUTHORIZATION 后重跑，或配置全量登录三件套" +
+                           "（ALIST_139_USERNAME / ALIST_139_PASSWORD / ALIST_139_MAIL_COOKIES）实现长期自愈。")
         } elseif ($left -lt 15) {
+            Set-AlistAuthState -Status 'EXPIRING' -DaysLeft $left
             Write-Host "[AList] 注意：139 Authorization 仅剩 $([math]::Round($left,1)) 天；AList 运行时每 12h 会自动续期，但请尽快更新 Secret。" -ForegroundColor Yellow
         } else {
+            Set-AlistAuthState -Status 'VALID' -DaysLeft $left
             Write-Host "[AList] 139 Authorization 有效，剩余约 $([math]::Round($left,1)) 天。"
         }
     }
+}
+
+if ($HasPartialFullLogin) {
+    Write-Warning ("[AList] 全量登录三件套未配齐，缺少：" + ($missingFull -join ', ') + "；本次不会启用全量登录。")
 }
 
 function Wait-Http([string]$Url, [int]$TimeoutSec = 90) {
@@ -231,6 +284,10 @@ $kCloud = Resolve-Field @("cloud_id", "CloudID") "cloud_id"
 $kPart  = Resolve-Field @("custom_upload_part_size", "CustomUploadPartSize") "custom_upload_part_size"
 
 # ---------- 5. 创建 / 更新存储（幂等）----------
+if ($Skip139Storage) {
+    Write-Warning "[AList 5/5] Authorization 已确认过期：跳过 139 存储创建/更新；AList 服务保留运行，RDP 开机继续。"
+    exit 0
+}
 # 真机踩坑：同一台机器重跑（或数据目录被还原）时，挂载点已存在 → create 会报
 #   "failed create storage in database"（重复挂载路径）。所以先查列表，存在就 update。
 $addObj = @{}
@@ -281,7 +338,15 @@ $body = $storageObj | ConvertTo-Json -Compress
 try {
     $resp = Invoke-RestMethod -Uri $apiPath -Method Post -Headers @{ Authorization = $token } -Body $body -ContentType "application/json"
 } catch {
-    throw "139 存储请求失败（$apiPath）：$($_.Exception.Message)"
+    $msg = $_.Exception.Message
+    # 预检解析不出有效期（UNKNOWN）时，AList 运行时才暴露过期 —— 同样降级，不中断开机。
+    if ((-not $UseFullLogin) -and ($msg -match 'authorization has expired')) {
+        Set-AlistAuthState -Status 'EXPIRED' -DaysLeft $left
+        Write-Warning ("AList 确认 139 Authorization 已过期：本次不挂载 139，但 RDP 继续开机。" +
+                       "数据/快照不会恢复、新数据也无法上传 139。请更新 Secret 后重跑。")
+        exit 0
+    }
+    throw "139 存储请求失败（$apiPath）：$msg"
 }
 if ($resp.code -ne 200) {
     Write-Host "----- 诊断：可用驱动 -----"
@@ -289,9 +354,10 @@ if ($resp.code -ne 200) {
     Write-Host "----- 诊断：$driverKey 期望字段 -----"
     try { (Invoke-RestMethod -Uri "$BaseUrl/api/admin/driver/info?driver=$driverKey" -Headers @{ Authorization = $token }).data.additional | ConvertTo-Json -Depth 6 } catch {}
     if ("$($resp.message)" -match "authorization has expired") {
-        throw ("创建 139 存储失败：139 Authorization 已过期。`n" +
-               "  更新 GitHub Secret ALIST_139_AUTHORIZATION（浏览器 yun.139.com 的 Authorization，只取 'Basic ' 后那段）后重跑；`n" +
-               "  或改用账号密码全量登录（见 README「139 凭据」）。")
+        Set-AlistAuthState -Status 'EXPIRED' -DaysLeft $left
+        Write-Warning ("AList 确认 139 Authorization 已过期：本次不挂载 139，但 RDP 继续开机。" +
+                       "数据/快照不会恢复、新数据也无法上传 139。请更新 Secret 后重跑，或配置全量登录三件套。")
+        exit 0
     }
     if ("$($resp.message)" -match "already|exist") {
         throw ("创建 139 存储失败：$($resp.message)`n" +

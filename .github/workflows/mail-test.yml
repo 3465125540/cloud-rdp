@@ -77,6 +77,11 @@ jobs:
       MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
       MAIL_TO: ${{ secrets.MAIL_TO }}
       MAIL_CC: ${{ secrets.MAIL_CC }}
+      # 139 授权：让 dry-run 邮件也带「剩余天数」段（0e 步同理）
+      ALIST_139_AUTHORIZATION: ${{ secrets.ALIST_139_AUTHORIZATION }}
+      ALIST_139_USERNAME: ${{ secrets.ALIST_139_USERNAME }}
+      ALIST_139_PASSWORD: ${{ secrets.ALIST_139_PASSWORD }}
+      ALIST_139_MAIL_COOKIES: ${{ secrets.ALIST_139_MAIL_COOKIES }}
       # 自定义验证码（8~16 位、字母+数字都要有）。仓库变量没设就用脚本默认 a1234567。
       CLOUDRDP_UU_CODE: ${{ vars.CLOUDRDP_UU_CODE }}
       # ★ 机器标识：这台是 GitHub 托管运行器，**不是账户 a 的云机**（没接 Tailscale、没建账户 a）。
